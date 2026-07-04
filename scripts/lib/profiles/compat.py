@@ -140,6 +140,14 @@ def classify_hardware_topology(hardware: list[HardwareProfile]) -> TopologyClass
             vram_clusters += 1
 
     if vram_clusters == 1 and len(sms) == 1:
+        # TODO(follow-up): a VRAM+SM-homogeneous rig can still be lane-asymmetric
+        # (e.g. twin 3090s at PCIe x16 + x4), where TP=2 all-reduce bottlenecks on
+        # the slow link. That is not visible here because HardwareProfile is built
+        # from static per-card-model YAML and carries no per-slot negotiated width.
+        # Making this lane-aware needs a runtime PCIe-width probe threaded through
+        # fits()/from_compose_name() + a HOMOGENEOUS_LANE_ASYMMETRIC class/advisory.
+        # For now the launch-time warning lives in preflight_pcie_lane_width
+        # (scripts/preflight.sh); see BENCHMARKS.md (Gen4 x4+x8, -15%) + club-3090#142.
         return TopologyClass.HOMOGENEOUS
     if vram_clusters == 1 and len(sms) > 1:
         return TopologyClass.VRAM_MATCHED_COMPUTE_MISMATCHED

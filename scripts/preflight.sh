@@ -1152,6 +1152,89 @@ preflight_kv_format_hint() {
   return 0
 }
 
+# preflight_pcie_lane_width <compose_file> — soft warning when a multi-card (TP>=2)
+# compose targets a rig whose GPU(s) negotiated a narrow / asymmetric PCIe link.
+#
+# Why: on PCIe-only (no NVLink) rigs, TP's per-layer NCCL all-reduce is GB/s-class
+# traffic bottlenecked to the SLOWEST card's link. A GPU sitting in a physical x4
+# slot (common on consumer boards where the 2nd/3rd x16-length slot is wired x4, or
+# where a populated M.2 steals lanes) throttles every decode step. The launch-time
+# topology classifier (scripts/lib/profiles/compat.py::classify_hardware_topology)
+# keys only on VRAM+SM, so it labels an x16+x4 twin-3090 rig "homogeneous → TP=2
+# optimal" with no lane awareness. This surfaces the penalty at launch with an
+# actionable single-card / PP pointer. Cross-rig data: BENCHMARKS.md (Gen4 x4+x8
+# measured -15% narr / -14% code) + docs/HARDWARE.md + club-3090#142.
+#
+# report.sh:261-264 has the sibling reactive check (current != max) for its report;
+# this is the proactive launch-time version, gated on a multi-card target.
+#
+# WSL2-safe: uses the per-GPU --query-gpu form (works under WSL2); it never calls
+# `nvidia-smi topo -m` (which fails under WSL2). Warn-only, returns 0.
+# Skip via: PREFLIGHT_NO_PCIE_HINT=1
+preflight_pcie_lane_width() {
+  local compose_file="$1"
+  if [[ "${PREFLIGHT_NO_PCIE_HINT:-0}" == "1" ]]; then
+    return 0
+  fi
+  [[ -f "$compose_file" ]] || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  declare -F compose_meta_get >/dev/null 2>&1 || return 0
+
+  # Only multi-card (TP>=2) composes pay the all-reduce tax; single-card is immune.
+  local tp min_gpu need=0
+  tp="$(compose_meta_get "$compose_file" tensor-parallel || true)"
+  min_gpu="$(compose_meta_get "$compose_file" requires-min-gpu-count || true)"
+  [[ "$tp" =~ ^[0-9]+$ ]] && (( tp > need )) && need="$tp"
+  [[ "$min_gpu" =~ ^[0-9]+$ ]] && (( min_gpu > need )) && need="$min_gpu"
+  (( need >= 2 )) || return 0
+
+  # Per-GPU negotiated PCIe width (WSL2-safe query; topo -m is not used).
+  local width_query selector
+  selector="$(_preflight_selector || true)"
+  width_query="$(nvidia-smi --query-gpu=index,pcie.link.width.current,pcie.link.width.max --format=csv,noheader,nounits 2>/dev/null || true)"
+  [[ -z "$width_query" ]] && return 0
+
+  local idx cur max flag
+  local worst_idx="" worst_cur="" worst_reason=""
+  while IFS=',' read -r idx cur max; do
+    idx="$(_preflight_csv_token "$idx")"
+    cur="$(_preflight_csv_token "$cur")"
+    max="$(_preflight_csv_token "$max")"
+    [[ "$idx" =~ ^[0-9]+$ ]] || continue
+    [[ "$cur" =~ ^[0-9]+$ ]] || continue
+    _preflight_selector_allows_index "$selector" "$idx" || continue
+
+    # Flag a card that (a) negotiated narrower than its OWN capability (asymmetry /
+    # lane-stealing), or (b) sits at an absolutely narrow x4 even if symmetric.
+    flag=""
+    if [[ "$max" =~ ^[0-9]+$ ]] && (( cur < max )); then
+      flag="negotiated x${cur} of x${max} max"
+    elif (( cur < 8 )); then
+      flag="x${cur} lanes"
+    fi
+    [[ -z "$flag" ]] && continue
+
+    # Track the narrowest offender to name it in the warning.
+    if [[ -z "$worst_cur" || "$cur" -lt "$worst_cur" ]]; then
+      worst_cur="$cur"
+      worst_idx="$idx"
+      worst_reason="$flag"
+    fi
+  done <<< "$width_query"
+
+  [[ -z "$worst_idx" ]] && return 0
+
+  echo "[preflight] WARN:  TP=${need} target, but GPU ${worst_idx} is on a narrow PCIe link (${worst_reason})." >&2
+  echo "[preflight]        Without NVLink, TP's per-layer NCCL all-reduce is bottlenecked to the slow lane —" >&2
+  echo "[preflight]        expect ~15% lower decode TPS (cross-rig: Gen4 x4+x8 measured -15% narr / -14% code," >&2
+  echo "[preflight]        BENCHMARKS.md). This is a physical-slot limit, not a config bug." >&2
+  echo "[preflight]        Fix: for solo/single-stream use, a single-card path (vllm/minimal or" >&2
+  echo "[preflight]             vllm/long-text-no-mtp) reclaims the decode TPS the interconnect eats; or try a" >&2
+  echo "[preflight]             PP split (PP=2 TP=1). See docs/HARDWARE.md#note-for-older-host-platforms-pcie-gen-3--older-cpus" >&2
+  echo "[preflight]        Skip this check:  PREFLIGHT_NO_PCIE_HINT=1 bash scripts/switch.sh <variant>" >&2
+  return 0
+}
+
 # autodetect_endpoint — discover the running club-3090 container + its host port.
 #
 # Caller-controlled: the bench / verify scripts default URL=http://localhost:8020

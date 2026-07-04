@@ -406,6 +406,8 @@ If your rig is on **PCIe Gen 3** (rather than Gen 4) **and/or paired with a pre-
 - **Prefer single-card paths**: with interconnect being the bottleneck, `vllm/minimal` (single-card fp8 KV, no MTP) or `vllm/long-text-no-mtp` (single-card TQ3 KV) often beats `dual.yml` on these rigs. You give up max context ceiling but get back the decode TPS the interconnect was eating.
 - **More host RAM** if VM-passthrough: 32+ GB recommended; vLLM uses host RAM for tokenizer staging, paged weight loading, and IPC buffers — VMs with 15 GB total tend to thrash.
 
+> **Auto-surfaced at launch.** When you bring up a multi-card (TP≥2) compose whose GPUs negotiated a **narrow or asymmetric PCIe link** — e.g. a second card wired x4 while the first is x16, or an M.2 stealing lanes — `scripts/switch.sh` now prints a `[preflight]` lane-width warning pointing back here (`preflight_pcie_lane_width`). It reads each card's `pcie.link.width.current` vs `.max` (the WSL2-safe per-GPU query, not `topo -m`) and fires when a selected card is below its own width or below x4. Silence it with `PREFLIGHT_NO_PCIE_HINT=1`.
+
 See [issue #137](https://github.com/noonghunna/club-3090/issues/137) for a worked example: Xeon Gold 6138 + PCIe Gen 3 x16 + 2× 3090 (KVM passthrough) → 32 / 41 TPS on `dual.yml`, vs Ryzen 5950X + Gen 4 + same KV config → 89 / 117 TPS ([@lolren disc #18](https://github.com/noonghunna/club-3090/discussions/18#discussioncomment-16820303)).
 
 ---
