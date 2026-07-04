@@ -9,13 +9,14 @@
 #              the pool — vLLM estimated 28.8K max. ~31-32K reachable at util 0.95.)
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
 #   Status:    🧪 Experimental
-#   Best for:  Solo single-stream use when you want to FREE the second card (run a
-#              different workload on GPU1), or on rigs where TP=2 is genuinely
-#              interconnect-bound. NOTE (measured 2026-07-03, WSL2 x16+x4 rig): on an
-#              x16+x4 no-NVLink rig this TIED dual TP=2 (~46 narr / ~66 code vs dual's
-#              46/62) — the x4 all-reduce tax is offset by dual's 2nd-card bandwidth,
-#              so there is NO speed win here and dual keeps 9x the context. Verify the
-#              win exists on YOUR rig (bench single vs dual) before switching to this.
+#   Best for:  Solo single-stream chat/coding under ~28K ctx — FASTER than dual here.
+#              Measured (canonical bench.sh, updated VBIOS + symmetric ReBAR, 2026-07-04,
+#              WSL2 x16+x4): single 57.8 narr / 80.0 code decode-TPS vs dual TP=2's
+#              54.0 / 67.8 — single wins +7% narr / +18% code because it pays NO x4
+#              all-reduce tax. A firmware memory-bandwidth bump freed decode; the single
+#              card captures it fully while dual stays capped by the x4 interconnect.
+#              Trade-off: ~28K ctx cap vs dual's 262K — use dual for big-context refactors.
+#              (On the PRE-firmware config this was a tie; the VBIOS update opened the gap.)
 # ---------------------------------------------------------------------------
 # Why this variant exists (club-3090#142):
 #   On a PCIe-only rig whose second card sits in a physical x4 slot, TP=2's
