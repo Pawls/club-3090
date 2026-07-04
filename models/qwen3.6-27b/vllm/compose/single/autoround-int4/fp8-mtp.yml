@@ -1,0 +1,163 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Single 3090 (TP=1) — zero cross-card traffic
+#   Drafter:   MTP n=3 (built-in — no separate drafter download)
+#   KV:        fp8_e5m2 (1 byte/token; no TQ3 → avoids the cudagraph cascade bugs)
+#   Vision:    yes
+#   Max ctx:   ~28K at util 0.92 (measured boot ceiling; MTP head + draft KV eat into
+#              the pool — vLLM estimated 28.8K max. ~31-32K reachable at util 0.95.)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#   Best for:  Solo single-stream use when you want to FREE the second card (run a
+#              different workload on GPU1), or on rigs where TP=2 is genuinely
+#              interconnect-bound. NOTE (measured 2026-07-03, WSL2 x16+x4 rig): on an
+#              x16+x4 no-NVLink rig this TIED dual TP=2 (~46 narr / ~66 code vs dual's
+#              46/62) — the x4 all-reduce tax is offset by dual's 2nd-card bandwidth,
+#              so there is NO speed win here and dual keeps 9x the context. Verify the
+#              win exists on YOUR rig (bench single vs dual) before switching to this.
+# ---------------------------------------------------------------------------
+# Why this variant exists (club-3090#142):
+#   On a PCIe-only rig whose second card sits in a physical x4 slot, TP=2's
+#   per-layer NCCL all-reduce is bottlenecked to that ~x4 link and cancels most
+#   of the memory-bandwidth win — a solo/single-stream user often gets MORE
+#   decode TPS from ONE card than from an x4-taxed TP=2 split. The two shipped
+#   single-card composes don't fit that need: `minimal.yml` drops MTP (→ ~32 TPS)
+#   and the MTP single-card path was archived (it used TQ3 KV, which had the
+#   cudagraph-cascade bug). This is the missing combo: TP=1 + fp8 KV + MTP n=3.
+#
+#   Keep the dual TP=2 compose (dual/autoround-int4/fp8-mtp.yml) as the
+#   big-context fallback — it is the only path that shards a >60K one-shot
+#   prefill's activation tensors across both cards. Switch with switch.sh.
+#
+# Variant map (single-card autoround-int4):
+#   Slug                    Ctx    MTP  KV    Vision  Notes
+#   single/minimal          32-65K  no  fp8   —       Debug baseline, no spec-decode
+#   single/fp8-mtp (this)   32K+    ✓   fp8   ✅      Solo fast daily driver ⭐ (experimental)
+#
+# Context ceiling (MEASURED on a 24 GB WSL2 3090, 2026-07-03): 17.5 GB INT4 weights +
+# the MTP head + draft KV + activations leave ~1.74 GiB for KV at util 0.92 → vLLM
+# estimates a ~28.8K max seq len, so the default is 28672. Raising GPU_MEMORY_UTILIZATION
+# toward 0.95 (edit the co-located .env) buys ~31-32K. If you need MORE context than this,
+# there is no free lunch on one card: either drop MTP (single/minimal.yml → more KV room,
+# ~32-65K, but ~32 TPS) or use the dual TP=2 compose (262K, at the x4 all-reduce tax).
+# THIS is the config to check your Part-A Hermes prompt-size measurement against: if your
+# typical prompts fit under ~28-30K, this is your fast daily driver; if not, stay on dual.
+#
+# Run:
+#   cd <repo>/models/qwen3.6-27b/vllm/compose
+#   docker compose -f single/autoround-int4/fp8-mtp.yml up -d
+#   # Hermes: point base_url at http://localhost:8021/v1  (or launch with PORT=8010
+#   # to reuse the dual's port — they are mutually exclusive, never up together).
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-stable
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  vllm-qwen36-27b-single-mtp:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.24.0}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-single-mtp}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8021}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
+      # subsequent boots reuse cached graphs. Shared engine-level cache dir, so
+      # switching single<->dual reuses JIT'd kernels. Closes club-3090 #22.
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+      # froggeric/Qwen-Fixed-Chat-Templates qwen3.6 — fixes 7 default-template
+      # bugs (empty <think></think> spam, </thinking> hallucination, unclosed
+      # think before tool call, no-user-query crash, developer role, etc.).
+      # See docs/UPSTREAM.md "Community templates / model assets".
+      - ../../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # Single-card: pin to the FAST-lane card (GPU 0 = x16 on the asymmetric rig)
+      # so this never lands on the x4 slot. Uncomment / adjust for your layout:
+      # - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      # expandable_segments:True crashes boot on WSL2 (cuMemMap path). The
+      # co-located .env overrides this to :False on this rig — Compose auto-loads
+      # a .env ONLY from the invocation dir, so it must sit next to THIS file
+      # (see CLAUDE.md "Compose layout" — the known .env-location bug).
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # Single card → no NCCL all-reduce, no NVLink detection, no
+        # --disable-custom-all-reduce needed. VLLM_ENFORCE_EAGER=1 in the
+        # co-located .env disables CUDA graphs if graph capture OOMs on WSL2.
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - --served-model-name
+      - qwen3.6-27b
+      - qwen3.6-27b-autoround
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-28672}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - --max-num-seqs
+      - "1"
+      # Small chunked-prefill chunk: on a single 24 GB card the prefill activation
+      # reserve competes directly with the KV pool. 2048 frees room for context
+      # (the tradeoff is marginally slower prefill of very long prompts).
+      - --max-num-batched-tokens
+      - "2048"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8_e5m2}"
+      - --trust-remote-code
+      # froggeric chat-template override (see volumes block + docs/UPSTREAM.md)
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      # MTP spec-decode — the built-in drafter (BF16 mtp.fc preserved in the
+      # checkpoint); this is the TPS lever minimal.yml gives up.
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
