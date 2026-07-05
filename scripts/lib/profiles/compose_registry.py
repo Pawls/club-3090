@@ -321,7 +321,7 @@ COMPOSE_REGISTRY = {
         default_port=8060,
         kvcalc_key="SKIP",
         status="caveats",
-        status_note="Single-GPU default. Launchers inject Anbeeld's official beellama.cpp server-cuda-v0.3.0 image (sm_86/89 = 3090/4090); sm_89 compiled-not-validated on club-3090's 3090-only rig. 5090/sm_120: prefix BEELLAMA_IMAGE=ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397 (sm_120 compiled-not-validated). Usable ctx ceiling 160K (200K OOMs on prefill); ships 102K. DFlash prose is net-positive on tok/s (+27% vs no-spec, re-tested 2026-06-03); the earlier 'prose-DFlash regression' is RETRACTED — it was an AR over-read + wrong baseline (docs/UPSTREAM.md).",
+        status_note="Single-GPU default. Launchers inject the beellama engine pin (Anbeeld's official v0.3.2-preview digest — engines/beellama-local.yml install.spec); sm_86 verified on this rig 2026-07-04 (verify-full all-pass), sm_89 runs the sm_80 cubins. 5090/sm_120: official images build on CUDA 12.4 and carry NO sm_120 (upstream ask Anbeeld#85) — self-build with CUDA_DOCKER_ARCH=120 + CUDA_VERSION=12.8.1 (engine notes have the verified recipe) or the unmaintained v0.3.0-feature-level snapshot ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397. Usable ctx ceiling 160K (200K OOMs on prefill); ships 102K. DFlash prose is net-positive on tok/s (+27% vs no-spec, re-tested 2026-06-03); the earlier 'prose-DFlash regression' is RETRACTED — it was an AR over-read + wrong baseline (docs/UPSTREAM.md).",
     ),
 
     # Qwopus3.6-27B-Coder (Jackrong coder fine-tune of Qwen3.6-27B) — single 3090, Q5_K_M
@@ -615,7 +615,7 @@ COMPOSE_REGISTRY = {
         default_port=8067,
         kvcalc_key="SKIP",
         status="experimental",
-        status_note="Gemma-4-12B Q8_K_XL single-3090 on beellama.cpp (q5_0(K)/q4_1(V) KV, 256K via --override-kv, no spec-dec). NIAH-clean to 246K. Launchers inject Anbeeld's official server-cuda-v0.3.0 image (sm_86). v0.3.0 is a DEV branch → experimental; promote on a stable tag.",
+        status_note="Gemma-4-12B Q8_K_XL single-3090 on beellama.cpp (q5_0(K)/q4_1(V) KV, 256K via --override-kv, no spec-dec). NIAH-clean to 246K. Launchers inject the beellama engine pin (Anbeeld's official v0.3.2-preview digest — engines/beellama-local.yml install.spec; no sm_120 until Anbeeld#85). Preview = rolling pre-release → experimental; promote on a stable tag.",
     ),
     "llamacpp/gemma-12b-single-q8kxl": _entry(
         model="gemma-4-12b", weights_variant="unsloth-q8kxl", workload="fast-chat",
@@ -645,7 +645,7 @@ COMPOSE_REGISTRY = {
         default_port=8061,
         kvcalc_key="SKIP",
         status="caveats",
-        status_note="Single-GPU default — the only viable fast single-card Gemma-4 path on Ampere. Launchers inject Anbeeld's official beellama.cpp server-cuda-v0.3.0 image (sm_86/89 = 3090/4090); sm_89 compiled-not-validated on club-3090's 3090-only rig. 5090/sm_120: prefix BEELLAMA_IMAGE=ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397 (sm_120 compiled-not-validated). DFlash prose is net-positive on tok/s (+28–31% vs no-spec, re-tested 2026-06-03; earlier 'prose regression' RETRACTED — AR over-read + wrong baseline); re-point to mainline llama.cpp#23398 Gemma-4 MTP when it merges — docs/UPSTREAM.md.",
+        status_note="Single-GPU default — the only viable fast single-card Gemma-4 path on Ampere. Launchers inject the beellama engine pin (Anbeeld's official v0.3.2-preview digest — engines/beellama-local.yml install.spec); sm_89 runs the sm_80 cubins. 5090/sm_120: official images build on CUDA 12.4 and carry NO sm_120 (upstream ask Anbeeld#85) — self-build with CUDA_DOCKER_ARCH=120 + CUDA_VERSION=12.8.1 (engine notes) or the unmaintained v0.3.0-feature-level snapshot ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397. DFlash prose is net-positive on tok/s (+28–31% vs no-spec, re-tested 2026-06-03; earlier 'prose regression' RETRACTED — AR over-read + wrong baseline); re-point to mainline llama.cpp#23398 Gemma-4 MTP when it merges — docs/UPSTREAM.md.",
     ),
     # Dual-card beellama Gemma-4 (layer-split, 262K) — PARKED upstream-gated 2026-05-31.
     # Boots + recalls 262K fine, but DFlash spec-dec is broken on multi-GPU in our pinned
@@ -777,7 +777,7 @@ COMPOSE_REGISTRY = {
         default_port=8072,
         kvcalc_key="agents-a1:agents-a1-dual",
         status="caveats",
-        status_note="Agents-A1 FP8-dynamic dual (TP=2) @262K — the agentic thinking-ON specialist. Full gate PASS 2026-07-03 (rebench agents-a1-fp8-dual): verify-full ✓ · bench 154.0/153.8 decode TPS (TTFT ~129ms, CV 0.1%) · verify-stress 8/8 incl. staggered NIAH exact-recall to 240K (91% of 262K, VRAM Δ0 across the ladder) · soak-continuous PASS (0 growth, 0/100 silent-empty, 99.8% retention) · 8-pack OFF 105/150 / ON 110/150 (post benchlocal #79+#81 harness). vs the qwen3.6-35b-a3b incumbent: general capability TIES (ON 110=110), ~13% slower decode (154 vs 178) — but cli-40 thinking-ON 23/40 vs 17/40 (+6, the highest cli-40 on this stack) + toolcall 15/15 (OFF). CAVEATS: (1) hermes-20 REGRESSES with thinking ON (12→9 — genuine model behavior: wrong-path rm -rf claimed as success, duplicate cron; verified not-harness), (2) Ampere = weight-only FP8 (activation quant inert), (3) not a general upgrade — reach for it on tool/CLI-agent work with thinking ENABLED (that's where the 23/40 lives). Vision retained. Dual-only (36 GB weights).",
+        status_note="Agents-A1 FP8-dynamic dual (TP=2) @262K — the agentic thinking-ON specialist. Full gate PASS 2026-07-03 (rebench agents-a1-fp8-dual): verify-full ✓ · bench 154.0/153.8 decode TPS (TTFT ~129ms, CV 0.1%) · verify-stress 8/8 incl. staggered NIAH exact-recall to 240K (91% of 262K, VRAM Δ0 across the ladder) · soak-continuous PASS (0 growth, 0/100 silent-empty, 99.8% retention) · 8-pack OFF 105/150 / ON 110/150 (post benchlocal #79+#81 harness). vs the qwen3.6-35b-a3b incumbent: general capability TIES (ON 110=110), ~13% slower decode (154 vs 178) — but cli-40 thinking-ON 23/40 vs 17/40 (+6, the highest cli-40 on this stack) + toolcall 15/15 (OFF). CAVEATS: (1) hermes-20 REGRESSES with thinking ON (12→9 — genuine model behavior: wrong-path rm -rf claimed as success, duplicate cron; verified not-harness), (2) Ampere = weight-only FP8 (activation quant inert), (3) not a general upgrade — reach for it on tool/CLI-agent work with thinking ENABLED (that's where the 23/40 lives), (4) Blackwell sm_120: upstream v0.24.0 kernel bug crashes boot — uncomment VLLM_TEST_FORCE_FP8_MARLIN=1 in the compose (#548). Vision retained. Dual-only (36 GB weights).",
     ),
 
     # Qwen3.6-40B-Deckard — dense 40B uncensored community merge, llama.cpp dual.

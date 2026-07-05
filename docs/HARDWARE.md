@@ -65,6 +65,29 @@ Same `MAX_MODEL_LEN` / `GPU_MEMORY_UTILIZATION` env overrides apply for any setu
 
 ---
 
+## Arch-aware launcher defaults (#246 Phase 1)
+
+The shipped composes carry **Ampere-safe defaults** (fp8_e5m2 KV etc.). Since [#246](https://github.com/noonghunna/club-3090/issues/246) Phase 1, `launch.sh` / `switch.sh` detect your GPU's compute capability and export the better flag for newer silicon so you don't hand-tune:
+
+| Detected class | What the launchers do |
+|---|---|
+| **ampere** (sm_8.6/8.7) | Nothing — compose defaults apply, byte-for-byte pre-#246 behavior |
+| **ada** (sm_8.9) / **hopper** (sm_9.x) / **blackwell** (sm_10+) | Export `KV_CACHE_DTYPE=fp8_e4m3` for the **pilot slugs** — a **better-precision** FP8 KV format. NB: it's storage-only (≡e5m2 in speed) on consumer cards; native FP8 *attention* is Hopper/datacenter-only. See [DTYPE_MATRIX](DTYPE_MATRIX.md#having-the-tensor-cores--using-them-the-two-axes-that-decide-real-behavior) |
+| unknown / heterogeneous mix / no nvidia-smi | Nothing — compose defaults apply |
+
+Mechanics and boundaries:
+
+- **Pilot slugs only**: `vllm/dual`, `vllm/minimal` — the two Qwen fp8-KV reference configs. Expansion to the rest of the catalog is gated on the cross-rig A/B in #246 (≥15% on either canonical prompt on a volunteer 4090/5090; within CV → the injection framework gets closed out instead).
+- **The injected value comes from the hardware profiles** (`scripts/lib/profiles/hardware/<card>.yml` → `kv_format_default.balanced`) — one source of truth shared with the pull gates and c3. 3090-class profiles declare `fp8_e5m2` there, which equals the compose default: the Ampere no-op is data, not a code branch.
+- **Your env wins**: an explicit `KV_CACHE_DTYPE=…` before `launch.sh`/`switch.sh` suppresses the injection entirely.
+- **Quant-specific KV slugs are never touched** — int8-PTH (compressed-tensors weights *reject* fp8 KV), TurboQuant, and bf16 configs keep their registry KV format.
+- **Direct `docker compose -f … up` bypasses all of this** and keeps the Ampere-safe compose defaults on any card.
+- The preflight banner names the detected class: `[preflight] arch: ada (sm_8.9) — arch-aware KV defaults active for pilot slugs (#246)`.
+- `VLLM_ATTENTION_BACKEND` is plumbed through the same channel but **ships no value** — vLLM's backend auto-detect is the default until someone measures a better per-arch choice.
+- **`nvfp4` KV is DATACENTER-Blackwell-only** (sm_100/sm_103). It needs vLLM's trtllm-gen FP4 FMHA, which has no consumer-Blackwell (sm_120/121) build — so it **crashes on RTX 5090s** even though they run NVFP4 *weights* fine ([vLLM #43562](https://github.com/vllm-project/vllm/issues/43562) / [TRT-LLM #10241](https://github.com/NVIDIA/TensorRT-LLM/issues/10241); confirmed on two 5090s, disc #571). On consumer Blackwell use **fp8_e4m3** KV — the launchers inject it automatically for the pilot slugs.
+
+---
+
 ## NVLink
 
 **Not required.** Dual-card composes auto-detect NVLink and configure themselves accordingly.

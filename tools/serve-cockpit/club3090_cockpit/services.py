@@ -48,6 +48,7 @@ from club3090_tui_core.runner import SubprocessRunner
 
 from .data import (
     ActionPlan,
+    ArtifactInventory,
     BenchRow,
     ByoResult,
     CatalogEntry,
@@ -63,8 +64,10 @@ from .data import (
     EvidenceReport,
     EvidenceTag,
     FitVerdict,
+    GATE_STEPS,
     GpuCompApp,
     GpuConflict,
+    LocalMeasured,
     Measurement,
     MeasuredNumbers,
     MeasureVsBar,
@@ -95,8 +98,6 @@ from .data import (
     compute_promote_scaffold,
     measured_from_internal_json,
     measured_from_report_md,
-    measurement_from_explain_benchmarks,
-    parse_benchmarks_md_for_slug,
     parse_compute_apps,
     parse_df_output,
     parse_docker_ps_id_names,
@@ -803,31 +804,84 @@ class CockpitData:
                 e.fit = FitVerdict(verdict="skip", card=self.card)
 
     async def enrich_measurements(self, entries: list[CatalogEntry]) -> None:
-        # Read BENCHMARKS.md once up front — the per-slug md fallback below is
-        # then a pure in-memory parse (no I/O per slug).
-        bench_md = self._read_benchmarks_md()
-        sem = asyncio.Semaphore(self._ENRICH_CONCURRENCY)
+        """Catalog measured columns from the SHIPPED BASELINE joined into the
+        registry-emit --json contract (catalog-baselines slice 1).
 
-        async def _one(e: CatalogEntry) -> None:
-            # Preferred: structured benchmarks from the explain contract.  The
-            # REAL shape is [{"row","columns"}]; measurement_from_explain_*
-            # parses TPS out of columns[].  Only COMMIT the explain result when
-            # it actually yields a TPS — otherwise an empty benchmarks[] (or a
-            # row that is stress/soak-only) must NOT suppress the markdown
-            # fallback (the `continue`-suppresses-fallback bug this fixes).
-            async with sem:
-                explain, _err = await self.explain(e.slug)
-            if explain and explain.get("benchmarks"):
-                m = measurement_from_explain_benchmarks(explain["benchmarks"])
-                if m.narr_tps is not None or m.code_tps is not None:
-                    e.measurement = m
-                    return
-            # Fallback: coarse BENCHMARKS.md scrape (flagged in source).
-            m = parse_benchmarks_md_for_slug(bench_md or "", e.slug)
-            if m:
-                e.measurement = m
+        Replaces BOTH prior sources: the per-slug ``--explain`` fan-out (the
+        ~4s/slug TPS leg, #439 option-3) and the coarse BENCHMARKS.md scrape —
+        BENCHMARKS.md is the public human/cross-rig ledger, never a machine
+        source.  The baseline dict rides the variant row we already loaded, so
+        this is a pure in-memory map (no I/O, no subprocess).  ``stale`` is the
+        emit-computed pin-staleness verdict (badged).  Slice 2b: the per-rig
+        corpus overlay joins here too — ``local_measurement`` carries THIS
+        RIG's newest gate numbers for the "yours vs the bar" preview line."""
+        local = self.local_measurements()
+        for e in entries:
+            e.local_measurement = local.get(e.slug)
+            b = getattr(e.row, "baseline", None)
+            if not b:
+                continue
+            # Slice 3: a submission-only entry (cross-rig rows, no primary
+            # local row) is NOT the bar — the TPS column stays "—" and the
+            # cross-rig rows surface rig-labeled in the detail panel only.
+            if b.get("narr_tps") is None and b.get("code_tps") is None:
+                continue
+            e.measurement = Measurement(
+                narr_tps=b.get("narr_tps"),
+                code_tps=b.get("code_tps"),
+                quality_8pk=b.get("quality_8pk"),
+                date=str(b.get("date") or ""),
+                source="baseline",
+                stale=b.get("stale"),
+            )
 
-        await asyncio.gather(*(_one(e) for e in entries))
+    def local_measurements(self) -> dict[str, LocalMeasured]:
+        """The per-rig corpus overlay (slice 2b): THIS RIG's newest #249 record
+        per variant slug from results/measurement-records/*.jsonl (written by
+        rebench-full's completion block).  Pure filesystem read; {} when the
+        corpus is empty/absent.
+
+        Newest = the record's _recorded_at stamp when present, else the file's
+        mtime + line order (records append; later lines are later runs)."""
+        base = self.repo_root / "results" / "measurement-records"
+        if not base.is_dir():
+            return {}
+        import datetime as _dt
+
+        best: dict[str, tuple[float, LocalMeasured]] = {}
+        for f in sorted(base.glob("*.jsonl")):
+            try:
+                mtime = f.stat().st_mtime
+                lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for i, ln in enumerate(lines):
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                slug = r.get("_tag")
+                if not slug:
+                    continue
+                stamp = r.get("_recorded_at") or ""
+                try:
+                    ts = _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    ts = mtime + i * 1e-6
+                ext = r.get("measured_extensions") or {}
+                by_ctx = ext.get("decode_tps_by_ctx") or {}
+                decode = next(iter(by_ctx.values()), None)
+                lm = LocalMeasured(
+                    decode_tps=decode,
+                    quality_8pk=ext.get("quality_8pk"),
+                    quality_8pk_think_on=ext.get("quality_8pk_think_on"),
+                    engine_pin=r.get("engine_pin"),
+                    date=(stamp[:10] if stamp
+                          else _dt.date.fromtimestamp(mtime).isoformat()),
+                )
+                if slug not in best or ts > best[slug][0]:
+                    best[slug] = (ts, lm)
+        return {s: lm for s, (ts, lm) in best.items()}
 
     def _read_benchmarks_md(self) -> str:
         path = self.repo_root / "BENCHMARKS.md"
@@ -835,6 +889,41 @@ class CockpitData:
             return path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ""
+
+    def lan_ip(self) -> str:
+        """The rig's LAN IP for user-facing endpoint URLs (F3) — the SAME
+        derivation as the launchers (layer rule, #512 precedence): env LANIP →
+        repo .env `LANIP=` → the shared `c3_lan_ip` helper (subshell-contained;
+        comfyui-paths.sh sets studio paths at source time) → localhost.
+        Cached for the session (the LAN IP doesn't move under a running TUI)."""
+        cached = getattr(self, "_lan_ip_cache", "")
+        if cached:
+            return cached
+        import os
+        import re
+        import subprocess
+        ip = (os.environ.get("LANIP") or "").strip()
+        if not ip:
+            try:
+                m = re.search(
+                    r"^LANIP=(.+)$", (self.repo_root / ".env").read_text(), re.M
+                )
+                if m:
+                    ip = m.group(1).strip()
+            except OSError:
+                pass
+        if not ip:
+            helper = self.repo_root / "services" / "comfyui" / "comfyui-paths.sh"
+            if helper.is_file():
+                try:
+                    ip = subprocess.run(
+                        ["bash", "-c", f". '{helper}' >/dev/null 2>&1; c3_lan_ip"],
+                        capture_output=True, text=True, timeout=5,
+                    ).stdout.strip()
+                except Exception:
+                    ip = ""
+        self._lan_ip_cache = ip or "localhost"
+        return self._lan_ip_cache
 
     # ── READ: explain (Tier-3 detail) ────────────────────────────────────────────
 
@@ -861,6 +950,83 @@ class CockpitData:
         return FitVerdict.from_dict(data, card=card)
 
     # ── READ: BYO check ──────────────────────────────────────────────────────────────
+
+    def _bring_hf_home(self) -> Path:
+        """The HF_HOME the lane's pull.sh runs under: env HF_HOME when set,
+        else the models-disk cache (same convention as run_weights_download —
+        multi-GB staging stays off the root disk).  run_bring_download PINS
+        the child to this value, so probe and download can't diverge."""
+        return Path(
+            os.environ.get("HF_HOME")
+            or (Path(self.weights_model_dir()) / ".cache" / "huggingface")
+        )
+
+    def bring_pull_dir(self, repo: str) -> Path:
+        """The CONTRACT-2 pull dir a brought repo's weights land in
+        (``<hf_home>/club3090/pulls/<sanitized>``).  Mirrors
+        scripts/lib/profiles/downloader.py pull_dir/sanitize_slug — a path
+        COMPUTATION only, no I/O."""
+        s = re.sub(r"[^a-z0-9._-]+", "-", repo.strip().lower())
+        s = re.sub(r"-{2,}", "-", s).strip("-._") or "model"
+        return self._bring_hf_home() / "club3090" / "pulls" / s
+
+    def bring_weights_present(self, repo: str) -> bool:
+        """§2b-6/7 — weights-on-disk probe for a brought repo: the pull dir
+        holds at least one weight blob and no ``.incomplete`` staging tree
+        remains (downloader deletes it on success, leaves none on failure)."""
+        d = self.bring_pull_dir(repo)
+        if not d.is_dir() or (d / ".incomplete").exists():
+            return False
+        try:
+            return any(d.glob("*.safetensors")) or any(d.glob("*.gguf"))
+        except OSError:
+            return False
+
+    async def run_bring_download(
+        self,
+        repo: str,
+        profile_like: str,
+        *,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """§2b-6 — the lane's weights download: the REAL ``pull.sh`` run
+        (Path B: SHA-verified fetch into the pull dir + serve-locally compose
+        emission).  A DISK write, NO GPU claim — the pane's [D] press is the
+        confirm, same discipline as the catalog Download.  Shares the single
+        download runner (one download at a time).  HF_HOME is pinned to the
+        SAME value the presence probe reads.  WIRED-BUT-MOCK-ONLY in tests
+        (conftest blocks the real spawn)."""
+        env = dict(os.environ)
+        env.setdefault("HF_HOME", str(self._bring_hf_home()))
+        if on_line is not None:
+            self._download_runner.set_callbacks(on_line=on_line)
+        return await self._download_runner.start_raw(
+            ["bash", "scripts/pull.sh", repo, "--profile-like", profile_like],
+            env=env,
+            run_type="download",
+            parser=None,
+        )
+
+    async def bring_inspect(self, repo: str) -> ArtifactInventory:
+        """Bring-funnel stage-1 INSPECT (design §2b-1): the deriver's artifact
+        inventory for an HF repo — what formats/quants it carries, BEFORE any
+        engine/template is shown.  READ-only (HF API metadata; never downloads
+        a weight).  A GGUF-only repo comes back as a first-class bring with
+        its variants enumerated; the staged Bring UI reveals nothing
+        template-side until this succeeds."""
+        data, err = await self._run_json(
+            [
+                "python3",
+                "scripts/lib/profiles/deriver.py",
+                "--inventory",
+                repo,
+                "--json",
+            ],
+            timeout=60.0,
+        )
+        if data is None:
+            return ArtifactInventory(repo=repo, error=err or "no output")
+        return ArtifactInventory.from_dict(data)
 
     async def byo_check(self, repo: str, profile_like: str) -> ByoResult:
         """pull.sh <repo> --profile-like <key> --dry-run --json.
@@ -906,10 +1072,12 @@ class CockpitData:
         infos: list[ContainerInfo] = []
         for name, host_port, internal_port, engine, kind in await self._docker_ps_stack_containers():
             slug = ""
+            confidence = ""
             if kind == "engine" and variants:
                 tmp = ServingTarget(container=name, host_port=host_port)
                 tmp = match_target_to_registry(tmp, variants)
                 slug = tmp.slug
+                confidence = tmp.match_confidence
             infos.append(
                 ContainerInfo(
                     name=name,
@@ -918,6 +1086,7 @@ class CockpitData:
                     internal_port=internal_port,
                     engine=engine,
                     slug=slug,
+                    match_confidence=confidence,
                 )
             )
         return infos
@@ -1821,6 +1990,14 @@ class CockpitData:
         active = (report or {}).get("active_estate") or {}
         if active.get("present") and active.get("instances"):
             for inst in active["instances"]:
+                # F7: estate.yml is a desired-state PLAN — only a LIVE instance
+                # is a claim.  running == False means estate_cli probed docker
+                # and the instance's container is NOT up (a leftover plan file
+                # must not fake a stop-conflict on an empty rig).  True / null /
+                # missing (older CLI, or docker unavailable) stay claims — the
+                # gate fails CLOSED on unknown liveness.
+                if inst.get("running", None) is False:
+                    continue
                 inst_gpus = set(inst.get("gpus", []) or [])
                 if inst_gpus & wanted:
                     result.estate_claims.append(inst)
@@ -2685,6 +2862,10 @@ class CockpitData:
             )
             if has_report:
                 et.date, et.tldr = self._scrape_report_meta(report)
+            else:
+                # F10 — no REPORT.md (rebench-full writes it LAST) → the run is
+                # in flight or died mid-run.  Read the live state off the dir.
+                self._evidence_live_read(d, et)
             if not et.date:
                 # mtime fallback (YYYY-MM-DD).
                 import datetime as _dt
@@ -2692,6 +2873,84 @@ class CockpitData:
                 et.date = _dt.datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d")
             tags.append(et)
         return tags
+
+    # F10 — a run with no writes for this long is treated as aborted/orphaned,
+    # not live.  Generous: gate steps stream tee output continuously, but a
+    # single long generation (quality-full at depth) can go quiet for minutes.
+    EVIDENCE_LIVE_AGE_SECS = 600
+
+    def _evidence_live_read(self, d: Path, et: EvidenceTag) -> None:
+        """F10 — fill an EvidenceTag's live-run fields from a report-less tag dir.
+
+        Pure filesystem READ (observer, never executor) so it works identically
+        for CLI-launched (nohup) runs: rebench-full's ``run_step`` tees each
+        step to ``<step>.log`` and records completed steps in ``timings.json``,
+        so the ACTIVE step is the newest step log with no timings entry.  A dir
+        that has gone quiet (> EVIDENCE_LIVE_AGE_SECS) is ``stale`` instead."""
+        try:
+            # Newest write across the dir's top-level artifacts = run liveness.
+            newest = d.stat().st_mtime
+            for f in d.iterdir():
+                try:
+                    m = f.stat().st_mtime
+                except OSError:
+                    continue
+                newest = max(newest, m)
+            et.age_secs = max(0, int(time.time() - newest))
+            # Completed steps ([(name, secs)…] in gate order) from timings.json;
+            # tolerate a mid-rewrite read (record_timing rewrites the file).
+            timings: dict = {}
+            try:
+                timings = json.loads((d / "timings.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                timings = {}
+            et.steps_done = [
+                (s, int(timings[s])) for s in GATE_STEPS if s in timings
+            ] + [(k, int(v)) for k, v in timings.items() if k not in GATE_STEPS]
+            # Active step = the newest <step>.log NOT yet in timings.json.
+            cand: list[tuple[float, str]] = []
+            for s in GATE_STEPS:
+                if s in timings:
+                    continue
+                log = d / f"{s}.log"
+                try:
+                    cand.append((log.stat().st_mtime, s))
+                except OSError:
+                    continue
+            if cand:
+                et.live_step = max(cand)[1]
+            et.live = et.age_secs < self.EVIDENCE_LIVE_AGE_SECS
+            et.stale = not et.live
+            if et.live and et.live_step:
+                et.live_tail = self._evidence_log_tail(d / f"{et.live_step}.log")
+        except OSError:
+            # Unreadable dir — leave the tag as a plain incomplete entry.
+            et.stale = True
+
+    @staticmethod
+    def _evidence_log_tail(log_path: Path, lines: int = 6) -> str:
+        """Last non-empty lines of a step log, ANSI/CR-cleaned for display.
+
+        Step logs carry benchlocal/verify ANSI colors and ``\\r`` progress
+        overdraw; keep only what a terminal would show."""
+        try:
+            with open(log_path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - 4096))
+                raw = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+        raw = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw)
+        out: list[str] = []
+        # Split on \n ONLY (splitlines() would split on \r and resurrect the
+        # progress frames a terminal overdraws).
+        for line in raw.split("\n"):
+            # \r overdraw: a terminal shows only the text after the last CR.
+            line = line.rsplit("\r", 1)[-1].strip()
+            if line:
+                out.append(line)
+        return "\n".join(out[-lines:])
 
     def _scrape_report_meta(self, report_path: Path) -> tuple[str, str]:
         """Pull (date, tldr) from a REPORT.md without importing the generator.
@@ -2755,7 +3014,11 @@ class CockpitData:
     # ── Validate / ④ Measure: producer-measured vs the curated catalog bar (READ) ─
 
     async def measure_vs_bar(
-        self, tag: str, *, variants: Optional[list[VariantRow]] = None
+        self,
+        tag: str,
+        *,
+        variants: Optional[list[VariantRow]] = None,
+        class_hint: str = "",
     ) -> MeasureVsBar:
         """Compare a rebench tag's MEASURED numbers against the curated catalog's
         published bar for the SAME class — "did this config earn catalog-grade?"
@@ -2849,6 +3112,35 @@ class CockpitData:
             model_rows.sort(key=lambda r: 0 if r.source == "corpus" else 1)
             bar = model_rows[0] if model_rows else None
 
+        # Friction #9 (T2): a NEW model has no same-model rows BY DEFINITION —
+        # the lane's primary case.  Fall back to the CLASS bar when the caller
+        # carries ①'s swap_path sibling (a registry slug or a model id).
+        # Labeled, never silent: bar_is_class rides the struct + a caveat.
+        bar_is_class = False
+        class_model = ""
+        if bar is None and measured.model and class_hint and rows:
+            class_model = class_hint
+            for v in variants or []:
+                if getattr(v, "slug", "") == class_hint:
+                    class_model = getattr(v, "model", "") or class_hint
+                    break
+            ckey = _canon_model_key(class_model)
+            crows = [r for r in rows if _bench_row_matches(r, class_model, "")]
+            if not crows and ckey:
+                crows = [r for r in rows if _canon_model_key(r.model) == ckey]
+            if run_engine:
+                eng_rows = [
+                    r for r in crows
+                    if _canon_engine_family(r.engine) == run_engine
+                ]
+                if eng_rows:
+                    crows = eng_rows
+                    engine_resolved = True
+            crows.sort(key=lambda r: 0 if r.source == "corpus" else 1)
+            if crows:
+                bar = crows[0]
+                bar_is_class = True
+
         vsbar = MeasureVsBar(
             tag=tag,
             measured=measured,
@@ -2856,6 +3148,8 @@ class CockpitData:
             bar_source=(bar.source if bar else ""),
             run_engine=run_engine,
             engine_resolved=engine_resolved,
+            bar_is_class=bar_is_class,
+            class_model=class_model if bar_is_class else "",
         )
         if bar is not None:
             # Fix 2 (corpus metric mismatch): a corpus bar's narr_tps is WALL TPS
@@ -2922,9 +3216,19 @@ class CockpitData:
                 )
             else:
                 caveats.append(
-                    f"No curated catalog bar found for model '{vsbar.measured.model}'."
+                    f"No curated catalog bar found for model '{vsbar.measured.model}' "
+                    "— and no sibling class to fall back to. A ① Bring fit-check "
+                    "computes the sibling (swap_path) that enables the class-bar "
+                    "comparison for a NEW model."
                 )
             return caveats
+        # Friction #9: the CLASS bar is a labeled fallback, never a silent swap.
+        if vsbar.bar_is_class:
+            caveats.append(
+                f"CLASS bar: no published bar exists for '{vsbar.measured.model}' — "
+                f"compared against its sibling class '{vsbar.class_model}' "
+                "(①'s swap_path). Read deltas as class-relative, not same-model."
+            )
         # We have a bar — surface WHICH bar was used (engine + topology) so the
         # comparison is legible, then flag every protocol dimension we can't
         # confirm.
@@ -3596,6 +3900,10 @@ def _variant_row_from_dict(d: dict[str, Any]) -> VariantRow:
         object.__setattr__(row, "weights_companions", [str(c) for c in comp])
         object.__setattr__(row, "drafter", str(d.get("drafter") or ""))
         object.__setattr__(row, "vision", bool(d.get("vision")))
+        # Catalog-baselines slice 1: the shipped baseline row joined at
+        # registry-emit (narr/code TPS · 8pk · ctx_validated · provenance ·
+        # computed 'stale') — None when the slug has no accepted row.
+        object.__setattr__(row, "baseline", d.get("baseline") or None)
     except Exception:
         pass
     return row

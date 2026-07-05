@@ -78,6 +78,7 @@ from club3090_tui_core.widgets.live_pane import LivePane
 
 from .data import (
     ActionPlan,
+    ArtifactInventory,
     BenchRow,
     ByoResult,
     CatalogEntry,
@@ -86,6 +87,7 @@ from .data import (
     EstateTelemetry,
     EvidenceReport,
     EvidenceTag,
+    GATE_STEPS,
     Measurement,
     MeasureVsBar,
     OptimizerReport,
@@ -105,6 +107,7 @@ from .data import (
     downgrade_fit_glyph,
     measurement_from_explain_columns,
     parse_ctx_label,
+    variant_quant,
 )
 from .services import CockpitData
 
@@ -221,6 +224,130 @@ def profile_select_options(
     pairs = [(o.label, o.slug) for o in options]
     pairs.append(("✎ custom slug…", PROFILE_CUSTOM_SENTINEL))
     return pairs
+
+
+# ── Bring funnel (design §2b, maintainer UX decisions 2026-07-05) ─────────────
+# §2b-3 — artifact→engine compat is ABSOLUTE: a GGUF pick never sees a vLLM
+# slug; a safetensors repo never sees the llama.cpp family.  Tokens are the
+# _canon_engine_family space (which collapses ik-llama + llamacpp to ONE
+# "llama-cpp" family — both are GGUF engines, so the filter doesn't care;
+# the display label uses the precise switch_engine / slug prefix instead).
+_GGUF_ENGINE_FAMILIES = frozenset({"llama-cpp", "beellama"})
+_SAFETENSORS_ENGINE_FAMILIES = frozenset({"vllm", "sglang"})
+_TOPO_CARDS = {"single": 1, "dual": 2, "multi3": 3, "multi4": 4, "multi8": 8}
+# The weights may claim at most this fraction of a topology's TOTAL VRAM in
+# the DISPLAY filter — KV + runtime overhead need the rest.  Deliberately
+# generous: the funnel only HIDES what clearly cannot fit; borderline stays
+# visible and the real fit-check adjudicates.
+_FUNNEL_WEIGHTS_VRAM_FRAC = 0.90
+
+
+def funnel_slug_options(
+    variants: list["VariantRow"],
+    artifact_format: str,
+    *,
+    artifact_gb: Optional[float] = None,
+    vram_gb: Optional[float] = None,
+    gpu_count: Optional[int] = None,
+) -> list["ProfileOption"]:
+    """§2b-4/5 — the staged Bring funnel's slug options: EVERY catalog variant
+    that passes the artifact→engine compat filter (the filter already shrinks
+    the list, so no representative-collapsing here — distinct from
+    :func:`profile_templates`, which stays the pre-inspect short list), labeled
+    topology-FIRST (``topology/engine/model-quant · serving``) and sorted so
+    all models under the same topology/engine appear together.
+
+    Topology floor (maintainer rule, 2026-07-05): when the selected artifact's
+    size is known, HIDE topologies whose total VRAM can't hold the weights
+    (``artifact_gb > cards × vram_gb × 0.90``) — a 34G Q8 never shows single-
+    card slugs on a 24G card.  One-directional by design: larger topologies
+    are NEVER hidden (running a small quant across more GPUs for KV/concurrency
+    is legitimate).  Topologies needing more cards than the rig has are hidden
+    too.  Unknown sizes/rig → no floor (never guess-hide)."""
+    fams = (
+        _GGUF_ENGINE_FAMILIES if artifact_format == "gguf"
+        else _SAFETENSORS_ENGINE_FAMILIES
+    )
+    raw: list[tuple[str, str, ProfileOption]] = []
+    seen: set[str] = set()
+    for row in variants:
+        slug = (getattr(row, "slug", "") or "").strip()
+        if not slug or slug in seen:
+            continue
+        family = _canon_engine_family(getattr(row, "engine", "") or "")
+        if family not in fams:
+            continue
+        topo = _variant_topology(row) or ""
+        cards = _TOPO_CARDS.get(topo)
+        if cards is not None:
+            if gpu_count is not None and cards > gpu_count:
+                continue  # the rig can't host this topology at all
+            if (
+                artifact_gb is not None
+                and vram_gb is not None
+                and artifact_gb > cards * vram_gb * _FUNNEL_WEIGHTS_VRAM_FRAC
+            ):
+                continue  # weights alone exceed the topology's VRAM — floor
+        seen.add(slug)
+        model = (getattr(row, "model", "") or "").strip() or "—"
+        quant = variant_quant(row) or ""
+        # basename stem ONLY — some registry rows carry a subpath in `file`
+        # (dogfood r2: `dual/piehsoft-q6k/mtp.yml` rendered a duplicated tail)
+        stem = (getattr(row, "file", "") or "").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        # Display engine = the PRECISE token (switch_engine, else the slug's
+        # own prefix) — the canon family is filter-only (it can't tell
+        # ik-llama from llamacpp, which the label must).
+        eng = (
+            (getattr(row, "switch_engine", "") or "").strip()
+            or slug.split("/", 1)[0]
+        )
+        tail = f"{model}-{quant}" if quant else model
+        label = f"{topo or '—'}/{eng}/{tail}"
+        status = (getattr(row, "status", "") or "").strip().lower()
+        raw.append((label, stem, ProfileOption(label=label, slug=slug, topology=topo or "—", status=status)))
+    # §2b dogfood r2 (maintainer): the label is topology/engine/model-quant
+    # ONLY — a serving-stem tail duplicated the path axes and read as a
+    # second slug.  The stem is appended SOLELY to disambiguate genuine
+    # collisions (two slugs sharing all three axes, e.g. fp8-mtp vs turbo).
+    counts: dict[str, int] = {}
+    for label, _stem, _o in raw:
+        counts[label] = counts.get(label, 0) + 1
+    out = [
+        ProfileOption(
+            label=(f"{label}  ·  {stem}" if (counts[label] > 1 and stem) else label),
+            slug=o.slug, topology=o.topology, status=o.status,
+        )
+        for (label, stem, o) in raw
+    ]
+    out.sort(key=lambda o: (_TOPO_ORDER.get(o.topology, 99), o.label))
+    return out
+
+
+def funnel_recommended(
+    options: list["ProfileOption"], defaults: Optional[list[dict]] = None
+) -> Optional[str]:
+    """§2b follow-up (live dogfood 2026-07-05): the funnel surfaces ONE
+    visible recommendation — the old rig-topology default picked a DUAL slug
+    for a 5 GiB gguf on a 2-card rig, which reads as 'the UI wants me on two
+    cards'.  Rule: the SMALLEST fitting topology wins (options are already
+    size-floored + topology-sorted, so that's the first group — the cheapest
+    config that holds the artifact); within it, prefer the registry's own
+    curated default for the (family, topology), else the first functional-
+    status option, else the group's first.  Pure."""
+    if not options:
+        return None
+    topo = options[0].topology
+    group = [o for o in options if o.topology == topo]
+    curated = _curated_default_map(defaults)
+    for o in group:
+        prefix = o.slug.split("/", 1)[0]
+        fam = _canon_engine_family(prefix) or prefix
+        if curated.get((fam, topo)) == o.slug:
+            return o.slug
+    for o in group:
+        if _status_is_functional(o.status):
+            return o.slug
+    return group[0].slug
 
 
 def _curated_default_map(
@@ -591,7 +718,12 @@ class CatalogPane(Container):
     }
     CatalogPane #catalog-preview {
         height: auto;
-        max-height: 6;
+        /* F2 — the border eats 2 rows, so max-height 6 capped content at 4
+           lines and a WRAPPING caveat line clipped (the dual-fast case).
+           8 fits the 3 base lines + a caveat wrapped to 2-3; anything
+           pathological scrolls instead of silently clipping. */
+        max-height: 8;
+        overflow-y: auto;
         border: solid $primary;
         padding: 0 1;
         margin: 0 1;
@@ -646,7 +778,12 @@ class CatalogPane(Container):
         # fit verdict is a pick-the-serve decision input, shown when you ⏎ a row).
         # Fit is STILL computed (it feeds the pop-up + the serving-row exemption);
         # it just no longer occupies a Catalog column.
-        table.add_columns("model", "slug", "topology", "engine", "ctx", "TPS (our rig)", "8pk (our rig)", "status")
+        # F6 — column budget: the money columns (ctx · TPS · 8pk · status) come
+        # RIGHT after the identity (model · slug); topology/engine — largely
+        # redundant with the slug, which encodes both — moved to the tail so a
+        # 120-140-col terminal folds THEM, not the numbers a user picks by.
+        # "(rig)" keeps the our-rig provenance at 4 chars ("our rig" cost 8 more).
+        table.add_columns("model", "slug", "ctx", "TPS (rig)", "8pk (rig)", "status", "topo", "engine")
         # Full enriched catalog, and the current filter substring.
         self._entries: list[CatalogEntry] = []
         self._filter: str = ""
@@ -659,6 +796,8 @@ class CatalogPane(Container):
         # N3: the slug currently live-serving (from the estate's matched_slug),
         # so its Run-catalog row carries a "● serving" badge.  "" → none serving.
         self._serving_slug: str = ""
+        # F9: the match grade for _serving_slug ("identity" | "shape" | "").
+        self._serving_confidence: str = ""
         # A6: live per-GPU free-VRAM (GB) from the last estate poll, used to
         # DOWNGRADE a "● fits-clean" glyph that would actually OOM right now (e.g.
         # GPU0 holding ComfyUI).  None → unknown (the fit column is then labelled
@@ -728,18 +867,26 @@ class CatalogPane(Container):
         serving = (self._serving_slug or "").strip()
         prev_model: Optional[str] = None  # blank-on-repeat → the switch.sh --list grouped look
         for e in rows:
-            # source provenance — flag a coarse markdown scrape so a measurement
-            # from BENCHMARKS.md is never mistaken for a structured record.
-            meas_src = e.measurement.source
+            # Measured columns come from the SHIPPED BASELINE (registry-emit
+            # join) — the BENCHMARKS.md scrape is gone from the catalog path.
+            # Honesty marker: † = the row was measured on an OLDER engine pin
+            # than the slug currently runs (staleness guard §2.2; re-bench
+            # owed — full badge/overlay treatment lands in slice 2).
             tps = e.measurement.tps_label
-            if meas_src == "benchmarks.md" and tps != "—":
-                tps = f"{tps}*"
+            if e.measurement.stale is True and tps != "—":
+                tps = f"{tps}[yellow]†[/yellow]"
             # N3: mark the live-serving row so the running model is visible at a
             # glance in Run.  Driven by the estate's matched_slug.
             slug_cell = e.slug
             is_serving_row = bool(serving and e.slug == serving)
             if is_serving_row:
-                slug_cell = f"[green]●[/green] {e.slug} [green]serving[/green]"
+                if (self._serving_confidence or "") == "shape":
+                    # F9: port/substring match — what's serving merely has this
+                    # row's SHAPE (its port / a name fragment); it is NOT verified
+                    # to BE this slug.  Never claim "serving" for a guess.
+                    slug_cell = f"[yellow]👤[/yellow] {e.slug} [yellow]port in use[/yellow]"
+                else:
+                    slug_cell = f"[green]●[/green] {e.slug} [green]serving[/green]"
             else:
                 # Download UX — a glyph for the on-disk state: ⏳NN% downloading,
                 # ⬇ absent (not downloaded), ⚠ partial.  present/unknown → clean.
@@ -758,12 +905,12 @@ class CatalogPane(Container):
             table.add_row(
                 model_cell,
                 slug_cell,
-                e.topology,
-                e.engine,
                 e.ctx_label or "—",
                 tps,
                 e.measurement.quality_label,
                 _status_glyph(e.status),
+                e.topology,
+                e.engine,
             )
 
         banner = f"[yellow]{self._model_dir_note}[/yellow]  ·  " if self._model_dir_note else ""
@@ -778,8 +925,14 @@ class CatalogPane(Container):
                 f"{banner}{scope}{len(rows)} / {len(self._entries)} variants{tail}{dep_note}"
             )
         else:
-            star = "  ([dim]*[/dim] = BENCHMARKS.md scrape)" if self._has_md_scrape() else ""
-            status_label.update(f"{banner}{len(self._entries)} variants loaded from registry{star}{dep_note}")
+            stale_note = (
+                "  ([yellow]†[/yellow][dim] = measured on an older engine pin — re-bench owed[/dim])"
+                if self._has_stale_baseline()
+                else ""
+            )
+            status_label.update(
+                f"{banner}{len(self._entries)} variants loaded from registry{stale_note}{dep_note}"
+            )
 
         # #9/A8 — keep the preview strip in sync with the cursor after a (re-)render
         # (enrichment mutates fit/measurement in place; the preview must reflect it).
@@ -800,15 +953,22 @@ class CatalogPane(Container):
             except Exception:
                 pass
 
-    def set_serving_slug(self, slug: str) -> None:
+    def set_serving_slug(self, slug: str, confidence: str = "") -> None:
         """N3: set (or clear, with "") the live-serving slug + re-render so the
         Run-catalog row badge stays fresh.  Cheap: only re-renders when the slug
         actually changed (so the periodic Operate poll doesn't churn the Run
-        table on every tick).  Cursor + filter preserved via refresh_enriched."""
+        table on every tick).  Cursor + filter preserved via refresh_enriched.
+
+        F9: ``confidence`` is the match grade ("identity" | "shape" | "") — a
+        shape match renders the row badge as a guess, never as "serving"."""
         new = (slug or "").strip()
-        if new == (self._serving_slug or "").strip():
+        new_conf = (confidence or "").strip()
+        if new == (self._serving_slug or "").strip() and new_conf == (
+            self._serving_confidence or ""
+        ):
             return
         self._serving_slug = new
+        self._serving_confidence = new_conf
         # Re-render only if rows are present (mount-order safe).
         if self._entries:
             self.refresh_enriched()
@@ -832,8 +992,8 @@ class CatalogPane(Container):
         if self._entries:
             self.refresh_enriched()
 
-    def _has_md_scrape(self) -> bool:
-        return any(e.measurement.source == "benchmarks.md" for e in self._entries)
+    def _has_stale_baseline(self) -> bool:
+        return any(e.measurement.stale is True for e in self._entries)
 
     def _filtered_entries(self) -> list[CatalogEntry]:
         # Hide 🗑️ deprecated slugs by default (mirrors `switch.sh --list`); [h] reveals them.
@@ -972,10 +1132,53 @@ class CatalogPane(Container):
             f"  [bold]{entry.slug}[/bold]  [dim]·[/dim]  {entry.engine}"
             f"  [dim]·[/dim]  {_status_glyph(entry.status)} {entry.status or '—'}",
             f"  [bold]fit[/bold]  {fit_line}  [dim]({fit_basis})[/dim]",
-            f"  [bold]ctx[/bold]  {entry.ctx_label or '—'}"
-            f"   [bold]measured[/bold]  {entry.measurement.tps_label} TPS"
-            f"  ·  8pk {entry.measurement.quality_label}",
         ]
+        # Slice 2b — the measured line is the shipped BAR with its provenance;
+        # a stale bar gets an explicit detail line; THIS RIG's newest corpus
+        # record renders as "yours" for the at-a-glance rig-vs-bar read.
+        m = entry.measurement
+        bar_line = (
+            f"  [bold]ctx[/bold]  {entry.ctx_label or '—'}"
+            f"   [bold]bar[/bold]  {m.tps_label} TPS  ·  8pk {m.quality_label}"
+        )
+        b = getattr(entry.row, "baseline", None) or {}
+        if m.source == "baseline" and b:
+            prov = " · ".join(
+                str(x) for x in (b.get("date"), b.get("rig"), b.get("submitted_by")) if x
+            )
+            if prov:
+                bar_line += f"  [dim]({prov})[/dim]"
+        lines.append(bar_line)
+        if m.stale is True and b:
+            lines.append(
+                f"  [yellow]† bar measured on {b.get('engine_pin')} — "
+                f"current pin {b.get('current_pin')}; re-bench owed[/yellow]"
+            )
+        lm = entry.local_measurement
+        if lm is not None:
+            dec = f"{lm.decode_tps:.0f}" if lm.decode_tps is not None else "—"
+            yours = f"  [bold]yours[/bold]  ~{dec} decode"
+            if lm.quality_8pk:
+                yours += f"  ·  8pk {lm.quality_8pk}"
+            if lm.quality_8pk_think_on:
+                yours += f"  [dim]· on {lm.quality_8pk_think_on}[/dim]"
+            yours += f"  [dim]({lm.date} · this rig)[/dim]"
+            lines.append(yours)
+        # Slice 3 — cross-rig submissions: rig-labeled, tier-badged, NEVER
+        # merged into the bar (a 5090 number is not this rig's bar). A
+        # submission-only entry shows bar "—" with only these lines.
+        for rc, s in sorted((b.get("submissions") or {}).items()):
+            n = s.get("narr_tps")
+            c = s.get("code_tps")
+            tps = (f"{n:.0f}" if n is not None else "—") + "/" + (
+                f"{c:.0f}" if c is not None else "—")
+            sub = (
+                f"  [bold]⑂ {rc}[/bold]  {tps} TPS"
+                f"  [dim]({s.get('tier')} · {s.get('date')} · {s.get('submitted_by')})[/dim]"
+            )
+            if s.get("stale") is True:
+                sub += "  [yellow]†[/yellow]"
+            lines.append(sub)
         note = (entry.status_note or "").strip()
         if note:
             lines.append(f"  [bold]caveat[/bold]  [yellow]{note}[/yellow]")
@@ -2066,12 +2269,24 @@ class OperateOrchPane(Container):
             line.update("[dim]○ no model serving[/dim]")
             return
         parts: list[str] = []
+        conf = (getattr(tgt, "match_confidence", "") or "").strip()
         if model:
             parts.append(f"[green]{model}[/green]")
         if slug:
-            parts.append(f"[dim]{slug}[/dim]")
+            if conf == "shape":
+                # F9: port/substring match — the slug is the matched SHAPE, not
+                # the verified identity of what's serving.  Say so.
+                parts.append(f"[yellow]👤[/yellow] [dim]on {slug} shape[/dim]")
+            else:
+                parts.append(f"[dim]{slug}[/dim]")
         if port:
-            parts.append(f"[dim]:{port}[/dim]")
+            # F3: the USABLE endpoint — full LAN URL + auth status, not a bare
+            # port. Same derivation as switch.sh's ready-line (services.lan_ip).
+            try:
+                lan = self.app._data.lan_ip()
+            except Exception:
+                lan = "localhost"
+            parts.append(f"http://{lan}:{port}/v1 [dim]· no auth · \\[u] copy[/dim]")
         elif url:
             parts.append(f"[dim]{url}[/dim]")
         head = "[green]▶[/green] Serving: " + "  ·  ".join(parts)
@@ -2452,7 +2667,12 @@ class OperateContainersPane(Container):
         yield ct
         with TabbedContent(id="drill-tabs"):
             with TabPane("Logs", id="drill-tab-logs"):
-                yield LivePane(id="drill-logs")
+                # F8 — pane-specific idle copy (the shared LivePane default once
+                # leaked test-runner wording into this docker-logs drill).
+                yield LivePane(
+                    id="drill-logs",
+                    placeholder="Select a running container — its docker logs stream here.",
+                )
             with TabPane("Top", id="drill-tab-stats"):
                 yield Static("[dim]highlight a container (move cursor) or press [t] — docker top loads[/dim]", id="drill-stats")
             with TabPane("Config", id="drill-tab-config"):
@@ -2567,7 +2787,9 @@ class OperateContainersPane(Container):
                     c.kind,
                     c.engine or "—",
                     str(c.host_port) if c.host_port else "—",
-                    c.slug or "—",
+                    # F9: badge a port/substring (shape) match — the slug is a
+                    # guess for this container, not a verified identity.
+                    (f"👤 {c.slug}" if getattr(c, "match_confidence", "") == "shape" and c.slug else (c.slug or "—")),
                 )
         # FIX 1 — restore the cursor by key: if the selected container still
         # exists, move to its new index; if it's gone, clamp the OLD index; if the
@@ -2623,7 +2845,12 @@ class OperateContainersPane(Container):
             f"  [bold]Kind[/bold]       {con.kind}",
             f"  [bold]Port[/bold]       {con.host_port or '—'} → {con.internal_port or '—'}",
             f"  [bold]Engine[/bold]     {con.engine or '—'}",
-            f"  [bold]Slug[/bold]       {con.slug or '[dim]unmatched[/dim]'}",
+            f"  [bold]Slug[/bold]       "
+            + (
+                f"👤 {con.slug} [dim](shape match — port/substring, not an exact container)[/dim]"
+                if getattr(con, "match_confidence", "") == "shape" and con.slug
+                else (con.slug or "[dim]unmatched[/dim]")
+            ),
         ]
         if variant is not None:
             lines.append(f"  [bold]Compose[/bold]    [dim]{getattr(variant, 'compose_path', '') or '—'}[/dim]")
@@ -2738,7 +2965,10 @@ class ValidateRunPane(Container):
             id="run-step-preview",
         )
         yield Static(_TUNE_GOTCHAS, id="run-gotchas")
-        yield LivePane(id="run-output")
+        yield LivePane(
+            id="run-output",
+            placeholder="Ready. Launch a validation run (⏎ on a step) — output streams here.",
+        )
         yield Label(
             "[dim]\\[⏎] launch selected (heavy — confirm) · streams below[/dim]",
             id="run-hint",
@@ -3065,11 +3295,45 @@ class DoctorPane(Container):
         body.update("\n".join(lines))
 
 
+def _age_label(secs: int) -> str:
+    """Compact 'how long ago' label for the F10 live/stale evidence rows."""
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def _gate_ladder(et: EvidenceTag) -> str:
+    """F10 — one-line gate ladder for a live/incomplete run.
+
+    ``✓`` done (with duration) · ``▶`` the step running now · ``·`` not yet
+    reached.  Steps rendered positionally from GATE_STEPS; a step that was
+    skipped (--skip/--resume) simply never turns ✓ — the ▶ marker carries the
+    truth of what is actually executing."""
+    done = {s: secs for s, secs in et.steps_done}
+    parts: list[str] = []
+    for s in GATE_STEPS:
+        if s in done:
+            parts.append(f"[green]✓[/green]{s} [dim]{_age_label(int(done[s]))}[/dim]")
+        elif s == et.live_step:
+            parts.append(f"[yellow]▶{s}[/yellow]")
+        else:
+            parts.append(f"[dim]·{s}[/dim]")
+    return "  ".join(parts)
+
+
 class ValidateEvidencePane(Container):
     """Validate / Evidence tab: real ``results/rebench/<tag>/`` run list from
     ``evidence_list()``; ``⏎`` opens the paste-ready report (``evidence_report``)
     in a modal (reuses the history_view pattern), ``s`` stages the gated
-    submit-to-localmaxxing for the selected tag (confirm modal; never auto)."""
+    submit-to-localmaxxing for the selected tag (confirm modal; never auto).
+
+    F10 — doubles as the live gate-run OBSERVER: a tag dir with no REPORT.md is
+    a run in flight (badged ▶, ladder + live tail in the preview, 4s self
+    refresh) or an aborted one (⚠ incomplete).  Renders script-owned artifacts
+    only (timings.json + step logs) — works for CLI-launched runs, never
+    executes anything."""
 
     DEFAULT_CSS = """
     ValidateEvidencePane {
@@ -3128,21 +3392,57 @@ class ValidateEvidencePane(Container):
         t = self.query_one("#evidence-table", DataTable)
         t.add_columns("tag", "date", "report", "internal", "soak", "TL;DR")
         self._tags: list[EvidenceTag] = []
+        # F10 — live gate-run observer: while a run is in flight the list
+        # re-reads itself so the ladder + tail stay fresh (a producer facing a
+        # silent 3-hr gate otherwise assumes a hang).  Paused whenever nothing
+        # is live — populate() resumes/pauses it from the data, so CLI-launched
+        # runs picked up by any refresh start the ticking too.
+        self._live_timer = self.set_interval(4.0, self._live_tick, pause=True)
+
+    def _live_tick(self) -> None:
+        """F10 — periodic re-read while a run is live (READ; observer only)."""
+        try:
+            self.app.load_evidence()  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     def populate(self, tags: list[EvidenceTag]) -> None:
         status = self.query_one("#evidence-status", Label)
         t = self.query_one("#evidence-table", DataTable)
+        saved_row = t.cursor_row  # F10: periodic refresh must not yank the cursor
         t.clear()
         self._tags = list(tags)
+        # F10 — tick only while a run is in flight.
+        try:
+            if any(et.live for et in tags):
+                self._live_timer.resume()
+            else:
+                self._live_timer.pause()
+        except Exception:
+            pass
         if not tags:
             status.update("[dim]no runs under results/rebench/[/dim]")
             t.add_row("[dim]—[/dim]", "—", "—", "—", "—", "—")
             return
         for et in tags:
             yn = lambda b: "[green]✓[/green]" if b else "[dim]·[/dim]"
+            tag_cell = et.tag
             tldr = (et.tldr[:48] + "…") if len(et.tldr) > 49 else (et.tldr or "—")
-            t.add_row(et.tag, et.date or "—", yn(et.has_report), yn(et.has_internal), yn(et.has_soak), tldr)
+            if et.live:
+                # F10 — a run in flight: badge the row + say what's running now.
+                tag_cell = f"[green]▶[/green] {et.tag}"
+                step = et.live_step or "starting"
+                tldr = f"[green]running[/green] — {step} · {len(et.steps_done)}/{len(GATE_STEPS)} steps done"
+            elif et.stale:
+                tag_cell = f"[yellow]⚠[/yellow] {et.tag}"
+                tldr = f"[yellow]incomplete[/yellow] [dim](no REPORT.md · quiet {_age_label(et.age_secs)})[/dim]"
+            t.add_row(tag_cell, et.date or "—", yn(et.has_report), yn(et.has_internal), yn(et.has_soak), tldr)
         status.update(f"{len(tags)} run tag(s) under results/rebench/")
+        try:
+            if t.row_count and saved_row > 0:
+                t.move_cursor(row=min(saved_row, t.row_count - 1), animate=False)
+        except Exception:
+            pass
         # N8 — keep the preview in sync with the cursor after a (re-)populate.
         try:
             self.render_preview(self.selected_tag())
@@ -3169,6 +3469,28 @@ class ValidateEvidencePane(Container):
             return
         from rich.markup import escape
 
+        if tag.live:
+            # F10 — a run in flight: the ladder + the active step's live tail.
+            lines = [
+                f"  [green]▶ RUNNING[/green]  [bold]{escape(tag.tag)}[/bold]"
+                f"  [dim]· last write {_age_label(tag.age_secs)} ago[/dim]",
+                f"  {_gate_ladder(tag)}",
+            ]
+            for tl in (tag.live_tail or "").splitlines()[-4:]:
+                lines.append(f"  [dim]│[/dim] {escape(tl)}")
+            if not tag.live_tail:
+                lines.append("  [dim]│ (no step output yet)[/dim]")
+            body.update("\n".join(lines))
+            return
+        if tag.stale:
+            lines = [
+                f"  [yellow]⚠ INCOMPLETE[/yellow]  [bold]{escape(tag.tag)}[/bold]"
+                f"  [dim]· no REPORT.md · quiet {_age_label(tag.age_secs)}[/dim]",
+                f"  {_gate_ladder(tag)}",
+                "  [dim]aborted or orphaned — re-run with --resume to continue from its artifacts[/dim]",
+            ]
+            body.update("\n".join(lines))
+            return
         yn = lambda b: "[green]✓[/green]" if b else "[dim]·[/dim]"
         lines = [
             f"  [bold]{escape(tag.tag)}[/bold]"
@@ -4101,15 +4423,21 @@ class UntestedComposePreviewScreen(ModalScreen):
 
 
 class LaneBringPane(Container):
-    """① Bring — the producer lane's fit-check entry, and (since the 2-mode merge)
-    the SINGLE bring-an-arbitrary-repo entry point in the app.
+    """① Bring — the producer lane's STAGED artifact-first funnel (design §2b,
+    maintainer UX 2026-07-05), and (since the 2-mode merge) the SINGLE
+    bring-an-arbitrary-repo entry point in the app.
 
-    REUSES ``byo_check`` (pull.sh --dry-run --json → ByoResult: supported? fits?
-    the swap_path route) as the lane's first stage: paste an HF repo / slug,
-    Fit-check, read the route + sibling_slug + quant_match.  (The standalone
-    Run · Bring-your-own tab + its ByoPane were removed in the merge — this pane's
-    widget IDs are the only fit-check widgets now.)  The cached ``_last_byo`` it
-    produces feeds ② Serve and ⑤ Promote."""
+    Staged reveal — nothing template-side shows until the artifact is known:
+      1. repo input + [Inspect] → deriver artifact inventory (READ; a
+         GGUF-only repo is a first-class bring, never unsupported-format);
+      2. GGUF discovered → ALL quant variants presented for the pick FIRST;
+      3. only then the slug Select appears — every catalog option passing the
+         artifact→engine compat filter (GGUF never sees vLLM; safetensors
+         never sees the llama.cpp family), labeled topology-first
+         (``topology/engine/model-quant · serving``), topology-floored by the
+         picked artifact's size vs the rig's VRAM;
+      4. Fit-check (the existing ``byo_check``) → ② Serve / ⑤ Promote arm.
+    The cached ``_last_byo`` it produces feeds ② Serve and ⑤ Promote."""
 
     DEFAULT_CSS = """
     LaneBringPane {
@@ -4121,21 +4449,52 @@ class LaneBringPane(Container):
         margin-bottom: 1;
     }
     LaneBringPane #lane-bring-input-row {
-        height: 3;
+        height: 4;
         margin-bottom: 1;
+    }
+    LaneBringPane #lane-bring-stage2-row {
+        height: 4;
+        margin-bottom: 1;
+    }
+    LaneBringPane .funnel-field {
+        width: auto;
+        height: auto;
+    }
+    LaneBringPane .funnel-field-grow {
+        width: 1fr;
+    }
+    LaneBringPane .funnel-field-title {
+        color: $text-muted;
+        height: 1;
     }
     LaneBringPane #lane-bring-url-input {
         width: 1fr;
     }
+    LaneBringPane #lane-bring-inspect-btn {
+        width: 13;
+        margin-left: 1;
+    }
+    LaneBringPane #lane-bring-gguf-select {
+        width: 36;
+    }
     LaneBringPane #lane-bring-profile-input {
-        width: 40;
+        width: 1fr;
         margin-left: 1;
     }
     LaneBringPane #lane-bring-profile-custom {
         width: 40;
         margin-left: 1;
     }
+    LaneBringPane #lane-bring-slug-card {
+        border: solid $secondary;
+        padding: 0 2;
+        margin-top: 1;
+        height: auto;
+    }
     LaneBringPane .profile-custom-hidden {
+        display: none;
+    }
+    LaneBringPane .funnel-hidden {
         display: none;
     }
     LaneBringPane #lane-bring-fit-btn {
@@ -4148,6 +4507,11 @@ class LaneBringPane(Container):
         margin-top: 1;
         height: auto;
     }
+    LaneBringPane #lane-bring-weights-line {
+        padding: 0 2;
+        margin-top: 1;
+        height: auto;
+    }
     LaneBringPane #lane-bring-hint {
         color: $text-muted;
         margin-top: 1;
@@ -4155,35 +4519,84 @@ class LaneBringPane(Container):
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("① Bring — fit-check an HF model", id="lane-bring-heading")
+        yield Label("① Bring — inspect an HF model", id="lane-bring-heading")
+        # Dogfood r2 (maintainer): every input carries a TITLE — bare
+        # dropdowns read as anonymous fields.  Each field = a Vertical
+        # (title Label + widget); titles toggle WITH their widget.
         with Horizontal(id="lane-bring-input-row"):
-            yield Input(
-                placeholder="org/Model  (e.g. unsloth/Qwen3-27B-abliterated-GGUF)",
-                id="lane-bring-url-input",
-            )
-            # #6/A12 — same registry-derived (engine, topology) template Select as
-            # Run · BYO (populated by set_profile_options after the catalog loads).
-            yield Select(
-                [("vllm/dual  ·  loading templates…", "vllm/dual")],
-                value="vllm/dual",
-                allow_blank=False,
-                id="lane-bring-profile-input",
-            )
-            # FIX 2 (escape hatch) — companion free-text override, hidden until the
-            # "✎ custom slug…" sentinel is chosen (same idiom as Run · BYO).
+            with Vertical(classes="funnel-field funnel-field-grow"):
+                yield Label("HF repo", classes="funnel-field-title")
+                yield Input(
+                    placeholder="org/Model  (e.g. unsloth/Qwen3-27B-abliterated-GGUF)",
+                    id="lane-bring-url-input",
+                )
+            with Vertical(classes="funnel-field"):
+                yield Label(" ", classes="funnel-field-title")
+                yield Button("Inspect", id="lane-bring-inspect-btn", variant="primary")
+        # Stage 2/3 — HIDDEN until Inspect identifies a supported artifact
+        # (§2b-1: no engine/topology/template before the artifact is known).
+        with Horizontal(id="lane-bring-stage2-row", classes="funnel-hidden"):
+            with Vertical(classes="funnel-field"):
+                # §2b-2 — the GGUF quant pick comes BEFORE any slug appears.
+                yield Label(
+                    "GGUF quant",
+                    id="lane-bring-gguf-title",
+                    classes="funnel-field-title funnel-hidden",
+                )
+                yield Select(
+                    [],
+                    prompt="— pick a GGUF quant —",
+                    allow_blank=True,
+                    id="lane-bring-gguf-select",
+                    classes="funnel-hidden",
+                )
+            with Vertical(classes="funnel-field funnel-field-grow"):
+                # §2b-4/5 — the artifact-filtered, topology-first catalog options
+                # (repopulated per inventory/pick by the app; the pre-inspect
+                # template fill is harmless — the row is hidden).
+                yield Label(
+                    "catalog config  (topology/engine/model-quant · ⭐ recommended)",
+                    id="lane-bring-profile-title",
+                    classes="funnel-field-title funnel-hidden",
+                )
+                yield Select(
+                    [("vllm/dual  ·  loading templates…", "vllm/dual")],
+                    value="vllm/dual",
+                    allow_blank=False,
+                    id="lane-bring-profile-input",
+                    classes="funnel-hidden",
+                )
+            # FIX 2 (escape hatch) — companion free-text override, hidden until
+            # the "✎ custom slug…" sentinel is chosen (same idiom as Run · BYO;
+            # untitled — its placeholder is the title, and it must collapse
+            # fully when hidden).
             yield Input(
                 placeholder="profile-like slug — e.g. ik-llama/iq4ks-mtp",
                 id="lane-bring-profile-custom",
                 classes="profile-custom-hidden",
             )
-            yield Button("Fit-check", id="lane-bring-fit-btn", variant="primary")
+            with Vertical(classes="funnel-field"):
+                yield Label(" ", classes="funnel-field-title")
+                yield Button(
+                    "Fit-check",
+                    id="lane-bring-fit-btn",
+                    variant="primary",
+                    classes="funnel-hidden",
+                )
         yield Static(
-            "[dim]Stage ① of the Bring & Validate pipeline.  Enter an HF repo + a\n"
-            "profile-like slug, then Fit-check — pull.sh --dry-run (Path B, never\n"
-            "downloads).  A successful fit-check unlocks ② Serve (generate + serve\n"
-            "the untested compose) and ⑤ Promote.[/dim]",
+            "[dim]Stage ① of the Bring & Validate pipeline.  Enter an HF repo and\n"
+            "Inspect — the deriver enumerates its artifacts (safetensors / GGUF\n"
+            "quants) from HF metadata, never downloading a weight.  The matching\n"
+            "engine/topology slugs appear once the artifact is known; a successful\n"
+            "Fit-check then unlocks ② Serve and ⑤ Promote.[/dim]",
             id="lane-bring-result-card",
         )
+        # Dogfood r2 — the SELECTED SLUG's detail card (ctx / status / port /
+        # drafter / the bar), beside the HF-repo inventory verdict above.
+        yield Static("", id="lane-bring-slug-card", classes="funnel-hidden")
+        # §2b-6/7 — the weights state + download/handoff affordance line
+        # (hidden until a fit-check succeeds).
+        yield Static("", id="lane-bring-weights-line", classes="funnel-hidden")
         yield Label(
             "[dim]Routes:  A = new curated profile   ·   B = serve-locally   ·   "
             "C = reuse a sibling compose + swap weights\n"
@@ -4197,6 +4610,12 @@ class LaneBringPane(Container):
             f"[dim]Checking[/dim] [cyan]{repo}[/cyan] [dim](pull.sh --dry-run --json)…[/dim]"
         )
 
+    def set_inspecting(self, repo: str) -> None:
+        self.query_one("#lane-bring-result-card", Static).update(
+            f"[dim]Inspecting[/dim] [cyan]{repo}[/cyan] "
+            "[dim](deriver --inventory — HF metadata only, no download)…[/dim]"
+        )
+
     def set_profile_options(
         self, options: list[tuple[str, str]], default: Optional[str]
     ) -> None:
@@ -4205,6 +4624,93 @@ class LaneBringPane(Container):
         _set_select_options(
             self.query_one("#lane-bring-profile-input", Select), options, default
         )
+
+    def show_inventory(self, inv: "ArtifactInventory") -> None:
+        """Stage-1 verdict: render the inventory + reveal the matching stage-2
+        widgets.  GGUF → the quant Select (slugs stay hidden until the pick);
+        safetensors → straight to the slug stage (the app repopulates it)."""
+        card = self.query_one("#lane-bring-result-card", Static)
+        row = self.query_one("#lane-bring-stage2-row", Horizontal)
+        gsel = self.query_one("#lane-bring-gguf-select", Select)
+        if inv.error:
+            card.update(f"[red]Inspect failed:[/red] {inv.error}")
+            row.add_class("funnel-hidden")
+            return
+        lines = [f"  [bold]{inv.repo}[/bold]   formats: [cyan]{', '.join(inv.formats) or '—'}[/cyan]"]
+        if inv.has_safetensors:
+            lines.append(
+                f"  [bold]safetensors[/bold]  {inv.safetensors_files} file(s), "
+                f"{inv.safetensors_size_gb:.1f} GiB"
+            )
+        if inv.has_gguf:
+            lines.append(
+                f"  [bold]gguf[/bold]  {len(inv.gguf_variants)} quant(s) discovered — "
+                "pick one below to see the matching slugs"
+            )
+        if inv.gguf_mmproj:
+            lines.append(f"  [dim]mmproj (vision projector): {', '.join(inv.gguf_mmproj)}[/dim]")
+        if inv.lineage_base_model:
+            lines.append(f"  [dim]base_model: {inv.lineage_base_model}[/dim]")
+        card.update("\n".join(lines))
+        row.remove_class("funnel-hidden")
+        gtitle = self.query_one("#lane-bring-gguf-title", Label)
+        if inv.has_gguf:
+            opts = [
+                (f"{v.quant}  ·  {v.size_gb:.1f} GiB" + (f" ({v.parts} parts)" if v.parts > 1 else ""), v.quant)
+                for v in inv.gguf_variants
+            ]
+            # Start BLANK — the pick is the USER's stage-2 decision (§2b-2);
+            # pre-selecting would fire the slug reveal without a genuine pick.
+            try:
+                with gsel.prevent(Select.Changed):
+                    gsel.set_options(opts)
+                    gsel.value = Select.BLANK
+            except Exception:
+                gsel.set_options(opts)
+            gsel.remove_class("funnel-hidden")
+            gtitle.remove_class("funnel-hidden")
+        else:
+            gsel.add_class("funnel-hidden")
+            gtitle.add_class("funnel-hidden")
+
+    def reveal_slug_stage(
+        self, options: list[tuple[str, str]], default: Optional[str]
+    ) -> None:
+        """Stage-3: populate + reveal the artifact-filtered slug Select and the
+        Fit-check button (§2b-3/4/5 — only now do engine/topology slugs show)."""
+        sel = self.query_one("#lane-bring-profile-input", Select)
+        _set_select_options(sel, options, default)
+        sel.remove_class("funnel-hidden")
+        self.query_one("#lane-bring-profile-title", Label).remove_class("funnel-hidden")
+        self.query_one("#lane-bring-fit-btn", Button).remove_class("funnel-hidden")
+
+    def hide_slug_stage(self) -> None:
+        self.query_one("#lane-bring-profile-input", Select).add_class("funnel-hidden")
+        self.query_one("#lane-bring-profile-title", Label).add_class("funnel-hidden")
+        self.query_one("#lane-bring-fit-btn", Button).add_class("funnel-hidden")
+        self.show_slug_details("")
+
+    def show_slug_details(self, markup: str) -> None:
+        """Dogfood r2 — the selected slug's detail card (ctx / status / port /
+        drafter / the bar).  Empty markup hides it."""
+        card = self.query_one("#lane-bring-slug-card", Static)
+        if markup:
+            card.update(markup)
+            card.remove_class("funnel-hidden")
+        else:
+            card.update("")
+            card.add_class("funnel-hidden")
+
+    def set_weights_line(self, markup: str) -> None:
+        """§2b-6/7 — the weights-state / download / handoff line under the
+        verdict card.  Empty markup hides it."""
+        line = self.query_one("#lane-bring-weights-line", Static)
+        if markup:
+            line.update(markup)
+            line.remove_class("funnel-hidden")
+        else:
+            line.update("")
+            line.add_class("funnel-hidden")
 
     def populate(self, res: ByoResult) -> None:
         card = self.query_one("#lane-bring-result-card", Static)
@@ -4472,13 +4978,30 @@ class RailStatus(Static):
             lines.append(f"{bar} GPU{i} {used:.0f}/{total:.0f}G")
         lines.append("")
         if state.matched_slug:
-            lines.append(f"model   {state.matched_slug}")
+            # F9: a port/substring registry match is a SHAPE guess, not a verified
+            # identity — a brought model on a sibling's port masquerades as the
+            # sibling otherwise.  Lead with the PROBED served id + 👤 badge and
+            # demote the slug to "shape"; only an exact-container match may claim
+            # the slug as the identity.
+            _conf = (getattr(state.target, "match_confidence", "") or "") if state.target is not None else ""
+            _served = (getattr(state.target, "model", "") or "").strip() if state.target is not None else ""
+            if _conf == "shape":
+                lines.append(f"model   {_served or state.matched_slug} 👤")
+                if _served:
+                    lines.append(f"[dim]shape   {state.matched_slug}[/dim]")
+            else:
+                lines.append(f"model   {state.matched_slug}")
         elif state.target is not None and getattr(state.target, "model", ""):
             lines.append(f"model   {state.target.model}")
         dr = state.doctor
         if dr.reachable:
             glyph = "[green]●[/green]" if dr.serving else "[yellow]○[/yellow]"
             lines.append(f"{glyph} {dr.summary}")
+            # F3: the endpoint, compactly (the rail is ~30 cols — the FULL URL
+            # lives on the Orchestration serving card; [u] copies it anywhere).
+            _port = getattr(state.target, "host_port", 0) or 0
+            if _port:
+                lines.append(f"[dim]api :{_port}/v1 · \\[u] copy[/dim]")
         elif dr.booting:
             lines.append("[yellow]⏳[/yellow] booting…")
         else:
@@ -4821,6 +5344,7 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("explain", "Explain selected slug", "Catalog — detail + cross-rig benchmarks"),
     ("filter_catalog", "Filter catalog", "Catalog — filter by slug / engine / status"),
     ("toggle_catalog_deprecated", "Show/hide deprecated", "Catalog — reveal 🗑️ deprecated slugs (hidden by default)"),
+    ("copy_endpoint", "Copy the serving API URL", "Run & Operate — copy http://<lan>:<port>/v1 for your agent/client (no auth by default)"),
     ("set_default", "Set default", "Catalog — pin the selected slug as model default"),
     ("clear_default", "Clear default", "Catalog — clear the model default pin"),
     ("optimize_card", "Optimize for my card", "Catalog — v0.10.0 seam (not available yet)"),
@@ -4972,6 +5496,7 @@ class CockpitApp(App):
         Binding("slash", "filter_catalog", "Filter", show=False),
         Binding("backslash", "toggle_catalog_model", "Model", show=False),
         Binding("h", "toggle_catalog_deprecated", "Deprecated", show=False),
+        Binding("u", "copy_endpoint", "API URL", show=False),
         Binding("e", "explain", "Explain", show=False),
         # 2-mode merge: [1] = merged Run & Operate, [2] = Bring & Validate lane.
         Binding("1", "mode_run", "Run & Operate", show=True),
@@ -5008,6 +5533,9 @@ class CockpitApp(App):
         # R3b-2 — producer lane ④ Measure: compare the selected tag's measured
         # numbers to the curated catalog bar (READ · producer-only).
         Binding("m", "measure_vs_bar", "vs catalog bar", show=False),
+        # Funnel §2b-6 — ① Bring: download the fit-checked repo's weights
+        # (pull.sh real run — DISK write, no GPU claim; streams into the pane).
+        Binding("D", "bring_download", "Download weights", show=False),
         # R3b-2 — producer lane: the ~43-min FULL validation battery
         # (report.sh --full) — confirm-gated, bg-streamed, producer-only, uses the
         # serving model (claims no GPU); NEVER auto-fired.
@@ -5164,6 +5692,10 @@ class CockpitApp(App):
         # Merged mode 0 · Catalog tab
         "filter_catalog":   ({0}, {"tab-catalog"}),  # Catalog
         "toggle_catalog_deprecated": ({0}, {"tab-catalog"}),  # Catalog — [h] hide/show deprecated
+        # [u] copy the serving API URL — the endpoint is rig-global, so it's
+        # live on EVERY merged-mode tab (F3; guards inside the action when
+        # nothing is serving).
+        "copy_endpoint":    ({0}, {"tab-catalog", "tab-orchestration", "tab-containers", "tab-doctor"}),
         "explain":          ({0}, {"tab-catalog"}),  # Catalog (guards inside action)
         "set_default":      ({0}, {"tab-catalog"}),  # Catalog
         "clear_default":    ({0}, {"tab-catalog"}),  # Catalog
@@ -5450,6 +5982,9 @@ class CockpitApp(App):
         self._target_slug: str = ""
         self._target_model: str = ""
         self._target_url: str = ""
+        # F9: the slug match GRADE ("identity" | "shape" | "") from the last
+        # estate poll — a shape match must never be presented as an identity.
+        self._target_confidence: str = ""
         # Phase 5: the SHARED ServingTarget OBJECT from the last estate poll —
         # held by identity so the c3t Evaluate hand-off passes the SAME dataclass
         # instance c3t speaks (design §4/§6.6), not a reconstructed copy.
@@ -5482,6 +6017,10 @@ class CockpitApp(App):
         # Phase 5: the last BYO fit-check result (Run · BYO) — the arch facts
         # the Promote-to-catalog scaffold computes from.
         self._last_byo: Optional[ByoResult] = None
+        # Bring funnel (§2b): the last stage-1 inventory + the user's GGUF pick
+        # — drive the staged reveal + the artifact→engine/topology filters.
+        self._last_inventory: Optional[ArtifactInventory] = None
+        self._funnel_gguf_pick: str = ""
         # Phase R / R2b: failure context for the [!] problem report — captured AT
         # a failed serve in dispatch_action (the slug + the boot-log lines that
         # were streamed into the serve-live pane) so problem_report can assemble
@@ -5595,7 +6134,8 @@ class CockpitApp(App):
                     # the user can flip to Orchestration (SAME mode) to watch.
                     # Hidden until ⏎ on a Catalog row stages a serve and the
                     # reconcile-gated confirm commits.
-                    yield LivePane(id="serve-live")
+                    # Hidden until a serve streams — no idle placeholder.
+                    yield LivePane(id="serve-live", placeholder="")
 
                 # Mode 1 — Bring & Validate (producer lane).  Renumbered 2→1 in the
                 # 2-mode merge.  An ORDERED, numbered pipeline reusing the
@@ -5769,6 +6309,28 @@ class CockpitApp(App):
             self.query_one("#operate-orch-pane", OperateOrchPane).refresh_gpu_cards(gpus)
         except Exception:
             pass
+        # F3b: readiness fast-flip. api_booting only clears when the HEAVY
+        # docker+health batch re-runs — so "⏳ booting" outlived actual readiness
+        # by a poll cycle (audit: ≥25s stale). While booting, piggyback a CHEAP
+        # direct /v1/models probe on this fast tick; on 200, pull the next heavy
+        # poll forward (burst regime) so every "booting" surface flips promptly.
+        # Bounded: fires ONLY in the booting state, 1.5s timeout, best-effort.
+        state = getattr(self, "_last_estate_state", None)
+        if state is not None and getattr(state.doctor, "booting", False):
+            url = (getattr(state.target, "url", "") or "").strip()
+            if not url:
+                port = getattr(state.target, "host_port", 0) or 0
+                url = f"http://localhost:{port}" if port else ""
+            if url:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=1.5) as client:
+                        r = await client.get(f"{url.rstrip('/')}/v1/models")
+                    if r.status_code == 200:
+                        import time as _t
+                        self._docker_burst_until = _t.monotonic() + 6.0
+                except Exception:
+                    pass
 
     def _docker_poll_due(self) -> bool:
         """Whether THIS tick runs the heavy docker+host batch, by regime: burst (within
@@ -6157,6 +6719,7 @@ class CockpitApp(App):
         tgt = state.target
         self._target_model = getattr(tgt, "model", "") or ""
         self._target_url = getattr(tgt, "url", "") or ""
+        self._target_confidence = getattr(tgt, "match_confidence", "") or ""
         # Hold the SHARED ServingTarget object (by identity) for the c3t Evaluate
         # hand-off — design §4/§6.6 requires passing the SAME dataclass instance.
         self._target_obj = tgt
@@ -6267,7 +6830,7 @@ class CockpitApp(App):
         # the Run marker fresh.
         try:
             cat = self.query_one("#catalog-pane", CatalogPane)
-            cat.set_serving_slug(self._target_slug)
+            cat.set_serving_slug(self._target_slug, self._target_confidence)
             # A6: feed the Run catalog the LIVE per-GPU free-VRAM so a
             # "fits-clean" row that would OOM right now (e.g. GPU0 holding
             # ComfyUI) is downgraded.  Derived from THIS poll's GpuInfo
@@ -6402,6 +6965,145 @@ class CockpitApp(App):
 
     # ── BYO fit-check ────────────────────────────────────────────────────────────────
 
+    def _trigger_lane_inspect(self) -> None:
+        """[Inspect] / ⏎ on the ① Bring repo input: stage-1 of the funnel —
+        the deriver artifact inventory (§2b-1).  Nothing template-side shows
+        until this succeeds."""
+        try:
+            repo = self.query_one("#lane-bring-url-input", Input).value.strip()
+        except Exception:
+            return
+        if not repo:
+            self.notify("Enter an HF repo (org/Model).", title="① Bring", severity="warning", timeout=3)
+            return
+        self.run_bring_inspect(repo)
+
+    def _known_gpu_vram_gb(self) -> Optional[float]:
+        """Best-known per-card VRAM (GiB) from the last estate poll — the MIN
+        across cards (heterogeneous rigs: the smallest card dictates the pool,
+        mirroring the launcher's het-clamp).  None before the first poll —
+        the funnel then applies NO size floor (never guess-hide)."""
+        st = self._last_estate_state
+        gpus = getattr(st, "gpus", None) if st is not None else None
+        if not gpus:
+            return None
+        totals = [g.mem_total_mib for g in gpus if getattr(g, "mem_total_mib", 0) > 0]
+        return (min(totals) / 1024.0) if totals else None
+
+    def _funnel_options_for(
+        self, artifact_format: str, artifact_gb: Optional[float]
+    ) -> list[tuple[str, str]]:
+        """The stage-3 slug options for the current artifact (§2b-3/4/5):
+        compat-filtered, topology-floored by size vs the rig, topology-first
+        labels, sentinel appended."""
+        opts = funnel_slug_options(
+            self._variants or [],
+            artifact_format,
+            artifact_gb=artifact_gb,
+            vram_gb=self._known_gpu_vram_gb(),
+            gpu_count=self._known_gpu_count(),
+        )
+        return profile_select_options(opts)
+
+    def _reveal_funnel_slugs(
+        self, artifact_format: str, artifact_gb: Optional[float]
+    ) -> None:
+        opts = funnel_slug_options(
+            self._variants or [],
+            artifact_format,
+            artifact_gb=artifact_gb,
+            vram_gb=self._known_gpu_vram_gb(),
+            gpu_count=self._known_gpu_count(),
+        )
+        # ONE visible recommendation (§2b follow-up): smallest fitting
+        # topology + curated engine preference — starred AND pre-selected;
+        # the full filtered list stays reachable below it.
+        rec = funnel_recommended(
+            opts, list(getattr(self._data, "catalog_defaults", None) or [])
+        )
+        pairs = [
+            ((f"⭐ {label}" if value == rec else label), value)
+            for (label, value) in profile_select_options(opts)
+        ]
+        try:
+            pane = self.query_one("#lane-bring-pane", LaneBringPane)
+            pane.reveal_slug_stage(pairs, rec)
+            # Dogfood r2 — the pre-selected recommendation's details show
+            # immediately (updates ride on_select_changed thereafter).
+            pane.show_slug_details(self._funnel_slug_details(rec) if rec else "")
+        except Exception:
+            pass
+
+    def _funnel_slug_details(self, slug: str) -> str:
+        """Dogfood r2 — the SELECTED catalog slug's key facts for the Bring
+        pane's detail card: status · ctx · port · drafter · vision · the
+        shipped bar (with the staleness dagger).  Pure read of the cached
+        variants (the baseline dict rides each row via the emit join)."""
+        row = next(
+            (v for v in (self._variants or []) if getattr(v, "slug", "") == slug),
+            None,
+        )
+        if row is None:
+            return ""
+        status = (getattr(row, "status", "") or "").strip()
+        lines = [
+            f"  [bold]{slug}[/bold]  [dim]·[/dim]  {_status_glyph(status)} {status or '—'}"
+            f"  [dim]·[/dim]  ctx {getattr(row, 'ctx_label', '') or '—'}"
+            f"  [dim]·[/dim]  port {getattr(row, 'port', '') or '—'}"
+        ]
+        drafter = str(getattr(row, "drafter", "") or "")
+        vision = bool(getattr(row, "vision", False))
+        facets = []
+        if drafter:
+            facets.append(f"drafter {drafter}")
+        if vision:
+            facets.append("vision")
+        if facets:
+            lines.append(f"  [dim]{' · '.join(facets)}[/dim]")
+        b = getattr(row, "baseline", None) or {}
+        n, c = b.get("narr_tps"), b.get("code_tps")
+        if n is not None or c is not None:
+            tps = (f"{n:.0f}" if n is not None else "—") + "/" + (
+                f"{c:.0f}" if c is not None else "—")
+            bar = f"  [bold]bar[/bold]  {tps} TPS"
+            if b.get("quality_8pk"):
+                bar += f"  ·  8pk {b['quality_8pk']}"
+            prov = " · ".join(str(x) for x in (b.get("date"), b.get("rig")) if x)
+            if prov:
+                bar += f"  [dim]({prov})[/dim]"
+            if b.get("stale") is True:
+                bar += "  [yellow]† re-bench owed[/yellow]"
+            lines.append(bar)
+        note = (getattr(row, "status_note", "") or "").strip()
+        if note:
+            lines.append(f"  [yellow]caveat: {note}[/yellow]")
+        return "\n".join(lines)
+
+    @work(exclusive=True, group="byo")
+    async def run_bring_inspect(self, repo: str) -> None:
+        """Stage-1 INSPECT worker: deriver artifact inventory → staged reveal.
+        GGUF present → quant pick first (slugs stay hidden); safetensors →
+        straight to the compat-filtered slug stage."""
+        lane_pane = None
+        try:
+            lane_pane = self.query_one("#lane-bring-pane", LaneBringPane)
+            lane_pane.set_inspecting(repo)
+        except Exception:
+            lane_pane = None
+        inv = await self._data.bring_inspect(repo)
+        self._last_inventory = inv
+        self._funnel_gguf_pick = ""
+        if lane_pane is not None:
+            lane_pane.show_inventory(inv)
+        if inv.error:
+            return
+        if inv.has_safetensors:
+            # §2b-1: the safetensors set is the artifact — slugs reveal now.
+            self._reveal_funnel_slugs("safetensors", inv.safetensors_size_gb or None)
+        elif lane_pane is not None:
+            # GGUF-only: slugs stay hidden until the quant pick (§2b-2).
+            lane_pane.hide_slug_stage()
+
     @work(exclusive=True, group="byo")
     async def run_byo_check(self, repo: str, profile_like: str) -> None:
         # The fit-check is the producer lane's ① Bring stage (the standalone Run ·
@@ -6450,6 +7152,82 @@ class CockpitApp(App):
             )
         except Exception:
             pass
+        # §2b-6/7 — weights state after a successful fit-check: on disk → the
+        # ② Serve handoff is explicit; absent → the [D] download affordance.
+        if lane_pane is not None:
+            if getattr(res, "error", ""):
+                lane_pane.set_weights_line("")
+            elif self._data.bring_weights_present(repo):
+                lane_pane.set_weights_line(
+                    "  [green]✓ weights on disk[/green] — "
+                    "[green]→ ② Serve[/green] [dim](\\[2/]] next stage)[/dim]"
+                )
+            else:
+                lane_pane.set_weights_line(
+                    "  [yellow]weights not on disk[/yellow] — press [bold]\\[D][/bold] "
+                    "to download via pull.sh [dim](SHA-verified, streams here; "
+                    "disk write only, no GPU claim)[/dim]"
+                )
+
+    def action_bring_download(self) -> None:
+        """[D] — §2b-6: download the fit-checked repo's weights (the REAL
+        pull.sh run — Path B fetch into the pull dir).  Guarded on a successful
+        fit-check; a disk write with no GPU claim, so the key press is the
+        confirm (same discipline as the catalog Download)."""
+        if self._active_mode != 1:
+            return
+        byo = self._last_byo
+        if byo is None or getattr(byo, "error", ""):
+            self.notify(
+                "Run ① Bring fit-check first — nothing to download.",
+                title="Download", severity="warning", timeout=4,
+            )
+            return
+        repo = getattr(byo, "repo", "")
+        if self._data.bring_weights_present(repo):
+            self.notify("Weights already on disk.", title="Download", timeout=3)
+            return
+        self.run_bring_download_worker(repo, getattr(byo, "profile_like", ""))
+
+    @work(exclusive=True, group="bring-download")
+    async def run_bring_download_worker(self, repo: str, profile_like: str) -> None:
+        """§2b-6/7 — stream the pull.sh download into the weights line, then
+        re-probe and hand off to ② Serve."""
+        lane_pane = None
+        try:
+            lane_pane = self.query_one("#lane-bring-pane", LaneBringPane)
+        except Exception:
+            pass
+
+        from rich.markup import escape
+
+        def _on_line(line: str) -> None:
+            if lane_pane is not None:
+                clipped = line.strip()[-100:]
+                try:
+                    lane_pane.set_weights_line(
+                        f"  [cyan]downloading[/cyan] [dim]{escape(clipped)}[/dim]"
+                    )
+                except Exception:
+                    pass
+
+        handle = await self._data.run_bring_download(repo, profile_like, on_line=_on_line)
+        try:
+            await handle.done.wait()
+        except Exception:
+            pass
+        if lane_pane is None:
+            return
+        if self._data.bring_weights_present(repo):
+            lane_pane.set_weights_line(
+                "  [green]✓ weights downloaded[/green] — "
+                "[green]→ ② Serve[/green] [dim](\\[2/]] next stage)[/dim]"
+            )
+        else:
+            lane_pane.set_weights_line(
+                "  [red]download did not complete[/red] — check the pull.sh output "
+                "[dim](re-press \\[D] to retry)[/dim]"
+            )
 
     # ── Explain ──────────────────────────────────────────────────────────────────────
 
@@ -7065,6 +7843,36 @@ class CockpitApp(App):
 
     # ── Batch 4 · copy-to-clipboard + horizontal scroll ──────────────────────────
 
+    def _serving_endpoint_url(self) -> str:
+        """F3: the serving endpoint URL (``http://<lan>:<port>/v1``) from the
+        CACHED estate state — '' when nothing is serving / port unknown. Same
+        LAN-IP derivation as switch.sh's ready-line (services.lan_ip)."""
+        state = getattr(self, "_last_estate_state", None)
+        port = getattr(getattr(state, "target", None), "host_port", 0) or 0
+        if not port:
+            return ""
+        try:
+            lan = self._data.lan_ip()
+        except Exception:
+            lan = "localhost"
+        return f"http://{lan}:{port}/v1"
+
+    def action_copy_endpoint(self) -> None:
+        """[u] — copy the serving API URL (the "point your agent here" string).
+        No-ops with a notify when nothing is serving."""
+        url = self._serving_endpoint_url()
+        if not url:
+            self.notify(
+                "No model serving — nothing to point an agent at yet.",
+                title="API URL", severity="warning", timeout=3,
+            )
+            return
+        self.copy_to_clipboard(url)
+        self.notify(
+            f"Copied API URL: {url}  (OpenAI-compatible · no auth)",
+            title="API URL", severity="information", timeout=4,
+        )
+
     def action_copy_context(self) -> None:
         """[Y] — yank the contextually-relevant text to the system clipboard.
 
@@ -7163,8 +7971,37 @@ class CockpitApp(App):
                 payload = ""
             if payload:
                 return payload, "details"
+        # 2.5 (F4) — the live-log pane the user is looking at (Containers Logs
+        # drill / ③ Gate output).  RichLog-family widgets don't implement text
+        # selection (Top/Config are selectable Statics), so [Y] copies the
+        # pane's streamed tail.  An idle pane has an empty tail (placeholders
+        # aren't buffered) → falls through to the row-primary copy below.
+        pane, label = self._visible_live_pane()
+        if pane is not None:
+            tail = pane.tail_text()
+            if tail:
+                return tail, label
         # 3. the highlighted row's primary id on the active table.
         return self._active_row_primary()
+
+    def _visible_live_pane(self) -> tuple[Optional[LivePane], str]:
+        """F4 — the LivePane the user is currently LOOKING at, if any: the
+        Containers Logs drill or the ③ Gate run output.  Main screen only (a
+        modal on top owns [Y] via its own binding / copyable_text).  The
+        transient #serve-live pane is deliberately NOT routed: it shares the
+        screen with the primary tables, whose [Y]-copies-the-slug semantics
+        are established."""
+        if len(self.screen_stack) > 1:
+            return None, ""
+        try:
+            tab = self._current_subtab()
+            if tab == "tab-containers" and self._active_drill_tab() == "drill-tab-logs":
+                return self.query_one("#drill-logs", LivePane), "log tail"
+            if tab == "tab-run":
+                return self.query_one("#run-output", LivePane), "run-output tail"
+        except Exception:
+            pass
+        return None, ""
 
     def _active_row_primary(self) -> tuple[str, str]:
         """The most-pasteable id of the highlighted row on the active primary
@@ -7426,6 +8263,18 @@ class CockpitApp(App):
             tag = None
         if tag is None:
             self.notify("No run tag selected.", title="Evidence", severity="warning", timeout=3)
+            return
+        if tag.live:
+            # F10 — report generation WRITES REPORT.md into the tag dir; doing
+            # that mid-run would corrupt the observer's completed/live signal
+            # (and the observer never executes against a run in flight).
+            self.notify(
+                "Run in flight — REPORT.md generates when it completes. "
+                "Watch the ladder + live tail in the preview below the list.",
+                title="Evidence",
+                severity="information",
+                timeout=5,
+            )
             return
         # The screen loads its own report on mount (run_evidence_report), so the
         # set_report query resolves against a fully-mounted modal.
@@ -7889,8 +8738,18 @@ class CockpitApp(App):
     async def run_measure_vs_bar(self, screen: "MeasureVsBarScreen", tag: str) -> None:
         """Compute the measured-vs-bar comparison for a tag (READ) + push it to
         the modal.  No GPU / network / write — pure filesystem reads + the
-        benchmarks explorer."""
-        vsbar = await self._data.measure_vs_bar(tag, variants=self._variants or None)
+        benchmarks explorer.
+
+        Friction #9: when a ① Bring fit-check ran this session, its swap_path
+        sibling rides along as the CLASS-bar fallback — a NEW model has no
+        same-model bar by definition."""
+        byo = self._last_byo
+        class_hint = ""
+        if byo is not None and not getattr(byo, "error", ""):
+            class_hint = getattr(byo, "sibling_slug", "") or ""
+        vsbar = await self._data.measure_vs_bar(
+            tag, variants=self._variants or None, class_hint=class_hint
+        )
         try:
             screen.set_result(vsbar)
         except Exception:
@@ -8044,6 +8903,16 @@ class CockpitApp(App):
             tag = None
         if tag is None:
             self.notify("No run tag selected.", title="Evidence", severity="warning", timeout=3)
+            return
+        if tag.live or tag.stale:
+            # F10 — an in-flight run has incomplete artifacts; an aborted one
+            # has no REPORT.md.  Neither is submittable evidence.
+            self.notify(
+                "This run has no completed REPORT.md — submit when the gate finishes.",
+                title="Evidence",
+                severity="warning",
+                timeout=4,
+            )
             return
         plan = self._data.submit_bench(tag.tag)
         self.push_screen(ConfirmActionScreen(plan))
@@ -8608,6 +9477,24 @@ class CockpitApp(App):
             except Exception:
                 pass
             return
+        if sel_id == "lane-bring-gguf-select":
+            # §2b-2 — the GGUF quant pick: only NOW do the matching slugs
+            # appear, topology-floored by THIS variant's size (§2b size rule:
+            # hide topologies whose VRAM can't hold the weights; never hide
+            # larger ones — small-quant-on-many-GPUs is legitimate).
+            val = event.value
+            if val is None or val is Select.BLANK:
+                return
+            self._funnel_gguf_pick = str(val)
+            inv = self._last_inventory
+            size = None
+            if inv is not None:
+                for v in inv.gguf_variants:
+                    if v.quant == self._funnel_gguf_pick:
+                        size = v.size_gb or None
+                        break
+            self._reveal_funnel_slugs("gguf", size)
+            return
         if sel_id != "lane-bring-profile-input":
             return
         new_val = event.value
@@ -8623,6 +9510,16 @@ class CockpitApp(App):
                 custom.focus()
             else:
                 custom.add_class("profile-custom-hidden")
+        except Exception:
+            pass
+        # Dogfood r2 — the detail card follows the selection (a custom-slug
+        # sentinel has no catalog row → hide).
+        try:
+            pane = self.query_one("#lane-bring-pane", LaneBringPane)
+            if new_val == PROFILE_CUSTOM_SENTINEL or new_val in (None, Select.BLANK):
+                pane.show_slug_details("")
+            else:
+                pane.show_slug_details(self._funnel_slug_details(str(new_val)))
         except Exception:
             pass
         # Before the registry-derived default has been applied, any Changed is the
@@ -8790,7 +9687,9 @@ class CockpitApp(App):
         try:
             live = self.query_one("#drill-logs", LivePane)
             live.clear_log()
-            live.append_line(f"[dim]{placeholder}[/dim]")
+            # buffer=False: a display-only note — [Y] on an idle/stopped drill
+            # must fall through to the container name, not copy this line (F4).
+            live.append_line(f"[dim]{placeholder}[/dim]", buffer=False)
         except Exception:
             pass
         try:
@@ -8828,6 +9727,8 @@ class CockpitApp(App):
         bid = event.button.id
         if bid == "lane-bring-fit-btn":
             self._trigger_lane_bring()
+        elif bid == "lane-bring-inspect-btn":
+            self._trigger_lane_inspect()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "catalog-filter":
@@ -8839,7 +9740,9 @@ class CockpitApp(App):
             except Exception:
                 pass
         elif event.input.id == "lane-bring-url-input":
-            self._trigger_lane_bring()
+            # §2b-1 — ⏎ on the repo input runs stage-1 INSPECT (the funnel's
+            # entry), not the fit-check (which needs a slug pick first).
+            self._trigger_lane_inspect()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "catalog-filter":

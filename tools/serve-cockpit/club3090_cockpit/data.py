@@ -202,16 +202,22 @@ class FitVerdict:
 
 @dataclass
 class Measurement:
-    """A measured result for a slug, joined from a structured corpus or parsed
-    coarsely from BENCHMARKS.md.  ``source`` records provenance so the UI can
-    distinguish a structured record from a best-effort markdown parse."""
+    """A measured result for a slug.  The catalog's source is the SHIPPED
+    BASELINE joined at registry-emit (source=="baseline"); "explain"/
+    "benchmarks.md" remain only for non-catalog surfaces (Explain modal,
+    cross-rig explorer).  ``source`` records provenance so the UI never
+    presents a coarse parse as an accepted number."""
 
     narr_tps: Optional[float] = None
     code_tps: Optional[float] = None
     quality_8pk: Optional[str] = None   # e.g. "107/150"
     max_ctx_label: str = ""
     date: str = ""
-    source: str = ""                    # "explain" | "corpus" | "benchmarks.md" | ""
+    source: str = ""                    # "baseline" | "explain" | "corpus" | "benchmarks.md" | ""
+    # Catalog-baselines: emit-computed pin-staleness for a baseline row —
+    # True = measured on an older engine pin (re-bench owed), False = current
+    # pin, None = undeterminable / not a baseline measurement.
+    stale: Optional[bool] = None
 
     @property
     def tps_label(self) -> str:
@@ -313,6 +319,10 @@ class CatalogEntry:
     weights_state: str = "unknown"
     weights: Optional["WeightsMeta"] = None
     download_pct: Optional[int] = None   # 0-99 while weights_state == "downloading"
+    # Catalog-baselines slice 2b: THIS RIG's newest corpus record for the slug
+    # (results/measurement-records/, written by rebench-full) — the "yours vs
+    # the bar" overlay.  None when this rig has never gated the slug.
+    local_measurement: Optional["LocalMeasured"] = None
 
     # Convenience pass-throughs (so panes can read entry.slug, not entry.row.slug)
     @property
@@ -396,6 +406,22 @@ class CatalogEntry:
         return getattr(self.row, "source", "") or "·"
 
 
+@dataclass
+class LocalMeasured:
+    """The local "yours" overlay projection of one #249 corpus record
+    (catalog-baselines slice 2b) — THIS RIG's newest gate numbers for a slug.
+
+    The record's bench carries ONE canonical-short decode point (not the
+    narr/code pair — a parser limitation noted for slice 2c), plus the
+    quality extensions and the pin the run measured on."""
+
+    decode_tps: Optional[float] = None
+    quality_8pk: Optional[str] = None
+    quality_8pk_think_on: Optional[str] = None
+    engine_pin: Optional[str] = None
+    date: str = ""                       # _recorded_at date, else file-mtime date
+
+
 # ── Estate / Scene / Container / Doctor ─────────────────────────────────────────
 
 
@@ -452,6 +478,7 @@ class ContainerInfo:
     internal_port: int = 0
     engine: str = ""                    # for engine containers
     slug: str = ""                      # registry slug if matched
+    match_confidence: str = ""          # "identity" | "shape" | "" (see core detect)
     gpus: str = ""                      # "0,1" if known, else ""
     status: str = "running"             # "running" | "stopped" (known-but-down service)
 
@@ -577,6 +604,65 @@ class ReconcileResult:
 
 
 # ── BYO check ────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GgufVariant:
+    """One GGUF quant discovered in an HF repo (deriver artifact inventory)."""
+
+    quant: str = ""
+    size_gb: float = 0.0
+    parts: int = 1
+    files: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ArtifactInventory:
+    """Bring-funnel stage-1 INSPECT (design §2b): what servable artifacts an
+    HF repo carries — BEFORE any engine/template is shown.  From
+    ``deriver.py --inventory <repo> --json`` (offline-testable; a GGUF-only
+    repo is a first-class bring here, never ``unsupported-format``)."""
+
+    repo: str = ""
+    error: str = ""
+    formats: list[str] = field(default_factory=list)
+    safetensors_files: int = 0
+    safetensors_size_gb: float = 0.0
+    gguf_variants: list[GgufVariant] = field(default_factory=list)
+    gguf_mmproj: list[str] = field(default_factory=list)
+    lineage_base_model: Any = None
+
+    @property
+    def has_safetensors(self) -> bool:
+        return "safetensors" in self.formats
+
+    @property
+    def has_gguf(self) -> bool:
+        return bool(self.gguf_variants)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "ArtifactInventory":
+        if not d:
+            return cls(error="no output")
+        st = d.get("safetensors") or {}
+        return cls(
+            repo=str(d.get("repo", "")),
+            error=str(d.get("error", "") or ""),
+            formats=list(d.get("formats") or []),
+            safetensors_files=len(st.get("weight_files") or []),
+            safetensors_size_gb=float(st.get("size_gb") or 0.0),
+            gguf_variants=[
+                GgufVariant(
+                    quant=str(v.get("quant", "")),
+                    size_gb=float(v.get("size_gb") or 0.0),
+                    parts=int(v.get("parts") or 1),
+                    files=list(v.get("files") or []),
+                )
+                for v in (d.get("gguf_variants") or [])
+            ],
+            gguf_mmproj=list(d.get("gguf_mmproj") or []),
+            lineage_base_model=d.get("lineage_base_model"),
+        )
 
 
 @dataclass
@@ -831,6 +917,20 @@ class BenchRow:
 
 # ── Phase 4: Evidence (rebench run tags) ──────────────────────────────────────────
 
+# F10 — the rebench-full gate ladder, in run order.  MUST mirror the `run_step
+# <name>` call sites in scripts/rebench-full.sh (the script owns the sequence;
+# this is a render constant — test_gate_steps_match_rebench_script pins the two
+# together so they can't drift).  Steps may be absent from a given run
+# (--skip / --resume / --quick): the observer renders those positionally.
+GATE_STEPS: tuple[str, ...] = (
+    "verify-full",
+    "bench",
+    "verify-stress",
+    "quality-full",
+    "quality-thinking",
+    "soak",
+)
+
 
 @dataclass
 class EvidenceTag:
@@ -844,6 +944,17 @@ class EvidenceTag:
     date: str = ""                      # from REPORT.md Meta or dir mtime
     # A coarse one-line TL;DR scraped from REPORT.md if present.
     tldr: str = ""
+    # F10 — live gate-run observer.  A dir with NO REPORT.md is a run in
+    # flight (rebench-full synthesizes REPORT.md last): ``live`` while its
+    # artifacts are still being written, ``stale`` once it has gone quiet
+    # (aborted / orphaned).  Both derive purely from the dir's files — the
+    # observer works identically for CLI-launched (nohup) runs.
+    live: bool = False
+    stale: bool = False                 # incomplete AND no recent writes
+    live_step: str = ""                 # the step whose log is growing now
+    steps_done: list = field(default_factory=list)   # [(step, secs), …] from timings.json
+    live_tail: str = ""                 # last lines of the active step's log
+    age_secs: int = 0                   # since the newest artifact write
 
 
 @dataclass
@@ -917,6 +1028,11 @@ class MeasureVsBar:
     # was picked deterministically on model alone (surfaced as a caveat).
     run_engine: str = ""
     engine_resolved: bool = False       # True when run_engine drove bar selection
+    # Friction #9 (T2): the bar is the SIBLING-CLASS bar (①'s swap_path
+    # sibling) because no same-model bar exists — a NEW model's primary case.
+    # Labeled, never silent: the verdict reads class-relative.
+    bar_is_class: bool = False
+    class_model: str = ""
     # Per-metric measured−bar deltas (None when either side is missing).
     narr_tps_delta: Optional[float] = None
     code_tps_delta: Optional[float] = None
