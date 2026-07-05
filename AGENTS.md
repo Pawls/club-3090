@@ -128,6 +128,14 @@ Relative paths from a compose to its sibling patches/caches: `../../../patches/.
 
 **If a future patch is genuinely topology-specific** (e.g., a kernel rewrite that only applies to TP=2), keep it at `<engine>/patches/<patch-name>/` and document the topology constraint in the patch's README. Discoverability ("one `patches/` per engine, search there") trumps the marginal benefit of a topology partition.
 
+#### `.env` overrides must live next to the compose file, not the engine root — known bug, unfixed
+
+Docker Compose only auto-loads a `.env` from the **directory it's invoked from** — it does not search parent directories. `switch.sh` / `launch.sh` `cd` into the compose file's own directory (`<engine>/compose/<topology>/<quant>/`) before running `docker compose up`, so a `.env` sitting at a parent level (e.g. `<engine>/compose/.env`) is silently never read. Overrides in it fall back to the compose's own hardcoded `${VAR:-default}` values — no error, no warning, and `GPU_MEMORY_UTILIZATION`-style values that happen to match the compose default look like they're "working" by coincidence.
+
+**Confirmed-affected case (2026-07-03):** `scripts/setup.sh`'s WSL2 auto-detection (`PYTORCH_CUDA_ALLOC_CONF` boot-crash workaround, PR #84 / issue #60) writes its override to `<engine>/compose/.env` — one level too high for any nested `<topology>/<quant>/` compose to see. Reproduced on `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml`: `docker compose config` (run from the compose's own directory) showed the hardcoded default, not the `.env` override, until the `.env` was copied down into `.../dual/autoround-int4/.env`. Likely affects every nested compose across every model/engine, not just this one.
+
+**Not yet fixed at the source.** If you're touching `setup.sh`'s WSL2-detection block, or a user reports "I edited `.env` and nothing changed": check this first. The real fix is either (a) have `setup.sh` write the WSL2 override to the actual compose directory the user is about to boot (requires knowing the target variant at `setup.sh` time, which it may not), or (b) have `switch.sh`/`launch.sh` pass `--env-file` pointing at the engine-root `.env` in addition to (or instead of) relying on Compose's directory-local auto-load. Neither is implemented yet.
+
 #### Profile schema header (every compose, every time)
 
 Every compose starts with a `Profile (at-a-glance)` block declaring the (Model, Topology, Drafter, KV, Vision, Max-ctx, Genesis) tuple in structured form. Free-form description follows below the schema, not in place of it.
