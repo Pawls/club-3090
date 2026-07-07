@@ -162,7 +162,7 @@ services:
       - --reasoning-parser
       - qwen3
       - --default-chat-template-kwargs
-      - '{"enable_thinking": false}'
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "preserve_thinking": ${PRESERVE_THINKING:-false}}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder
