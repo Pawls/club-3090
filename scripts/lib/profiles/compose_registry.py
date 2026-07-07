@@ -162,7 +162,7 @@ COMPOSE_REGISTRY = {
     # --- Qwen "fast" / "max accuracy" tiers (2026-06-07) -----------------------
     # A symmetric 4-slug family across dual (2-card) and multi4 (4-card):
     #   *-fast = AutoRound INT4 weights + fp8_e5m2 KV  (peak TPS, the proven path)
-    #   *-max  = official FP8 weights   + int8-PTH KV  (higher fidelity @ 262K)
+    #   *-max  = official FP8 weights   + fp8/e4m3 KV  (higher-fidelity weights @ 262K)
     # The 2-card duals are the on-rig validation proxies for the 4-card multi4s
     # (this dev rig has 2× 3090); the multi4 configs are byte-identical to their
     # dual sibling apart from TP and the gpu-count, so they ship 🧪 Experimental
@@ -182,13 +182,13 @@ COMPOSE_REGISTRY = {
     ),
     "vllm/qwen-27b-dual-max": _entry(
         model="qwen3.6-27b", weights_variant="fp8", workload="long-ctx-single",
-        engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="int8_per_token_head",
+        engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="fp8_e4m3",
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/fp8/mtp.yml",
         default_port=8013,
         kvcalc_key="SKIP",
-        status="experimental",
-        status_note="Qwen3.6-27B 'max accuracy' tier, 2-card: official FP8 weights (e4m3, embedded MTP head) + int8-PTH KV + MTP n=3, TP=2 @262K. 🧪 Experimental — live-validated 2026-06-07 (boots + serves @262K, KV pool 295K tok / 1.13x concurrency via int8-PTH, MarlinFP8 W8A16 on Ampere, coherent + MTP active; ~56 TPS decode). 8-pack A/B (--full, same harness 2026-06-07): 110/150 vs fast 109 vs balanced 105 — a TIE (det 65/64/64; spread within noise). The 8-pack (short-ctx) does NOT separate the quants; FP8 + int8-PTH differentiate on KV fidelity, not behavioral quality — a long-ctx NIAH A/B (where int8-PTH should matter) is the open follow-up. Slowest of the three (~56 vs fast ~89 code) with the smallest KV pool (1.13x). Also the validation proxy for vllm/qwen-27b-multi-max (same config @ TP=4).",
+        status="production",
+        status_note="Qwen3.6-27B 'max accuracy' tier, 2-card: official FP8 weights (embedded MTP head) + fp8/e4m3 KV (flipped from int8-PTH in #594) + MTP n=3, TP=2 @262K. fp8/e4m3 routes KV attention to FlashInfer (int8-PTH is TRITON_ATTN-only): decode stays FLAT at depth — 2.3x int8-PTH @35K — where int8-PTH craters. Full v0.24.0 gate: verify-full 9/9, verify-stress fillable to 240,636 tok, soak-continuous PASS (0 err / 0 growth / 100% retention, p50 decode 125.5), 8-pack --full 109/150 (ties int8-PTH's 107, quality-neutral despite fp8 scale=1.0 — vLLM disables calculate_kv_scales on Qwen3-Next hybrid). KV pool 295K tok / 1.13x concurrency (smallest pool of the tiers; FP8 weights use MarlinFP8 W8A16 on Ampere — memory win, not decode). The highest-fidelity weight tier; consumer Blackwell (5090+) gets native FP8 GEMM via the launcher's DeepGEMM-disable. Also the validation proxy for vllm/qwen-27b-multi-max (same config @ TP=4).",
     ),
     "vllm/qwen-27b-dual-lmcache": _entry(
         model="qwen3.6-27b", weights_variant="fp8", workload="long-ctx-single",
@@ -217,18 +217,49 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/mtp.yml",
         default_port=8014,
         kvcalc_key="SKIP",
-        status="experimental",
-        status_note="Qwen3.6-27B 'fast' tier, 4-card (TP=4): AutoRound INT4 + fp8_e5m2 KV + MTP n=3 @262K. 🧪 Experimental (cross-rig) — byte-identical to vllm/dual (≡ vllm/qwen-27b-dual-fast) apart from TP=4 + gpu-count; vllm/dual @TP=2 is the on-rig validation proxy (this dev rig has 2× 3090). The extra cards buy ~2x aggregate KV headroom at 262K. Validate on a real ≥4× 3090 host before promotion.",
+        status="production",
+        status_note="Qwen3.6-27B 'fast' tier, 4-card (TP=4): AutoRound INT4 + fp8_e5m2 KV + MTP n=3 @262K. Byte-identical to vllm/dual (≡ vllm/qwen-27b-dual-fast) apart from TP=4 + gpu-count; vllm/dual @TP=2 is the on-rig proxy (this dev rig has 2× 3090). Promoted 2026-07-05 on the cross-rig validation the header required — #584 (@ryanmpelletier, 4× 3090): verify-full 9/9, verify-stress clean to 240K, soak PASS, bench n=5. The 4 cards buy concurrency — KV pool 1.77M/6.77× vs the 2-card 622K/2.37× (single-stream decode ~flat). Quality is TP-invariant, carried from the vllm/dual proxy (109/150); a 4-card 8-pack confirmation is the open follow-up.",
     ),
     "vllm/qwen-27b-multi-max": _entry(
         model="qwen3.6-27b", weights_variant="fp8", workload="long-ctx-single",
-        engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="int8_per_token_head",
+        engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="fp8_e4m3",
         tp=4, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/multi4/fp8/mtp.yml",
         default_port=8015,
         kvcalc_key="SKIP",
+        status="caveats",
+        status_note="Qwen3.6-27B 'max accuracy' tier, 4-card (TP=4): official FP8 weights + fp8/e4m3 KV (flipped from int8-PTH alongside dual-max #594; follow-up multi-max PR) + MTP n=3 @262K. ⚠️ Production w/ caveats — byte-identical to the now-production vllm/qwen-27b-dual-max apart from TP=4 + gpu-count (dual-max @TP=2 is the on-rig proxy; this dev rig has 2 cards). Promoted 2026-07-06 on @Whamp's cross-rig full chain (#446, 4× 3090: verify-full + verify-stress 7/7 + soak-continuous PASS, 85/102). CAVEAT: that validation was on an OLDER engine (pre-v0.24.0-pin) + a non-standard rig (aikitoria P2P kernel, mixed x4/x16/x8/x16 lanes), single report — no clean v0.24.0 4-card datapoint yet; a fresh one upgrades this to ✅ Production. TP=4 relieves dual-max's tight 1.13x KV pool (→ 6.77x). Value is concurrency/fidelity, single-stream decode ~flat vs 2-card.",
+    ),
+
+    # Qwen3.6-27B NVFP4 (nvidia modelopt) — the community-validation Hopper/
+    # Blackwell tier. AUTHORED BLIND on this sm_86 dev rig (NVFP4 cannot boot
+    # here): required_sm=9.0 gates launch to NVIDIA's supported set (Hopper
+    # sm_90 / Blackwell sm_100+ incl. 5090 sm_120, GB10 sm_121); the first
+    # community booter is the validation, not a confirmation. NVFP4 *KV* stays
+    # off everywhere (consumer Blackwell has no FP4 FMHA — see hardware
+    # rtx-5090.yml note); fp8_e4m3 KV is the FP4-era KV. NOTE (corrected
+    # 2026-07-06): hf_quant_config DECLARES kv_cache_quant_algo=FP8 but the
+    # checkpoint ships NO k_scale/v_scale tensors (index-verified) → runs at
+    # scale=1.0, the #594-quality-tied regime. Same for the 35B-A3B sibling.
+    "vllm/qwen-27b-single-nvfp4": _entry(
+        model="qwen3.6-27b", weights_variant="nvfp4", workload="long-ctx-single",
+        engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="fp8_e4m3",
+        tp=1, max_ctx=98304, max_num_seqs=1, mem_util=0.92,
+        compose_path="models/qwen3.6-27b/vllm/compose/single/nvfp4/mtp.yml",
+        default_port=8076, required_sm=9.0,
+        kvcalc_key="qwen3.6-27b:nvfp4-single",
         status="experimental",
-        status_note="Qwen3.6-27B 'max accuracy' tier, 4-card (TP=4): official FP8 weights + int8-PTH KV + MTP n=3 @262K. 🧪 Experimental (cross-rig) — byte-identical to vllm/qwen-27b-dual-max apart from TP=4 + gpu-count; the dual-max @TP=2 is the on-rig validation proxy. FP8 + int8-PTH = the highest-fidelity Qwen path at full 262K, with TP=4 relieving the dual-max's tight (1.13x) KV pool. Validate on a real ≥4× 3090 host before promotion.",
+        status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION: NVFP4 FFN + FP8 attention + FP8 KV scales + unquantized MTP head), single Hopper/Blackwell card (required_sm=9.0 — H100 / 5090 / RTX 6000 Pro / GB10; NOT Ampere). 🧪 AUTHORED BLIND on the sm_86 dev rig, community-validated on a 5090 in #613: verify-full passed and short decode worked (~131 TPS narrative / ~155 TPS code), but the original 131K default OOMed in long-prefill GDN scratch with only ~60 MiB free. Ships 98K (98304 = 12×8192) on 32 GB cards for scratch headroom; 80 GB+ cards raise MAX_MODEL_LEN toward 262K. MTP n=3 on (head is unquantized in the checkpoint); fp8/e4m3 KV runs scale=1.0 (FP8 KV declared in hf_quant_config, NO k_scale/v_scale tensors shipped — index-verified, the #594-tied regime). If 98K stress still fails, retry no-MTP and report. ~2.5x smaller than bf16, NVIDIA MMLU-Pro/GSM8K deltas <1% vs bf16 per the model card. No DEFAULTS row (opt-in only).",
+    ),
+    "vllm/qwen-27b-dual-nvfp4": _entry(
+        model="qwen3.6-27b", weights_variant="nvfp4", workload="long-ctx-single",
+        engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="fp8_e4m3",
+        tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
+        compose_path="models/qwen3.6-27b/vllm/compose/dual/nvfp4/mtp.yml",
+        default_port=8077, required_sm=9.0,
+        kvcalc_key="qwen3.6-27b:nvfp4-dual",
+        status="experimental",
+        status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION — see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell (required_sm=9.0; the 2x 5090 configuration is the primary community target). 🧪 AUTHORED BLIND on an sm_86 rig — cannot boot here; first community boot + rebench-full validates (funnel). Mirrors vllm/qwen-27b-dual-max's shape (TP=2 + MTP n=3 + fp8/e4m3 KV + vision @262K) with NVFP4 weights instead of FP8: ~11 GB/card weights vs dual-max's 14.5 — bigger KV pool headroom on 32 GB cards. On native-FP4 GEMM parts (Blackwell) NVIDIA claims near-fp8 throughput at 2.5x less weight memory. No DEFAULTS row (opt-in only).",
     ),
 
     # Qwen 3.6 27B, llama.cpp single-card.
@@ -760,6 +791,37 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/fp8.yml",
         default_port=8051,
         kvcalc_key="qwen3.6-35b-a3b:qwen-35b-a3b-dual",
+    ),
+
+    # Qwen3.6-35B-A3B NVFP4 (nvidia modelopt MoE) — community-validated
+    # Hopper/Blackwell tier, sibling of the 27B nvfp4 pair. AUTHORED BLIND on
+    # this sm_86 rig (required_sm=9.0 gates launch). MoE + unified-memory is
+    # the marquee pairing: 3B active params suit big-capacity/lower-bandwidth
+    # parts (GB10 Spark), so the SINGLE slug is the primary ask there. NO MTP:
+    # our measured finding on this MoE is that the built-in head shares the
+    # MoE forward and is NET-NEGATIVE (-51%; learnings/qwen3.6-35b-a3b.md) —
+    # base serving only. fp8/e4m3 KV at scale=1.0 — SAME as the 27B nvfp4
+    # (FP8 KV declared in hf_quant_config, no scale tensors shipped,
+    # index-verified 2026-07-06; the #594-quality-tied regime).
+    "vllm/qwen-35b-a3b-single-nvfp4": _entry(
+        model="qwen3.6-35b-a3b", weights_variant="nvfp4", workload="fast-chat",
+        engine="vllm-stable", drafter=None, kv_format="fp8_e4m3",
+        tp=1, max_ctx=131072, max_num_seqs=1, mem_util=0.92,
+        compose_path="models/qwen3.6-35b-a3b/vllm/compose/single/nvfp4/fp8.yml",
+        default_port=8078, required_sm=9.0,
+        kvcalc_key="qwen3.6-35b-a3b:nvfp4-single",
+        status="experimental",
+        status_note="Qwen3.6-35B-A3B NVFP4 (nvidia modelopt MIXED_PRECISION MoE: NVFP4 expert FFNs + FP8 attention; ~23.4 GB), single Hopper/Blackwell card (required_sm=9.0; NOT Ampere). 🧪 authored on the sm_86 dev rig (can't boot NVFP4 here), FIRST community validation on a single RTX 5090 in #619 (@paulp83): boots clean on vLLM v0.24.0 (quant=modelopt_mixed), verify-full 9/9 (tool-calls + streaming + reasoning), verify-stress needle-clean (9.8K + 29K), soak-continuous PASS (15 MiB growth / 100% retention / 0 err / p50 311 TPS). Decode 255.8 narr / 257.9 code TPS @ 60 ms TTFT — ~2.5-3x our 2x3090 AutoRound tier (native FP4 GEMM). VRAM 30.6/32 GB @131K — TIGHT but flat through soak on a 32 GB card. 8-pack quality still owed (sandboxes weren't built on that run). Stays 🧪 until a quality number lands. THE GB10/DGX-Spark single-card ask: 3B-active MoE suits unified-memory parts — GB10 128 GB runs the full 262K via MAX_MODEL_LEN env (131K default sized for 5090 32 GB). NO MTP by design: the built-in head is net-negative on this MoE (-51% measured on the AutoRound tier; @paulp83's speculative_config=None confirms it loaded MTP-off). fp8/e4m3 KV @ scale=1.0 (FP8 KV declared in hf_quant_config, no scale tensors shipped — same as the 27B nvfp4). No DEFAULTS row (opt-in only).",
+    ),
+    "vllm/qwen-35b-a3b-dual-nvfp4": _entry(
+        model="qwen3.6-35b-a3b", weights_variant="nvfp4", workload="fast-chat",
+        engine="vllm-stable", drafter=None, kv_format="fp8_e4m3",
+        tp=2, max_ctx=262144, max_num_seqs=1, mem_util=0.92,
+        compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/nvfp4/fp8.yml",
+        default_port=8079, required_sm=9.0,
+        kvcalc_key="qwen3.6-35b-a3b:nvfp4-dual",
+        status="experimental",
+        status_note="Qwen3.6-35B-A3B NVFP4 (see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell (2x 5090 primary community target; ~11.7 GB/card weights). 🧪 AUTHORED BLIND on an sm_86 rig — first community boot + rebench-full validates. Mirrors vllm/qwen-35b-a3b-dual's shape (no drafter — MTP net-negative on this MoE, vision on, thinking off) with NVFP4 weights + fp8/e4m3 KV instead of AutoRound + e5m2. No DEFAULTS row (opt-in only).",
     ),
 
     # Agents-A1 — InternScience's 35B agentic MoE (Qwen3-Next MoE arch, OWN model

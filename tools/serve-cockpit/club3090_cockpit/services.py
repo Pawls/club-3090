@@ -821,10 +821,24 @@ class CockpitData:
             b = getattr(e.row, "baseline", None)
             if not b:
                 continue
-            # Slice 3: a submission-only entry (cross-rig rows, no primary
-            # local row) is NOT the bar — the TPS column stays "—" and the
-            # cross-rig rows surface rig-labeled in the detail panel only.
+            # Slice 3 (revised): a submission-only entry (no on-rig primary — e.g.
+            # 4-card slugs our 2-card rig can't bench) surfaces its BEST cross-rig
+            # submission so the catalog isn't blank, tagged submission_rig so
+            # tps_label renders it ⑂-labelled (a submission is NOT this rig's own
+            # bar; the ⑂ marker + the detail panel keep it honest).
             if b.get("narr_tps") is None and b.get("code_tps") is None:
+                subs = b.get("submissions") or {}
+                if subs:
+                    rc, s = sorted(subs.items())[0]
+                    e.measurement = Measurement(
+                        narr_tps=s.get("narr_tps"),
+                        code_tps=s.get("code_tps"),
+                        quality_8pk=s.get("quality_8pk"),
+                        date=str(s.get("date") or ""),
+                        source="submission",
+                        stale=s.get("stale"),
+                        submission_rig=rc,
+                    )
                 continue
             e.measurement = Measurement(
                 narr_tps=b.get("narr_tps"),
@@ -2152,6 +2166,18 @@ class CockpitData:
             kind="clear_default",
             cmd=["bash", "scripts/switch.sh", "--clear-default", model],
             description=f"switch.sh --clear-default {model}",
+            requires_reconcile=False,
+        )
+
+    def pod_create_plan(self, name: str, gpus: str, slug: str) -> ActionPlan:
+        """C2 (#610 Phase C): write a new pod to the estate file via
+        pod.sh create. A pure FILE write (no GPU claimed until `up`), so it
+        skips the reconcile gate — but pod.sh create itself runs the D1
+        fit-vs-set + validate_estate gates, so a bad set is refused there."""
+        return ActionPlan(
+            kind="pod_create",
+            cmd=["bash", "scripts/pod.sh", "create", name, "--gpus", gpus, "--slug", slug],
+            description=f"pod.sh create {name} --gpus {gpus} --slug {slug}",
             requires_reconcile=False,
         )
 
@@ -3900,6 +3926,18 @@ def _variant_row_from_dict(d: dict[str, Any]) -> VariantRow:
         object.__setattr__(row, "weights_companions", [str(c) for c in comp])
         object.__setattr__(row, "drafter", str(d.get("drafter") or ""))
         object.__setattr__(row, "vision", bool(d.get("vision")))
+        # KV-cache format from the registry (catalog KV column) — attached same
+        # as the facets above; "" when the contract didn't carry it.
+        object.__setattr__(row, "kv_format", str(d.get("kv_format") or ""))
+        # Weights quant_label + FORMAT from the model profile (emit join) —
+        # the catalog Weights column's fallbacks for weights_variant tokens that
+        # carry no recognisable quant segment: quant_label is the explicit
+        # per-artifact quant (GGUF header ground truth, baked into the model
+        # YAML for custom-named packs); format is the coarse last resort.
+        object.__setattr__(
+            row, "weights_quant_label", str(d.get("weights_quant_label") or "")
+        )
+        object.__setattr__(row, "weights_format", str(d.get("weights_format") or ""))
         # Catalog-baselines slice 1: the shipped baseline row joined at
         # registry-emit (narr/code TPS · 8pk · ctx_validated · provenance ·
         # computed 'stale') — None when the slug has no accepted row.

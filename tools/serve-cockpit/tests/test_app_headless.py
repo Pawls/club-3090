@@ -941,12 +941,13 @@ class TestNavNodesExist:
             # (F6 shortened "our rig" → "rig" for column budget).
             # Serve-confirm rework: the "fit" column moved into the serve pop-up.
             # Model-filter: a "model" column leads the table (group-by-model view).
-            # F6: money columns (ctx · TPS · 8pk · status) directly after the
-            # identity; topology/engine (slug-redundant) at the tail so a
-            # 120-140-col terminal folds them, not the numbers.
+            # Layout, left→right: identity (model · slug) → config (weights · kv)
+            # → money (ctx · TPS · 8pk) → topology/engine (slug-redundant, fold
+            # first) → status LAST (its emoji glyph is the one variable-width cell,
+            # so nothing follows it to misalign — see _STATUS_GLYPH note).
             for expected in (
-                "model", "slug", "ctx", "TPS (rig)", "8pk (rig)",
-                "status", "topo", "engine",
+                "model", "slug", "weights", "kv", "ctx", "TPS (rig)", "8pk (rig)",
+                "topo", "engine", "status",
             ):
                 assert expected in col_labels, f"missing {expected!r}: {col_labels}"
             # "source" is gone.
@@ -955,9 +956,14 @@ class TestNavNodesExist:
             assert "fit" not in col_labels, col_labels
             # "model" is the FIRST column (mirrors switch.sh --list's grouping).
             assert col_labels[0] == "model", col_labels
-            # F6 — every money column sits LEFT of topo/engine.
+            # status is the LAST column (emoji-width slop has nothing after it).
+            assert col_labels[-1] == "status", col_labels
+            # config (weights · kv) sits between the identity and the money columns.
+            assert col_labels.index("weights") < col_labels.index("ctx"), col_labels
+            assert col_labels.index("kv") < col_labels.index("ctx"), col_labels
+            # every money column sits LEFT of topo/engine.
             fold = col_labels.index("topo")
-            for money in ("ctx", "TPS (rig)", "8pk (rig)", "status"):
+            for money in ("ctx", "TPS (rig)", "8pk (rig)"):
                 assert col_labels.index(money) < fold, col_labels
 
     @pytest.mark.asyncio
@@ -1120,6 +1126,164 @@ class TestCatalogWired:
             # empty query → all rows.
             pane.set_filter("")
             assert len(pane._filtered_entries()) == 2
+
+    def _label_entry(self, quant: str, weights_format: str = "", quant_label: str = ""):
+        """Minimal CatalogEntry whose compose path carries the given <quant>/ dir
+        (weights_variant derives from the path) + optional threaded format /
+        quant_label (the emit weights_quant_label / weights_format joins)."""
+        from club3090_cockpit.data import CatalogEntry as _CE
+        from club3090_tui_core import VariantRow as _VR
+
+        row = _VR(
+            slug=f"x/{quant}", switch_engine="vllm", launch_engine="vllm",
+            compose_dir=f"models/m/vllm/compose/dual/{quant}",
+            file="base.yml", port=8000, model="m", engine="vllm-stable",
+            kvcalc_key="SKIP", container="c",
+            compose_path=f"models/m/vllm/compose/dual/{quant}/base.yml",
+            status="production", ctx_label="262K", status_note="",
+        )
+        if weights_format:
+            object.__setattr__(row, "weights_format", weights_format)
+        if quant_label:
+            object.__setattr__(row, "weights_quant_label", quant_label)
+        return _CE(row=row)
+
+    def test_weights_label_quant_segment_beats_provider_prefix(self):
+        """Regression: the Weights column labeller must extract the QUANT segment
+        from provider-prefixed tokens — the retired hand-map fell back to the
+        first '-'-segment and showed the PROVIDER ("beellama", "unsloth",
+        "deepreinforce") for 18/30 catalog tokens."""
+        from club3090_cockpit.app import _weights_label
+
+        for tok, want in {
+            "beellama-q4ks-dflash": "q4ks", "beellama-q8kxl-mtp": "q8kxl",
+            "unsloth-q8kxl": "q8kxl", "deepreinforce-q4km": "q4km",
+            "carnice-v2-q5km": "q5km", "ubergarm-iq4ks": "iq4ks",
+            "byteshape-iq4xs": "iq4xs", "morikomorizz-q6kp": "q6kp",
+            "qwopus-coder-mtp-q5km": "q5km", "prithivmlmods-q8": "q8",
+        }.items():
+            assert _weights_label(self._label_entry(tok)) == want, tok
+
+    def test_weights_label_safetensors_formats(self):
+        from club3090_cockpit.app import _weights_label
+
+        for tok, want in {
+            "autoround-int4": "int4·AR", "autoround-int8": "int8·AR",
+            "awq": "awq4", "awq-bf16-int4": "awq4", "qat-awq-int4": "awq4",
+            "qat-w4a16": "w4a16", "fp8": "fp8", "fp8-dynamic": "fp8",
+            "bf16": "bf16", "nvidia-nvfp4": "nvfp4",
+        }.items():
+            assert _weights_label(self._label_entry(tok)) == want, tok
+
+    def test_weights_label_no_quant_segment_fallback_chain(self):
+        """Custom-named pack tokens with no quant segment fall back, in order:
+        the entry's explicit quant_label (GGUF-header ground truth baked into
+        the model YAML — prism-pro-dq→q3km, apex-compact→q4km, apex-quality→q6k),
+        then the coarse format ("gguf"), then the raw token."""
+        from club3090_cockpit.app import _weights_label
+
+        assert (
+            _weights_label(
+                self._label_entry("ex0bit-prism-pro-dq", "gguf", quant_label="q3km")
+            )
+            == "q3km"
+        )
+        assert _weights_label(self._label_entry("mudler-apex-compact", "gguf")) == "gguf"
+        assert (
+            _weights_label(self._label_entry("mudler-apex-compact"))
+            == "mudler-apex-compact"
+        )
+
+    @pytest.mark.asyncio
+    async def test_catalog_submission_legend_in_status_line(self):
+        """When any loaded row's numbers came from a community submission
+        (measurement.submission_rig set → ⑂-marked TPS cell), the catalog status
+        line carries the ⑂ legend so the marker is decodable in-place; without
+        one, no legend."""
+        entry = self._label_entry("autoround-int4")
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.populate([entry], None)
+            status = str(app.query_one("#catalog-status", Label).render())
+            assert "⑂" not in status
+            object.__setattr__(entry.measurement, "submission_rig", "2x5090")
+            pane.populate([entry], None)
+            status = str(app.query_one("#catalog-status", Label).render())
+            assert "⑂" in status and "community-submitted" in status
+
+    @pytest.mark.asyncio
+    async def test_catalog_hides_hw_incompatible_by_default_and_h_reveals(self):
+        """A slug whose fit verdict is incompatible-hw (registry required_sm
+        above the local card's SM — e.g. NVFP4 on Ampere) is HIDDEN from the
+        catalog by default, in the SAME [h] bucket as deprecated; the status
+        line counts it as incompatible-hw; [h] reveals it."""
+        from club3090_cockpit.data import FitVerdict
+
+        ok = self._label_entry("autoround-int4")
+        nv = self._label_entry("nvfp4")
+        nv.fit = FitVerdict(
+            verdict="incompatible-hw", required_sm=9.0, card_sm=8.6,
+            card="rtx-3090", error="requires sm >= 9 (this card is sm_8.6)",
+        )
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.populate([ok, nv], None)
+
+            # Default: the incompatible slug is hidden + counted.
+            assert [e.slug for e in pane._filtered_entries()] == ["x/autoround-int4"]
+            assert pane._incompatible_hidden_count() == 1
+            status = str(app.query_one("#catalog-status", Label).render())
+            assert "incompatible-hw" in status and "h" in status
+
+            # [h] reveals it (same toggle as deprecated).
+            pane.toggle_deprecated()
+            assert {e.slug for e in pane._filtered_entries()} == {
+                "x/autoround-int4", "x/nvfp4",
+            }
+            assert pane._incompatible_hidden_count() == 0
+
+            # And a compatible-fit verdict is never hidden.
+            nv.fit = FitVerdict(verdict="fits-clean", card="rtx-5090")
+            pane.toggle_deprecated()  # back to default hide mode
+            assert {e.slug for e in pane._filtered_entries()} == {
+                "x/autoround-int4", "x/nvfp4",
+            }
+
+    @pytest.mark.asyncio
+    async def test_download_card_warns_on_hw_incompatible(self):
+        """The Download confirm card leads with the no-compatible-hardware
+        warning (still proceedable) when the slug's fit verdict is
+        incompatible-hw — instead of pitching the download unqualified."""
+        from club3090_cockpit.data import FitVerdict
+
+        nv = self._label_entry("nvfp4")
+        nv.fit = FitVerdict(
+            verdict="incompatible-hw", required_sm=9.0, card_sm=8.6,
+            card="rtx-3090", error="requires sm >= 9 (this card is sm_8.6)",
+        )
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            screen = ConfirmActionScreen.__new__(ConfirmActionScreen)
+            # _serve_mode is a property over _serve_ctx; None → "" → the
+            # mode-"download" (offer) branch, which is the one under test.
+            screen._serve_ctx = None
+            text = ConfirmActionScreen._download_card_text(screen, nv)
+            assert "no compatible hardware detected" in text
+            assert "sm ≥ 9" in text
+            assert "sm_8.6" in text
+            assert "NOT boot on this machine" in text
+            # still proceedable: the manual/no-recipe path retains its message
+            # (this fixture has no hf_repo wired → manual note branch).
+            assert "no direct download recipe" in text
+            # compatible slug → no warning
+            nv.fit = FitVerdict(verdict="fits-clean", card="rtx-5090")
+            text2 = ConfirmActionScreen._download_card_text(screen, nv)
+            assert "no compatible hardware" not in text2
 
     @pytest.mark.asyncio
     async def test_catalog_hides_deprecated_by_default_and_h_reveals(self):
@@ -2121,6 +2285,78 @@ class TestBatch1OperateServingPanel:
             await _enter_operate(pilot)
             line = str(app.query_one("#serving-line", Static).render())
             assert "no model serving" in line.lower()
+
+    @pytest.mark.asyncio
+    async def test_pod_create_modal_collects_and_dismisses(self):
+        """C2 (#610 Phase C): the New-pod modal collects name · slug · GPUs
+        and dismisses the payload the app routes to pod.sh create; a blank
+        field stays open (no dismiss). The plan builder produces the create cmd
+        with requires_reconcile=False (a file write, not a GPU claim)."""
+        from club3090_cockpit.app import PodCreateScreen
+
+        captured = {}
+        app, _, _ = make_app(target=ServingTarget())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            screen = PodCreateScreen([1, 2], ["vllm/dual", "vllm/minimal"])
+            app.push_screen(screen, lambda r: captured.update(result=r))
+            await pilot.pause()
+            # GPUs prefill from the free set.
+            assert screen.query_one("#cc-gpus", Input).value == "1,2"
+            # A blank name → save is a no-op (stays open, no dismiss).
+            screen.action_save()
+            await pilot.pause()
+            assert "result" not in captured
+            # Fill it in → save dismisses the payload.
+            screen.query_one("#cc-name", Input).value = "coder"
+            screen.query_one("#cc-slug", Select).value = "vllm/dual"
+            screen.action_save()
+            await pilot.pause()
+            assert captured["result"] == {"name": "coder", "slug": "vllm/dual", "gpus": "1,2"}
+
+        # The plan builder: a file write, no reconcile, correct cmd.
+        plan = app._data.pod_create_plan("coder", "1,2", "vllm/dual")
+        assert plan.kind == "pod_create"
+        assert plan.requires_reconcile is False
+        assert plan.cmd == ["bash", "scripts/pod.sh", "create", "coder",
+                            "--gpus", "1,2", "--slug", "vllm/dual"]
+
+    @pytest.mark.asyncio
+    async def test_pod_view_groups_gpus_with_placement_badge(self):
+        """C1 (#610 Phase C): the pod-view groups estate instances with
+        their GPUs stacked and a placement health badge fed by the D3 verdict —
+        ✓ placed / ⚠ MISMATCH — and lists free GPUs. Empty when no pods."""
+        app, _, _ = make_app(target=ServingTarget())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            orch = app.query_one("#operate-orch-pane", OperateOrchPane)
+
+            # No pods → still show the discoverability affordance (the [N]
+            # create key), NOT an empty box — the feature was invisible before.
+            orch._populate_pods(EstateState(gpus=[GpuInfo(index=0, mem_used_mib=1)]))
+            empty = str(app.query_one("#pod-view", Static).render())
+            assert "none yet" in empty and "N" in empty
+
+            # Two pods on a 3-GPU rig: one placed-ok, one placement-mismatch;
+            # GPU 2 free.
+            state = EstateState(
+                gpus=[GpuInfo(index=i, mem_used_mib=1) for i in range(3)],
+                estate_report={"active_estate": {"instances": [
+                    {"name": "chat", "compose": "vllm/minimal", "gpus": [0], "port": 8020,
+                     "running": True, "placement": {"placement": "ok"}},
+                    {"name": "coder", "compose": "vllm/dual", "gpus": [1], "port": 8010,
+                     "running": True, "placement": {"placement": "mismatch"}},
+                ]}},
+            )
+            orch._populate_pods(state)
+            view = str(app.query_one("#pod-view", Static).render())
+            assert "Pods" in view
+            assert "chat" in view and "coder" in view          # both pod headers
+            assert "vllm/minimal" in view and ":8020" in view   # slug + port
+            assert "GPU0" in view and "GPU1" in view            # GPUs stacked under pods
+            assert "✓ placed" in view                           # ok badge (chat)
+            assert "MISMATCH" in view                           # ⚠ badge (coder)
+            assert "free: GPU2" in view                         # GPU 2 unassigned
 
 
 class TestF9SlugMasquerade:

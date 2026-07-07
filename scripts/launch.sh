@@ -95,6 +95,9 @@ fi
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/models-cache}"
 # shellcheck source=preflight.sh
 source "${ROOT_DIR}/scripts/preflight.sh"
+# Runtime-agnostic GPU selection helpers (#610 Phase A) — gpu_select_export
+# (UUID-pin the --gpus set) + gpu_select_assert_placement (post-boot check).
+source "${ROOT_DIR}/scripts/lib/gpu-select.sh"
 
 # --- arg parsing ---
 ENGINE=""
@@ -1309,8 +1312,10 @@ case "$_launch_status" in
 esac
 echo ""
 if [[ -n "$SELECTED_GPU_CSV" ]]; then
-  export CUDA_VISIBLE_DEVICES="$SELECTED_GPU_CSV"
-  export NVIDIA_VISIBLE_DEVICES="$SELECTED_GPU_CSV"
+  # Resolve the selected indices to GPU UUIDs and export both CUDA_/NVIDIA_
+  # VISIBLE_DEVICES so ONE selection mechanism works on both container GPU
+  # runtimes (#610). Logic lives in the shared gpu-select.sh lib (Phase A).
+  gpu_select_export "$SELECTED_GPU_CSV" "launch"
 fi
 if [[ -n "$TP_VALUE" ]]; then
   export TP="$TP_VALUE"
@@ -1338,6 +1343,12 @@ else
     echo "  - 'Genesis patches' / 'MTP acceptance' skipped on llama.cpp = expected (vLLM-only checks)"
     exit 1
   }
+  # Post-boot placement assertion (#610 Phase A): when the user pinned a GPU
+  # set, confirm the model actually landed there (loud warn on mismatch, never
+  # fatal). Runs after verify so the compute processes exist to inspect.
+  if [[ -n "$SELECTED_GPU_CSV" ]]; then
+    gpu_select_assert_placement "$ENDPOINT_CONTAINER" "${CUDA_VISIBLE_DEVICES:-}" "launch"
+  fi
 fi
 
 echo ""

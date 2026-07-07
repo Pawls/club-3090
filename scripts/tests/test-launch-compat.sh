@@ -64,6 +64,24 @@ fi
 assert_contains "$out" "C1: tp=2 * pp=1 = 2 != 1 cards selected"
 assert_contains "$out" "C5: kv_format=fp8_e4m3 not supported by hardware: rtx-3090"
 
+# fp8_e4m3 KV is WEIGHTS-CONDITIONAL on Ampere (sm_86): fp8-weights checkpoints route to
+# FlashInfer (native fp8 storage) and ARE supported; non-fp8 weights (Gemma W4A16, above)
+# route to Triton (needs SM89+) and are NOT. Validated #594 (Qwen fp8 dual-max on 2x 3090:
+# boot/decode/NIAH/quality/soak green) + learnings/gemma-4-31b.md 2026-07-01 (gemma fp8_e4m3
+# fails at KV-init on the same stack). Prove the ALLOW direction so the two stay in sync.
+GPU_3090_X2="0|RTX_3090|24576|8.6;1|RTX_3090|24576|8.6"
+out="$(python3 "$HELPER" validate-variant \
+  --variant vllm/qwen-27b-dual-max \
+  --gpu-spec "$GPU_3090_X2" \
+  --tp 2 \
+  --pp 1 \
+  --no-project-vram 2>&1)" || {
+  echo "ASSERTION FAILED: Qwen fp8-weights dual-max (fp8_e4m3 KV) rejected on 2x rtx-3090" >&2
+  echo "$out" >&2
+  exit 1
+}
+assert_not_contains "$out" "kv_format=fp8_e4m3 not supported"
+
 out="$(python3 "$HELPER" validate-variant \
   --variant vllm/minimal \
   --gpu-spec "$GPU_3090" \
@@ -173,9 +191,12 @@ out="$(python3 "$HELPER" resolve-variant-pin --variant "$DMAX" --format shell --
 assert_not_contains "$out" "VLLM_USE_DEEP_GEMM"        # Hopper keeps the fast path
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "$GPU_5090X2")"
 assert_not_contains "$out" "VLLM_USE_DEEP_GEMM"        # int4-weights slug: not the DeepGEMM path
+# fp8-DYNAMIC (compressed-tensors) is fp8-family too — agents-a1 must also disable
+out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/agents-a1-dual --format shell --gpu-spec "$GPU_5090X2")"
+assert_contains "$out" "VLLM_USE_DEEP_GEMM=0"          # fp8-dynamic weights route FP8 GEMM
 out="$(VLLM_USE_DEEP_GEMM=1 python3 "$HELPER" resolve-variant-pin --variant "$DMAX" --format shell --gpu-spec "$GPU_5090X2")"
 assert_not_contains "$out" "VLLM_USE_DEEP_GEMM=0"      # explicit user pin wins
-echo "  ok: fp8w DeepGEMM disable (5090/Ada down · Hopper keep · non-fp8 skip · user-pin — 5 cases)"
+echo "  ok: fp8w DeepGEMM disable (5090/Ada down · Hopper keep · non-fp8 skip · fp8-dynamic · user-pin — 6 cases)"
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml" config 2>/dev/null)"

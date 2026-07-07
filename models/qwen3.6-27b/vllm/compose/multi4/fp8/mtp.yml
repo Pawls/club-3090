@@ -3,14 +3,25 @@
 #   Model:     Qwen3.6-27B FP8 (near-lossless 8-bit; embedded mtp.fc head)
 #   Topology:  Quad 3090 (TP=4, NVLink auto-detected via NVLINK_MODE)
 #   Drafter:   MTP n=3 (built-in — the fp8 checkpoint embeds the mtp.* head)
-#   KV:        int8_per_token_head (1 byte/token, 8-bit near-lossless — higher KV fidelity than
-#              the fast tier's fp8_e5m2, and keeps the full 262K at TP=2 unlike bf16 KV)
+#   KV:        fp8 → e4m3 (1 byte/token; runs at scale=1.0 — checkpoint is weight-only —
+#              → FlashInfer backend → flat decode at depth). Mirrors dual-max (#594). NOT
+#              fp8_e5m2 (hard-rejected with FP8 checkpoints); int8-PTH is TRITON_ATTN-only.
 #   Vision:    yes
-#   Max ctx:   262K — int8-PTH KV keeps the full ctx at TP=4. Validated on the 2-card
+#   Max ctx:   262K — fp8/e4m3 KV keeps the full ctx at TP=4. Validated on the 2-card
 #              proxy (vllm/qwen-27b-dual-max, TP=2): KV pool 295K tok, 1.13× concurrency —
 #              tight on 2 cards, comfortable on 4.
 #   Genesis:   none — intentionally Genesis-free
-#   Status:    🧪 Experimental (TP=4 cross-rig — config = vllm/qwen-27b-dual-max validated @TP=2)
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   ⚠️ #595 (2026-07-06) flipped KV int8-PTH → fp8/e4m3. The fp8 KV is validated on the
+#                2-card dual-max proxy (all gates green: 8-pack 109 ties int8-PTH's 107, soak PASS,
+#                decode 2.3× at depth) — but the prior 4-card validation (@Whamp #446) was on the OLD
+#                int8-PTH KV. A fresh TP=4 report on the fp8 config is requested (@Whamp / @ryanmpelletier)
+#                to re-confirm at 4 cards and upgrade toward ✅.
+#              Cross-rig validation only (this dev rig has 2 cards). Prior int8-PTH promotion on @Whamp's
+#                4× 3090 full chain — #446: verify-full + verify-stress 7/7 + soak-continuous PASS (85/102) —
+#                BUT on an OLDER engine (pre-v0.24.0 pin) + a non-standard rig (aikitoria P2P kernel,
+#                mixed x4/x16/x8/x16 lanes), single report. No clean v0.24.0 4-card datapoint yet →
+#                a fresh one upgrades this to ✅. Byte-identical to the production dual-max @TP=4.
 #   Quality:   = the dual-max proxy (vllm/qwen-27b-dual-max): 8-pack 110/150 (--full, current
 #                harness 2026-06-07); 3-way A/B fast 109 · balanced 105 · max 110 = TIE — FP8 +
 #                int8-PTH is NOT an 8-pack quality win over the fast tier (the differentiation is
@@ -23,8 +34,9 @@
 # 2-card vllm/qwen-27b-dual-max (dual/fp8/mtp.yml) — only the tensor-parallel size and
 # the required gpu-count bump to 4. The dual-max at TP=2 is the on-rig validation proxy
 # (boots/serves @262K, KV pool 295K tok, 1.13× concurrency — tight on 2 cards,
-# comfortable on 4); this 4-card variant is 🧪 Experimental until a real ≥4× 3090 host
-# validates it (this dev rig has 2 cards).
+# comfortable on 4). Promoted to ⚠️ Production w/ caveats 2026-07-06 on @Whamp's 4× 3090
+# cross-rig full chain (#446); see the Caveats line above for the validation's limits
+# (older engine + non-standard rig, single report) — a clean v0.24.0 4-card report upgrades to ✅.
 #
 # Why "max accuracy": FP8 weights (8-bit, near-lossless per our KLD findings) + int8-PTH
 # KV (8-bit, higher fidelity than the fast tier's fp8_e5m2), vs the AutoRound-INT4 fast
@@ -35,7 +47,8 @@
 # Dependencies:
 #   - 4× RTX 3090 (Ampere SM 8.6), PCIe-only (no NVLink — works fine; NVLink
 #     auto-detected at boot via NVLINK_MODE if present)
-#   - vLLM STABLE v0.22.0 image (Docker Hub, immutable) — no source overlays. FP8
+#   - vLLM STABLE image (v0.24.0, from the `vllm-stable` engine profile — version in
+#     install.spec, #254; launcher injects it over the compose default) — no source overlays. FP8
 #     weights run via the Marlin W8A16 kernel on Ampere sm_86 (a memory win; there is
 #     no native FP8 compute speedup on Ampere).
 #
@@ -82,6 +95,12 @@ services:
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
@@ -92,6 +111,14 @@ services:
       - VLLM_NO_USAGE_STATS=1
       - VLLM_USE_FLASHINFER_SAMPLER=1
       - OMP_NUM_THREADS=1
+      # DeepGEMM (vLLM's fp8-GEMM path) is built for Hopper (sm_90) + datacenter
+      # Blackwell (sm_100/103). Consumer Blackwell (5090 / PRO 6000 / GB10,
+      # sm_120/121) has no recipe and hard-fails "recipe not found" at boot
+      # (disc #571). Pass-through: switch.sh/launch.sh auto-inject
+      # VLLM_USE_DEEP_GEMM=0 on those cards; if you run raw `docker compose` on a
+      # consumer Blackwell card, set it yourself (VLLM_USE_DEEP_GEMM=0). Unset =
+      # vLLM's arch default (DeepGEMM stays on where it works).
+      - VLLM_USE_DEEP_GEMM
       # expandable_segments:True crashes boot on some setups (likely cuMemMap path).
       # Known: JusefPol on NVLink (PR #31), WSL2 single-card 3090 Ti.
       # Override via .env: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
@@ -144,7 +171,7 @@ services:
       - --max-num-batched-tokens
       - "8192"
       - --kv-cache-dtype
-      - "${KV_CACHE_DTYPE:-int8_per_token_head}"
+      - "${KV_CACHE_DTYPE:-fp8}"
       - --trust-remote-code
       # froggeric chat-template override (see volumes block + docs/UPSTREAM.md)
       - --chat-template

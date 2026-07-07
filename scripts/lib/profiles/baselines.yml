@@ -67,11 +67,15 @@ baselines:
     # BENCHMARKS.md 2026-06-30 row — the v0.22.0→v0.24.0 pin-bump validation
     # gate (decode 70.7/93.5; MTP n=3 accept 3.51, KV pool 622K/2.37×,
     # verify-full 8/8, verify-stress NIAH→240K, soak-continuous PASS).
-    # Measured ON the current vllm-stable pin → FRESH. Quality gate was
-    # `--quick` only (toolcall 11/15 · IF 15/15) — no 8-pack yet; add
-    # quality_8pk on the next full gate.
+    # Measured ON the current vllm-stable pin → FRESH. On-rig quality gate was
+    # `--quick` (toolcall 11/15 · IF 15/15); the 8-pack below is CARRIED from
+    # multi-fast #584 (ryan, 4×3090, same AutoRound-INT4 weights, current harness)
+    # — TP-invariant (4-card = 2-card; TP is not a quality lever, confirmed on #584).
+    # Replace with an on-rig 2-card --full number if/when one is run.
     narr_tps: 70.7
     code_tps: 93.5
+    quality_8pk: "108/150"
+    quality_env: { harness: "carried from multi-fast #584 (ryan 4×3090, TP-invariant); on-rig 2-card --full pending" }
     ctx_validated: { tokens: 245760, niah: "clean@240K" }
     date: 2026-06-30
     engine_pin: "vllm/vllm-openai:v0.24.0"
@@ -83,9 +87,11 @@ baselines:
   vllm/qwen-27b-dual-fast:
     # alias of vllm/dual (same compose_path dual/autoround-int4/fp8-mtp.yml,
     # same port — the #340 tier naming). Row mirrors vllm/dual verbatim;
-    # update both together.
+    # update both together. 8-pack carried from multi-fast #584 (TP-invariant).
     narr_tps: 70.7
     code_tps: 93.5
+    quality_8pk: "108/150"
+    quality_env: { harness: "carried from multi-fast #584 (ryan 4×3090, TP-invariant); on-rig 2-card --full pending" }
     ctx_validated: { tokens: 245760, niah: "clean@240K" }
     date: 2026-06-30
     engine_pin: "vllm/vllm-openai:v0.24.0"
@@ -318,15 +324,47 @@ baselines:
     tier: local
 
   vllm/qwen-27b-dual-max:
-    # cross-rig submissions only — no local baseline row yet
+    # BENCHMARKS.md 2026-06-30 row (line 122) + disc #515 controlled A/B
+    # (c17490565, FP8-vs-W8A8, same compose isolated): decode 83.1/108.2,
+    # wall 82.0/104.6, TTFT 158/167 ms, KV pool 295K/1.13×, ~21.4 GB/card,
+    # NIAH clean@240K, 8-pack --full 107/150 (thinking-off). Measured ON the
+    # current v0.24.0 pin → FRESH. Corrects the stale "~56 TPS" probe.
+    # Promoted to ✅ Production 2026-07-06: soak-continuous PASS re-run on the
+    # v0.24.0 pin (0 err / 0 growth / 100% retention, p50 decode 85) + verify-
+    # full 9/9 + verify-stress fillable to 240,636 tok — completes the gate.
+    narr_tps: 83.1
+    code_tps: 108.2
+    ttft_ms: 158
+    prefill_tps: { 10k: 1364, 90k: 875 }
+    quality_8pk: "107/150"
+    ctx_validated: { tokens: 245760, niah: "clean@240K" }
+    date: 2026-06-30
+    engine_pin: "vllm/vllm-openai:v0.24.0"
+    rig: "2x3090-pcie"
+    power_cap_w: [370, 420]
+    submitted_by: "noonghunna"
+    tier: local
     submissions:
       2x5090-pcie:
         # inducted by catalog-baseline.sh --from-bundle from rebench tag 246-ab-fp8w (2026-07-05);
-        # evidence: verify-full pass · bench n=5 · TPS-ONLY (no quality) · NIAH ladder
+        # evidence: verify-full pass · bench n=5 · NIAH ladder. QUALITY added
+        # 2026-07-06 (disc #571 c17542975): full 8-pack thinking-off 102/150 —
+        # within ±5-7 noise of our 2×3090 fp8 (107), so FP8 is near-lossless on
+        # native Blackwell too (closes the "route Blackwell → FP8 weights" gate).
+        # One dip: dataextract 9/15 (vs 13 elsewhere) — mostly verifier_fail, the
+        # known DE brittleness cluster, not an obvious fp8 regression. thinking-on
+        # run pending.
         narr_tps: 134.52
         code_tps: 165.11
         ttft_ms: 56
         prefill_tps: { 10k: 3693, 90k: 1906 }
+        # 8-pack: n=2 on-rig --full runs — 102 (2026-07-05) and 109 (2026-07-06,
+        # full per-pack + JSON in the source thread). Both inside the ±5-7
+        # noise band of the 2x3090 primary's 109/150 (#594) → cross-arch
+        # quality PARITY (Blackwell native FP8 GEMM vs Ampere Marlin W8A16).
+        # Row carries the better-evidenced latest run.
+        quality_8pk: "109/150"
+        quality_env: { harness: "benchlocal-cli --full on-rig (2026-07-06, thinking=mixed pack-defaults, timeout-scaling 1.37); n=2 runs 102->109, both within noise of the 2x3090 primary 109; per-pack: TC 14/15 IF 15/15 SO 14/15 DE 9/15 RM 13/15 BF 14/15 HA 11/20 CLI 19/40; https://github.com/noonghunna/club-3090/discussions/571#discussioncomment-17553023" }
         ctx_validated: { tokens: 240635, niah: "clean@241K" }
         date: 2026-07-05
         engine_pin: "vllm/vllm-openai:v0.24.0"
@@ -335,6 +373,86 @@ baselines:
         source: "https://github.com/noonghunna/club-3090/discussions/571#discussioncomment-17536412"
         source_tag: "246-ab-fp8w"
         submitted_by: "guybrush01"
+        tier: submitted
+
+  vllm/qwen-27b-multi-fast:
+    # Cross-rig submission only — the reference bench has 2 cards, so there is
+    # no local 4-card row (and can't be). This is the FIRST measured data for
+    # the 4-card fast tier; promotion to ✅ Production rests on it (the compose
+    # header's own experimental-unblock: "until a real ≥4× 3090 host validates").
+    submissions:
+      4x3090-pcie:
+        # cross-rig report #584 (@ryanmpelletier, 4× 3090 Proxmox VM passthrough,
+        # v0.24.0, caps 350 W, all x16): verify-full 9/9 · verify-stress needles
+        # clean to 240K · soak-continuous PASS (0 err / 0 silent / <200 MiB) ·
+        # bench n=5 CV 4.2%/3.0%. KV pool 1.77M tok / 6.77× @262K (vs 2-card
+        # vllm/dual 622K/2.37×) — the 4-card win is concurrency, not single-stream
+        # speed (decode ~flat, TP=4 all-reduce over PCIe). ⚠ ceiling margin thin
+        # (851 MB @240K on driver 595, #149). QUALITY confirmed 2026-07-06 (#584
+        # follow-up): full 8-pack thinking-off 108/150 — within ±1 of the carried
+        # vllm/dual proxy (109), so TP-invariance is now MEASURED, not assumed.
+        narr_tps: 74.76
+        code_tps: 90.83
+        ttft_ms: 141
+        prefill_tps: { 10k: 1288, 90k: 1175 }
+        quality_8pk: "108/150"
+        quality_env: { harness: "benchlocal-cli @ club-3090 087d094 (sandboxes rebuilt 2026-07-06)" }
+        ctx_validated: { tokens: 240633, niah: "clean@240K" }
+        date: 2026-07-05
+        engine_pin: "vllm/vllm-openai:v0.24.0"
+        rig: "4x3090-pcie"
+        power_cap_w: [350, 350, 350, 350]
+        source: "https://github.com/noonghunna/club-3090/issues/584"
+        submitted_by: "ryanmpelletier"
+        tier: submitted
+
+  vllm/qwen-27b-multi-max:
+    # Cross-rig submission only — 4-card; our 2-card reference rig can't run it.
+    # ⚠ STALE: the only 4-card data (@Whamp #446) was measured on the OLD int8-PTH
+    # KV, before #595 flipped multi-max to fp8/e4m3 (and on a pre-v0.24.0 engine).
+    # Kept stale-flagged so the catalog shows something with the caveat — REPLACE
+    # with the pending 4-card fp8 re-test (the #584 request) when it lands.
+    submissions:
+      4x3090-pcie:
+        # #446 (@Whamp, 4× 3090 PCIe x4/x16/x8/x16, aikitoria P2P kernel, 230 W):
+        # verify-full + verify-stress 7/7 + soak-continuous PASS, 85.09/102.43.
+        # int8-PTH KV (pre-#595 fp8 flip) + pre-v0.24.0 engine → doubly STALE.
+        narr_tps: 85.09
+        code_tps: 102.43
+        ctx_validated: { tokens: 240633, niah: "clean@240K" }
+        date: 2026-06-19
+        engine_pin: "vllm/vllm-openai:v0.22.0"
+        rig: "4x3090-pcie"
+        power_cap_w: [230, 230, 230, 230]
+        source: "https://github.com/noonghunna/club-3090/issues/446"
+        submitted_by: "Whamp"
+        tier: submitted
+        stale: true
+
+  vllm/qwen-35b-a3b-single-nvfp4:
+    # Cross-rig submission only — NVFP4 needs Hopper/Blackwell; our sm_86 rig
+    # can't run it. FIRST community validation of the whole NVFP4 tier.
+    submissions:
+      1x5090-pcie:
+        # TWO independent 5090 validations, agreeing to within noise:
+        #  · #612 (@guybrush01, 5090, 185 GB RAM): decode 257.3/258.0 TPS,
+        #    verify-stress needle-clean to 120K (fillable 120,320 = 91% of
+        #    131K), soak PASS (0 growth). THE DEEPER run → ctx_validated below.
+        #  · #619 (@paulp83, laptop 5090, 28 GB RAM): decode 255.8/257.9 TPS,
+        #    verify-full 9/9, stress 9.8K+29K, soak PASS (15 MiB / p50 311).
+        # Both vLLM v0.24.0 modelopt_mixed, fp8 KV @131K, MTP off (as shipped).
+        # VRAM ~30.5/32 GB @131K — tight but flat. 8-pack quality NOT run on
+        # either (benchlocal sandboxes not built) → quality_8pk owed.
+        narr_tps: 255.79
+        code_tps: 257.93
+        ttft_ms: 60
+        ctx_validated: { tokens: 120320, niah: "clean@120K" }
+        date: 2026-07-07
+        engine_pin: "vllm/vllm-openai:v0.24.0"
+        rig: "1x5090-pcie"
+        power_cap_w: [600]   # uncapped (5090 default=max=600 W); PCIe x4 slot (single-card → no allreduce, decode unaffected)
+        source: "https://github.com/noonghunna/club-3090/issues/612"  # + #619 (two 5090s, see comment)
+        submitted_by: "guybrush01"  # + paulp83 (#619)
         tier: submitted
 
 # ───────────────────────────────────────────────────────────────────────────

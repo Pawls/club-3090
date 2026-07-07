@@ -455,14 +455,65 @@ fi
 # instead of letting users discover a dead path mid-run (club-3090 #492).
 if [[ -z "$PACK" ]] && { [[ "$MODE" == "--full" && "$NO_SANDBOX" != "1" ]] || [[ "$SANDBOXED_ONLY" == "1" ]]; }; then
   _sb_missing=()
+  _sb_stale=()
   if ! command -v docker >/dev/null 2>&1; then
     _sb_missing=("Docker not found on PATH")
   else
+    # Install time of the benchlocal-cli console script — rewritten on every
+    # (re)install, so it's a portable "CLI last updated" timestamp that works
+    # for pip-from-git AND editable-checkout installs alike.
+    _bl_bin="$(command -v benchlocal-cli || true)"
+    _bl_mtime=0
+    [[ -n "$_bl_bin" ]] && _bl_mtime="$(stat -c %Y "$_bl_bin" 2>/dev/null || echo 0)"
+    # Editable-checkout installs (maintainer rigs): `git pull` updates the code
+    # WITHOUT rewriting the console script, so the script mtime under-reports
+    # "CLI last updated". Take max(script mtime, checkout last-commit time).
+    if [[ -n "$_bl_bin" ]]; then
+      _bl_py="$(head -1 "$_bl_bin" 2>/dev/null | sed 's/^#!//')"
+      _bl_src_dir="$([[ -x "$_bl_py" ]] && "$_bl_py" -c 'import importlib.metadata as m, json
+try:
+    d = json.loads(m.distribution("benchlocal-cli").read_text("direct_url.json") or "{}")
+    u = d.get("url", "")
+    print(u[7:] if (d.get("dir_info") or {}).get("editable") and u.startswith("file://") else "")
+except Exception:
+    pass' 2>/dev/null)"
+      if [[ -n "$_bl_src_dir" && -d "$_bl_src_dir" ]]; then
+        _bl_commit_ts="$(git -C "$_bl_src_dir" log -1 --format=%ct 2>/dev/null || echo 0)"
+        [[ "$_bl_commit_ts" -gt "$_bl_mtime" ]] && _bl_mtime="$_bl_commit_ts"
+      fi
+    fi
     for _img in benchlocal-sandbox-bugfind benchlocal-sandbox-cli benchlocal-sandbox-hermes; do
-      docker image inspect "${_img}:latest" >/dev/null 2>&1 || _sb_missing+=("${_img}:latest")
+      if ! docker image inspect "${_img}:latest" >/dev/null 2>&1; then
+        _sb_missing+=("${_img}:latest")
+        continue
+      fi
+      # Staleness heuristic: the image was built BEFORE the currently-installed
+      # benchlocal-cli. If that update touched sandbox sources (verifiers,
+      # harness, deps), results run against the OLD behavior — the exact
+      # incident class where user rigs kept scoring on pre-fix sandboxes until
+      # told to rebuild manually. Heuristic (an unrelated reinstall also trips
+      # it), hence WARN not abort.
+      _img_created="$(docker image inspect "${_img}:latest" --format '{{.Created}}' 2>/dev/null || true)"
+      if [[ -n "$_img_created" && "$_bl_mtime" -gt 0 ]]; then
+        _img_epoch="$(date -d "$_img_created" +%s 2>/dev/null || echo 0)"
+        if [[ "$_img_epoch" -gt 0 && "$_img_epoch" -lt "$_bl_mtime" ]]; then
+          _sb_stale+=("${_img}:latest (built $(date -d "@${_img_epoch}" '+%F %H:%M') < CLI updated $(date -d "@${_bl_mtime}" '+%F %H:%M'))")
+        fi
+      fi
     done
   fi
   if [[ ${#_sb_missing[@]} -gt 0 ]]; then
+    if [[ "$SANDBOXED_ONLY" == "1" ]]; then
+      # --sandboxed-only with nothing to run in is a guaranteed-useless run:
+      # refuse up front instead of warn-and-skip-everything (#492 follow-up).
+      echo "✗ --sandboxed-only requested but the sandbox prerequisites are missing: ${_sb_missing[*]}" >&2
+      echo "  The sandbox packs need pre-built Docker images that aren't auto-pulled. Build them once" >&2
+      echo "  from a benchlocal-cli CHECKOUT (the build tooling isn't in the pip package):" >&2
+      echo "    git clone https://github.com/noonghunna/benchlocal-cli" >&2
+      echo "    bash benchlocal-cli/tools/build-sandboxes.sh        # ~30 GB free; prune if tight" >&2
+      echo "  then re-run. For a no-Docker run instead:  bash scripts/quality-test.sh --medium" >&2
+      exit 1
+    fi
     echo "[quality-test] ⚠  sandbox packs (BugFind / CLI / Hermes) will be SKIPPED — not available: ${_sb_missing[*]}" >&2
     echo "               They need pre-built Docker images that aren't auto-pulled. Build them once from a" >&2
     echo "               benchlocal-cli CHECKOUT (the build tooling isn't in the pip package):" >&2
@@ -470,6 +521,15 @@ if [[ -z "$PACK" ]] && { [[ "$MODE" == "--full" && "$NO_SANDBOX" != "1" ]] || [[
     echo "                 bash benchlocal-cli/tools/build-sandboxes.sh        # ~30 GB free; prune if tight" >&2
     echo "               then re-run --full. For a clean no-Docker run now:  bash scripts/quality-test.sh --medium" >&2
     echo "               (Continuing with the deterministic packs.)" >&2
+    echo >&2
+  fi
+  if [[ ${#_sb_stale[@]} -gt 0 ]]; then
+    echo "[quality-test] ⚠  sandbox image(s) OLDER than your installed benchlocal-cli:" >&2
+    for _s in "${_sb_stale[@]}"; do echo "                 - ${_s}" >&2; done
+    echo "               If that benchlocal-cli update changed sandbox sources (verifiers/harness)," >&2
+    echo "               your scores will reflect the OLD sandbox behavior. Rebuild to be safe:" >&2
+    echo "                 bash <benchlocal-cli-checkout>/tools/build-sandboxes.sh" >&2
+    echo "               (Heuristic — an unrelated CLI reinstall also trips this. Continuing.)" >&2
     echo >&2
   fi
 fi

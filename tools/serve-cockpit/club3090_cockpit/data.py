@@ -163,14 +163,21 @@ class FitVerdict:
     """Result of kv-calc --fit / switch.sh --explain's fit block for one slug."""
 
     # Real kv-calc --fit verdict enum (verified live):
-    #   fits-clean | fits-constrained | wont-fit | unknown
+    #   fits-clean | fits-constrained | wont-fit | incompatible-hw | unknown
     # plus the cockpit-internal "skip" (ik/llama kvcalc_key=SKIP — no vLLM fit).
-    verdict: str = "unknown"          # fits-clean | fits-constrained | wont-fit | unknown | skip
+    # "incompatible-hw" = the registry's required_sm exceeds the local card's
+    # compute capability (e.g. NVFP4 on Ampere) — VRAM is irrelevant, the
+    # kernels don't exist here. Drives the catalog default-hide + the
+    # download/serve hardware warning.
+    verdict: str = "unknown"          # fits-clean | fits-constrained | wont-fit | incompatible-hw | unknown | skip
     vram_est_gb: Optional[float] = None
     band_gb: Optional[float] = None
     max_ctx: Optional[int] = None
     card: str = ""
     error: str = ""
+    # Populated only for verdict == "incompatible-hw".
+    required_sm: Optional[float] = None
+    card_sm: Optional[float] = None
 
     # Compact glyph for the Catalog "fit" column.
     @property
@@ -179,6 +186,7 @@ class FitVerdict:
             "fits-clean": "●",
             "fits-constrained": "◐",
             "wont-fit": "○",
+            "incompatible-hw": "⊘",
             "skip": "·",
             "unknown": "·",
         }.get(self.verdict, "·")
@@ -194,6 +202,8 @@ class FitVerdict:
             max_ctx=_as_int(d.get("max_ctx")),
             card=card,
             error=str(d.get("error", "")),
+            required_sm=_as_float(d.get("required_sm")),
+            card_sm=_as_float(d.get("card_sm")),
         )
 
 
@@ -218,6 +228,11 @@ class Measurement:
     # True = measured on an older engine pin (re-bench owed), False = current
     # pin, None = undeterminable / not a baseline measurement.
     stale: Optional[bool] = None
+    # Slice 3: set when this row is a CROSS-RIG submission surfaced because the
+    # slug has NO on-rig primary (e.g. 4-card slugs our 2-card rig can't run) —
+    # the rig_class it came from.  The catalog cell then renders it ⑂-labelled so
+    # it's never mistaken for this rig's own bar.  None = a normal on-rig row.
+    submission_rig: Optional[str] = None
 
     @property
     def tps_label(self) -> str:
@@ -225,7 +240,10 @@ class Measurement:
             return "—"
         n = f"{self.narr_tps:.0f}" if self.narr_tps is not None else "—"
         c = f"{self.code_tps:.0f}" if self.code_tps is not None else "—"
-        return f"{n}/{c}"
+        lab = f"{n}/{c}"
+        if self.submission_rig:
+            lab += "  [dim]⑂[/dim]"
+        return lab
 
     @property
     def quality_label(self) -> str:
@@ -713,7 +731,7 @@ class ActionPlan:
     The reconcile gate is consulted BEFORE execution.
     """
 
-    kind: str                           # "serve" | "set_default" | "clear_default" | "scene" | "estate_down" | "container" | "validation" | "submit_bench" | "power_cap" | "power_cap_sweep" | "prune" | "container_rm"
+    kind: str                           # "serve" | "set_default" | "clear_default" | "scene" | "estate_down" | "container" | "validation" | "submit_bench" | "power_cap" | "power_cap_sweep" | "prune" | "container_rm" | "pod_create"
     cmd: list[str]
     description: str = ""
     is_write: bool = True

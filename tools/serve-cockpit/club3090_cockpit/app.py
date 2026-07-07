@@ -42,6 +42,7 @@ NEVER executed live — tests inject fakes and conftest blocks the real spawn.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections import OrderedDict
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -115,12 +116,17 @@ from .services import CockpitData
 
 _STATUS_GLYPH: dict[str, str] = {
     "production": "✅",
-    "caveats": "⚠️",
+    # ⚠️ 👁️ ⏸️ 🗑️ carry a U+FE0F variation selector — Rich's cell_len reserves
+    # 2 cols but many terminals render them 1-wide, shifting every column after
+    # the status cell.  These replacements are Emoji_Presentation=Yes (no VS16),
+    # so cell_len == terminal width == 2 everywhere.  (Status is also the LAST
+    # catalog column now, so any residual slop has nothing to misalign.)
+    "caveats": "❗",
     "experimental": "🧪",
     "incubating": "🐣",
-    "preview": "👁️",
-    "upstream-gated": "⏸️",
-    "deprecated": "🗑️",
+    "preview": "👀",
+    "upstream-gated": "🚧",
+    "deprecated": "🚫",
 }
 
 
@@ -137,6 +143,64 @@ def _error_headline(err: str) -> str:
 
 def _status_glyph(status: str) -> str:
     return _STATUS_GLYPH.get(status.lower(), status)
+
+
+_KV_LABELS = {
+    "int8_per_token_head": "int8-PTH", "fp8_e4m3": "fp8/e4m3",
+    "fp8_e5m2": "fp8/e5m2", "fp8": "fp8", "turboquant_3bit_nc": "tq3",
+    "turboquant_4bit_nc": "tq4", "bf16": "bf16", "fp16": "fp16",
+    "q4_0": "q4_0", "q4_1": "q4_1", "q5_0": "q5_0", "q8_0": "q8_0",
+}
+
+
+# Weights column — the label is DERIVED from the weights_variant token (the
+# compose <quant>/ dir name) by PATTERN, not by a hand-map keyed on full tokens:
+# the hand-map drifted immediately (18/30 catalog tokens fell to a naive
+# first-segment fallback that showed the PROVIDER prefix — "beellama",
+# "unsloth", "deepreinforce" — instead of the quant).  Precedence: an explicit
+# GGUF quant segment (q4km / q8kxl / iq4ks / q6kp …) wins; then the known
+# safetensors formats; else the model profile's `format:` (threaded through the
+# emit as row.weights_format) — the honest answer for fine-tune artifact slugs
+# whose token carries no quant segment (mudler-apex-compact → "gguf").
+_GGUF_SEG = re.compile(r"^i?q\d[a-z0-9_]*$")
+
+
+def _weights_label(e: "CatalogEntry") -> str:
+    """Compact weights-quant token for the catalog Weights column."""
+    wv = (e.weights_variant or "").lower()
+    if not wv:
+        return "—"
+    segs = wv.split("-")
+    for s in segs:
+        if _GGUF_SEG.match(s):
+            return s
+    if "nvfp4" in segs:
+        return "nvfp4"
+    if "w4a16" in segs:
+        return "w4a16"
+    if "awq" in segs:  # awq · awq-bf16-int4 · qat-awq-int4 — all int4 weights
+        return "awq4"
+    if "autoround" in segs:
+        return "int8·AR" if "int8" in segs else "int4·AR"
+    if "fp8" in segs:  # fp8 · fp8-dynamic
+        return "fp8"
+    if "bf16" in segs:
+        return "bf16"
+    # No quant segment in the token (custom-named mixed-quant packs like
+    # PRISM-PRO-DQ / APEX-MTP-I-*): prefer the entry's explicit quant_label
+    # (GGUF-header ground truth baked into the model YAML), then the coarse
+    # format ("gguf"), then the raw token.
+    return (
+        (getattr(e.row, "weights_quant_label", "") or "")
+        or (getattr(e.row, "weights_format", "") or "")
+        or wv
+    )
+
+
+def _kv_label(e: "CatalogEntry") -> str:
+    """Compact KV-cache-format token for the catalog KV column (from the registry)."""
+    kv = (getattr(e.row, "kv_format", "") or "").lower()
+    return _KV_LABELS.get(kv, kv or "—")
 
 
 def _weights_glyph(e: CatalogEntry) -> str:
@@ -628,6 +692,7 @@ class HelpScreen(ModalScreen):
             "[bold]Run & Operate · Orchestration[/bold]",
             "  [cyan]⏎[/cyan] switch scene   [cyan]k[/cyan] stop THIS model   [cyan]b[/cyan] restart serving   [cyan]n[/cyan] switch model (→ Catalog tab)   (writes gated)",
             "  [cyan]o[/cyan] stop ALL (tears down the whole estate)   [cyan]c[/cyan] power cap… (default 230W / clear / custom W)   (all gated)",
+            "  [cyan]N[/cyan] new pod (run several models on GPU subsets — name · slug · GPU set, fit-checked + gated)",
             "[bold]Run & Operate · Containers[/bold]",
             "  [cyan]l[/cyan] logs   [cyan]t[/cyan] top (read)   [cyan]s[/cyan] restart   [cyan]x[/cyan] stop   [cyan]X[/cyan] rm   (writes gated)",
             "[bold]Run & Operate · Doctor[/bold]  — is it serving correctly?",
@@ -655,8 +720,8 @@ class HelpScreen(ModalScreen):
             "",
             "[bold]Status glyphs[/bold]",
             "",
-            "  ✅ production   ⚠️  caveats   🧪 experimental",
-            "  🐣 incubating  👁️  preview   ⏸️  upstream-gated   🗑️  deprecated",
+            "  ✅ production   ❗ caveats   🧪 experimental",
+            "  🐣 incubating  👀 preview   🚧 upstream-gated   🚫 deprecated",
             "",
             "[bold]Fit glyphs (local card)[/bold]",
             "",
@@ -778,12 +843,14 @@ class CatalogPane(Container):
         # fit verdict is a pick-the-serve decision input, shown when you ⏎ a row).
         # Fit is STILL computed (it feeds the pop-up + the serving-row exemption);
         # it just no longer occupies a Catalog column.
-        # F6 — column budget: the money columns (ctx · TPS · 8pk · status) come
-        # RIGHT after the identity (model · slug); topology/engine — largely
-        # redundant with the slug, which encodes both — moved to the tail so a
-        # 120-140-col terminal folds THEM, not the numbers a user picks by.
+        # Column budget, left→right: identity (model · slug) → config the user
+        # picks by (weights · kv) → money (ctx · TPS · 8pk) → topology/engine
+        # (largely slug-redundant, fold first on a narrow terminal) → status.
+        # Status is deliberately LAST: its glyph is the one emoji-width column, so
+        # putting it at the tail means nothing follows it to misalign (belt +
+        # braces with the VS16-free glyphs in _STATUS_GLYPH).
         # "(rig)" keeps the our-rig provenance at 4 chars ("our rig" cost 8 more).
-        table.add_columns("model", "slug", "ctx", "TPS (rig)", "8pk (rig)", "status", "topo", "engine")
+        table.add_columns("model", "slug", "weights", "kv", "ctx", "TPS (rig)", "8pk (rig)", "topo", "engine", "status")
         # Full enriched catalog, and the current filter substring.
         self._entries: list[CatalogEntry] = []
         self._filter: str = ""
@@ -829,7 +896,7 @@ class CatalogPane(Container):
             self._entries = []
             table.clear()
             status_label.update(f"[red]Catalog error:[/red] {error}")
-            table.add_row("—", "—", "—", "—", "—", "—", "—", "—")
+            table.add_row("—", "—", "—", "—", "—", "—", "—", "—", "—", "—")
             return
 
         self._entries = list(entries)
@@ -905,20 +972,32 @@ class CatalogPane(Container):
             table.add_row(
                 model_cell,
                 slug_cell,
+                _weights_label(e),
+                _kv_label(e),
                 e.ctx_label or "—",
                 tps,
                 e.measurement.quality_label,
-                _status_glyph(e.status),
                 e.topology,
                 e.engine,
+                _status_glyph(e.status),
             )
 
         banner = f"[yellow]{self._model_dir_note}[/yellow]  ·  " if self._model_dir_note else ""
         # Surface an active model scope (dropdown) the same way the text filter is shown.
         scope = f"model: [cyan]{self._model_filter}[/cyan]  ·  " if self._model_filter else ""
-        # [h] hint: N 🗑️ deprecated slugs hidden (0 when revealed).
+        # [h] hint: N 🗑️ deprecated + M hardware-incompatible slugs hidden
+        # (both 0 when revealed — one toggle, one bucket).
         dep_n = self._deprecated_hidden_count()
-        dep_note = f"  ·  [dim]+{dep_n} deprecated hidden — h[/dim]" if dep_n else ""
+        inc_n = self._incompatible_hidden_count()
+        _hidden_bits = []
+        if dep_n:
+            _hidden_bits.append(f"+{dep_n} deprecated")
+        if inc_n:
+            _hidden_bits.append(f"+{inc_n} incompatible-hw")
+        dep_note = (
+            f"  ·  [dim]{' · '.join(_hidden_bits)} hidden — h[/dim]"
+            if _hidden_bits else ""
+        )
         if self._filter or self._model_filter:
             tail = f"  ·  filter: {self._filter!r}" if self._filter else ""
             status_label.update(
@@ -930,8 +1009,16 @@ class CatalogPane(Container):
                 if self._has_stale_baseline()
                 else ""
             )
+            # ⑂ legend — shown whenever any row's numbers come from a COMMUNITY
+            # SUBMISSION (rig-labelled, never the local bar) so the marker on the
+            # TPS cell is decodable without opening the slug detail card.
+            sub_note = (
+                "  ([dim]⑂ = community-submitted numbers (other rig) — not a local baseline[/dim])"
+                if self._has_submission_measurement()
+                else ""
+            )
             status_label.update(
-                f"{banner}{len(self._entries)} variants loaded from registry{stale_note}{dep_note}"
+                f"{banner}{len(self._entries)} variants loaded from registry{stale_note}{sub_note}{dep_note}"
             )
 
         # #9/A8 — keep the preview strip in sync with the cursor after a (re-)render
@@ -995,12 +1082,28 @@ class CatalogPane(Container):
     def _has_stale_baseline(self) -> bool:
         return any(e.measurement.stale is True for e in self._entries)
 
+    def _has_submission_measurement(self) -> bool:
+        """Any loaded row whose numbers came from a community submission (the
+        ⑂-marked cells) — drives the ⑂ legend in the status line."""
+        return any(
+            getattr(e.measurement, "submission_rig", None) for e in self._entries
+        )
+
     def _filtered_entries(self) -> list[CatalogEntry]:
-        # Hide 🗑️ deprecated slugs by default (mirrors `switch.sh --list`); [h] reveals them.
+        # Hide 🗑️ deprecated slugs by default (mirrors `switch.sh --list`); [h]
+        # reveals them. Hardware-INCOMPATIBLE slugs (fit verdict incompatible-hw —
+        # the registry's required_sm exceeds this rig's card, e.g. NVFP4 on
+        # Ampere) share the SAME bucket: hidden by default, [h] reveals. The
+        # verdict lands with async fit enrichment, so such rows may be visible
+        # briefly on first paint, then fold away on refresh_enriched.
         pool = (
             self._entries
             if self._show_deprecated
-            else [e for e in self._entries if (e.status or "").strip().lower() != "deprecated"]
+            else [
+                e for e in self._entries
+                if (e.status or "").strip().lower() != "deprecated"
+                and not self._hw_incompatible(e)
+            ]
         )
         # Model-scope dropdown first — AND-combined with the text filter below.
         base = (
@@ -1056,6 +1159,27 @@ class CatalogPane(Container):
         now-widened / narrowed set)."""
         self._show_deprecated = not self._show_deprecated
         self._render_rows()
+
+    @staticmethod
+    def _hw_incompatible(e: CatalogEntry) -> bool:
+        """This rig's card can't run the slug's kernels (kv-calc fit verdict
+        incompatible-hw — required_sm above the local card's SM)."""
+        try:
+            return getattr(e.fit, "verdict", "") == "incompatible-hw"
+        except Exception:
+            return False
+
+    def _incompatible_hidden_count(self) -> int:
+        """How many hardware-incompatible slugs are currently hidden (0 once
+        revealed via [h]; deprecated slugs are counted by their own counter,
+        not double-counted here)."""
+        if self._show_deprecated:
+            return 0
+        return sum(
+            1 for e in self._entries
+            if self._hw_incompatible(e)
+            and (e.status or "").strip().lower() != "deprecated"
+        )
 
     def _deprecated_hidden_count(self) -> int:
         """How many 🗑️ deprecated slugs are currently hidden (0 once revealed)."""
@@ -1172,8 +1296,10 @@ class CatalogPane(Container):
             c = s.get("code_tps")
             tps = (f"{n:.0f}" if n is not None else "—") + "/" + (
                 f"{c:.0f}" if c is not None else "—")
-            sub = (
-                f"  [bold]⑂ {rc}[/bold]  {tps} TPS"
+            sub = f"  [bold]⑂ {rc}[/bold]  {tps} TPS"
+            if s.get("quality_8pk"):
+                sub += f"  ·  8pk {s['quality_8pk']}"
+            sub += (
                 f"  [dim]({s.get('tier')} · {s.get('date')} · {s.get('submitted_by')})[/dim]"
             )
             if s.get("stale") is True:
@@ -1644,9 +1770,29 @@ class ConfirmActionScreen(ModalScreen):
                 "continues) · [cyan]k[/cyan] cancels the download[/dim]"
             )
         # mode "download"
+        # Hardware-incompatibility interstitial (still proceedable): the slug's
+        # kernels can't run on THIS rig's card (required_sm gate) — say so
+        # BEFORE the size/disk pitch so nobody downloads 20 GB expecting it to
+        # boot here. Download stays allowed (staging for another rig / a future
+        # GPU is legitimate).
+        _hw_warn = ""
+        fv = getattr(entry, "fit", None) if entry is not None else None
+        if fv is not None and getattr(fv, "verdict", "") == "incompatible-hw":
+            req = getattr(fv, "required_sm", None)
+            got = getattr(fv, "card_sm", None)
+            req_s = f"sm ≥ {req:g}" if req is not None else "a newer GPU architecture"
+            got_s = f" — this rig's card is sm_{got:g}" if got is not None else ""
+            _hw_warn = (
+                f"  [red]⊘ no compatible hardware detected[/red] — this slug requires "
+                f"[bold]{req_s}[/bold] (Hopper/Blackwell class){got_s}.\n"
+                "  [yellow]It will NOT boot on this machine.[/yellow] You can still "
+                "download the weights\n"
+                "  (e.g. to stage them for another rig), but serving here will be refused.\n\n"
+            )
         if w is None or not w.hf_repo:
             return (
                 f"  [bold]{slug}[/bold]\n\n"
+                f"{_hw_warn}"
                 "  [yellow]⚠ no direct download recipe[/yellow] — these weights are "
                 "manual (no HF repo wired).\n  See the model profile's manual_note."
             )
@@ -1662,6 +1808,7 @@ class ConfirmActionScreen(ModalScreen):
             warn = "  [yellow]⚠ partial download on disk — Download resumes it[/yellow]\n"
         return (
             f"  [bold]{slug}[/bold]   [dim]weights not on disk[/dim]\n"
+            f"{_hw_warn}"
             f"  repo   [dim]{w.hf_repo}[/dim]   ({size})\n"
             f"{disk}\n"
             f"{warn}\n"
@@ -1710,6 +1857,16 @@ class ConfirmActionScreen(ModalScreen):
                 if fv.band_gb is not None:
                     fit_line += f" / {float(fv.band_gb):.1f} GiB band"
             lines.append(f"  [bold]fit[/bold]    {fit_line}")
+            if fv.verdict == "incompatible-hw":
+                req = fv.required_sm
+                got = fv.card_sm
+                req_s = f"sm ≥ {req:g}" if req is not None else "a newer GPU architecture"
+                got_s = f" — this rig's card is sm_{got:g}" if got is not None else ""
+                lines.append(
+                    f"  [red]⊘ no compatible hardware detected[/red] — requires "
+                    f"{req_s} (Hopper/Blackwell class){got_s}. "
+                    "[yellow]Serving here will NOT boot.[/yellow]"
+                )
             note = (entry.status_note or "").strip()
             if note:
                 lines.append(f"  [bold]caveat[/bold] [yellow]{note}[/yellow]")
@@ -2152,6 +2309,10 @@ class OperateOrchPane(Container):
                 yield Label("GPU1", classes="gpu-card-title")
                 yield Static("[dim]querying nvidia-smi…[/dim]", id="gpu1-bar")
             yield Static("[dim]reading estate…[/dim]", id="serving-line")
+            # C1 (#610 Phase C): pods (estate instances) grouped with their
+            # GPUs stacked + a placement health badge. Shown only when the
+            # estate file declares ≥1 pod; empty otherwise.
+            yield Static("", id="pod-view")
             yield Static("[dim]reading health.sh…[/dim]", id="doctor-line")
             yield Label("Scenes  [dim](⏎ to switch — gated)[/dim]", id="scene-heading")
             scene_table: DataTable = DataTable(
@@ -2223,6 +2384,7 @@ class OperateOrchPane(Container):
         self._populate_error(state)
         self._populate_gpus(state)
         self._populate_serving(state)
+        self._populate_pods(state)
         self._populate_doctor(state)
         self._populate_scenes(state.scenes)
         # #11-ext — re-render the scene preview every poll (NOT only when the scene
@@ -2341,6 +2503,53 @@ class OperateOrchPane(Container):
         if not bits:
             return ""
         return "\n   " + "  ·  ".join(bits)
+
+    def _populate_pods(self, state: EstateState) -> None:
+        """C1 (#610 Phase C): render the estate's PODS (instances) grouped —
+        each pod header (name · slug · :port · state · placement badge) with
+        its member GPUs stacked beneath, and a trailing 'free GPUs' line. Reads
+        the `active_estate.instances` block of the report-state poll (which now
+        carries the per-instance placement verdict, D3). With no pods yet it
+        still shows a one-line affordance ([N] new pod) so the feature is
+        discoverable on a fresh (empty-estate) setup."""
+        view = self.query_one("#pod-view", Static)
+        est = (getattr(state, "estate_report", None) or {}).get("active_estate") or {}
+        instances = est.get("instances") if isinstance(est, dict) else None
+        if not instances:
+            # Discoverability: no pods is the DEFAULT — surface the create key
+            # rather than rendering nothing (the feature was invisible before).
+            view.update("[bold]Pods[/bold]  [dim]none yet — [/dim][cyan]N[/cyan][dim] new pod (run several models on GPU subsets)[/dim]")
+            return
+        total_gpus = len(getattr(state, "gpus", []) or [])
+        claimed = {g for inst in instances for g in (inst.get("gpus") or [])}
+        free = sorted(i for i in range(total_gpus) if i not in claimed) if total_gpus else []
+        lines: list[str] = [f"[bold]Pods[/bold]  [dim]({len(instances)} · {len(claimed)}/{total_gpus or '?'} GPUs claimed)[/dim]"]
+        for inst in instances:
+            name = str(inst.get("name") or "?")
+            slug = str(inst.get("compose") or inst.get("slug") or "?")
+            port = inst.get("port")
+            running = inst.get("running")
+            gpus = inst.get("gpus") or []
+            placement = (inst.get("placement") or {}).get("placement", "unknown")
+            # State glyph + placement badge (the C1 health signal, fed by the
+            # Phase-A assertion via D3 — never renders requested-but-not-actual).
+            if running is True:
+                state_glyph = "[green]●[/green]"
+                badge = {
+                    "ok": "  [green]✓ placed[/green]",
+                    "mismatch": "  [red]⚠ PLACEMENT MISMATCH[/red]",
+                }.get(placement, "  [dim]placement …[/dim]")
+            elif running is False:
+                state_glyph, badge = "[dim]○[/dim]", "  [dim]down (plan)[/dim]"
+            else:
+                state_glyph, badge = "[yellow]◐[/yellow]", "  [yellow]liveness unknown[/yellow]"
+            port_s = f":{port}" if port else ""
+            lines.append(f"  {state_glyph} [bold]{name}[/bold]  [dim]{slug}{port_s}[/dim]{badge}")
+            # GPUs stacked under the pod header.
+            gpu_s = " ".join(f"GPU{g}" for g in gpus) if gpus else "[dim](none)[/dim]"
+            lines.append(f"      [dim]└─[/dim] {gpu_s}")
+        lines.append(f"  [dim]free: {('GPU' + ' GPU'.join(map(str, free))) if free else '(none)'}[/dim]")
+        view.update("\n".join(lines))
 
     def populate_power_cap(self, st: PowerCapState) -> None:
         # #10(a): cache the active cap per GPU so the GPU cards can annotate it.
@@ -3842,6 +4051,81 @@ class SettingsScreen(ModalScreen):
 
     def action_cancel(self) -> None:
         self.app.pop_screen()
+
+
+class PodCreateScreen(ModalScreen):
+    """C2 (#610 Phase C): compose a new pod (a model on a GPU set + port).
+    Collects name · slug · GPU set, then ``dismiss``es the params — the app
+    routes them through pod.sh create (which runs the D1 fit-vs-set +
+    validate_estate gates and refuses a bad set), matching the codebase rule
+    that a modal never touches the rig itself. dismiss: ``{"name","slug",
+    "gpus"}`` or ``None`` on cancel."""
+
+    DEFAULT_CSS = """
+    PodCreateScreen {
+        align: center middle;
+    }
+    PodCreateScreen > Vertical {
+        width: 84;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    PodCreateScreen .cc-title { text-style: bold; color: $accent; margin-bottom: 1; }
+    PodCreateScreen .cc-field { margin-top: 1; }
+    PodCreateScreen Input { margin-bottom: 1; }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Create", show=True, priority=True),
+        Binding("escape", "cancel", "Cancel", show=True),
+    ]
+
+    def __init__(self, free_gpus: list[int], slugs: list[str], **kwargs):
+        super().__init__(**kwargs)
+        self._free_gpus = free_gpus or []
+        self._slugs = slugs or []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("New pod", classes="cc-title")
+            yield Label("Name", classes="cc-field")
+            yield Input(placeholder="e.g. coder", id="cc-name")
+            yield Label("Model / slug", classes="cc-field")
+            yield Select(
+                [(s, s) for s in self._slugs],
+                allow_blank=True, id="cc-slug",
+            )
+            free = ",".join(str(g) for g in self._free_gpus)
+            yield Label(
+                f"GPUs  [dim](comma-separated indices; count must match the slug's TP. "
+                f"free now: {free or 'none'})[/dim]",
+                classes="cc-field",
+            )
+            yield Input(value=free, placeholder="e.g. 1,2", id="cc-gpus")
+            yield Label(
+                "[dim]Ctrl+S create · Esc cancel · the create is fit-checked against the "
+                "selected GPUs and confirmed before it writes[/dim]",
+                classes="cc-field",
+            )
+            yield Footer()
+
+    def action_save(self) -> None:
+        name = self.query_one("#cc-name", Input).value.strip()
+        slug_val = self.query_one("#cc-slug", Select).value
+        slug = "" if slug_val is Select.BLANK else str(slug_val).strip()
+        gpus = self.query_one("#cc-gpus", Input).value.strip()
+        if not (name and slug and gpus):
+            self.app.notify(
+                "Name, slug and GPUs are all required.",
+                title="New pod", severity="warning", timeout=4,
+            )
+            return
+        self.dismiss({"name": name, "slug": slug, "gpus": gpus})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class PowerCapMenuScreen(ModalScreen):
@@ -5353,6 +5637,7 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("serving_restart", "Restart serving", "Orchestration — restart the serving container (gated)"),
     ("serving_switch", "Switch model", "Orchestration — flip to the Catalog tab to pick another"),
     ("estate_off", "Stop ALL (estate down)", "Orchestration — tear down the whole estate (gated)"),
+    ("new_pod", "New pod…", "Orchestration — compose a new pod (model + GPU set), fit-checked + gated"),
     ("power_cap", "Power cap…", "Orchestration — power-cap menu: default 230W / clear / custom W (gated)"),
     ("power_cap_sweep", "Power cap sweep", "Doctor — sweep power caps + bench at each (gated)"),
     ("container_logs", "Container logs", "Containers — stream the selected container's logs"),
@@ -5514,6 +5799,7 @@ class CockpitApp(App):
         Binding("X", "container_rm", "Remove", show=False),
         # Operate · Orchestration — stop all (estate down, gated write).
         Binding("o", "estate_off", "Stop all", show=False),
+        Binding("N", "new_pod", "New pod", show=False),
         # Operate · Orchestration — power-cap menu (default / clear / custom W).
         Binding("c", "power_cap", "Power cap", show=False),
         # Operate · Doctor — power-cap sweep (heavy A/B bench; gated rig write).
@@ -5712,6 +5998,7 @@ class CockpitApp(App):
         "full_report":      ({0, 1}, {"tab-doctor", "tab-run"}),
         # Merged mode 0 · Orchestration tab
         "estate_off":       ({0}, {"tab-orchestration"}),
+        "new_pod":      ({0}, {"tab-orchestration"}),
         "power_cap":        ({0}, {"tab-orchestration"}),
         # power-cap sweep lives on Doctor now (a tuning/diagnostic bench, not a
         # live-estate control) — prune was removed from the cockpit entirely.
@@ -7074,6 +7361,20 @@ class CockpitApp(App):
             if b.get("stale") is True:
                 bar += "  [yellow]† re-bench owed[/yellow]"
             lines.append(bar)
+        # Cross-rig submissions — rig-labeled, NEVER merged into the bar (a 4-card /
+        # 5090 number isn't this rig's bar). This is what surfaces submission-only
+        # slugs (e.g. multi-fast: 4-card, no on-rig bar) in the detail card.
+        for rc, s in sorted((b.get("submissions") or {}).items()):
+            sn, sc = s.get("narr_tps"), s.get("code_tps")
+            stps = (f"{sn:.0f}" if sn is not None else "—") + "/" + (
+                f"{sc:.0f}" if sc is not None else "—")
+            sub = f"  [bold]⑂ {rc}[/bold]  {stps} TPS"
+            if s.get("quality_8pk"):
+                sub += f"  ·  8pk {s['quality_8pk']}"
+            sub += (
+                f"  [dim]({s.get('tier')} · {s.get('date')} · {s.get('submitted_by')})[/dim]"
+            )
+            lines.append(sub)
         note = (getattr(row, "status_note", "") or "").strip()
         if note:
             lines.append(f"  [yellow]caveat: {note}[/yellow]")
@@ -8918,6 +9219,43 @@ class CockpitApp(App):
         self.push_screen(ConfirmActionScreen(plan))
 
     # ── Operate · Orchestration: power cap (gated rig write) ────────────────────────────
+
+    def _pod_free_gpus(self) -> list[int]:
+        """Host GPU indices not already claimed by an estate pod — the hint
+        the New-pod modal prefills. Best-effort off the last estate poll."""
+        st = getattr(self, "_last_estate_state", None)
+        if st is None:
+            return []
+        total = len(getattr(st, "gpus", []) or [])
+        est = (getattr(st, "estate_report", None) or {}).get("active_estate") or {}
+        instances = est.get("instances") if isinstance(est, dict) else None
+        claimed = {g for inst in (instances or []) for g in (inst.get("gpus") or [])}
+        return [i for i in range(total) if i not in claimed]
+
+    def action_new_pod(self) -> None:
+        """[n] in Operate · Orchestration: open the New-pod modal (C2, #610).
+        Collects name · slug · GPU set; the create routes through pod.sh
+        create (D1 fit + validate_estate) via the standard confirm gate. NEVER
+        auto-fired."""
+        if self._active_mode != 0 or self._active_operate_tab() != "tab-orchestration":
+            return
+        slugs = sorted({r.slug for r in (self._variants or []) if getattr(r, "slug", "")})
+        if not slugs:
+            self.notify("No catalog slugs loaded yet — try again after the estate poll.",
+                        title="New pod", severity="warning", timeout=4)
+            return
+        self.push_screen(
+            PodCreateScreen(self._pod_free_gpus(), slugs),
+            self._on_pod_create,
+        )
+
+    def _on_pod_create(self, result) -> None:
+        """Modal dismiss → build the pod.sh create WRITE + route through the
+        confirm gate. ``result`` is ``{"name","slug","gpus"}`` or ``None``."""
+        if not result:
+            return
+        plan = self._data.pod_create_plan(result["name"], result["gpus"], result["slug"])
+        self.push_screen(ConfirmActionScreen(plan))
 
     def action_power_cap(self) -> None:
         """[c] in Operate · Orchestration: open the power-cap MENU — apply the
