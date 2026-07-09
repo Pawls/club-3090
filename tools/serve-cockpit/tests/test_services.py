@@ -647,6 +647,41 @@ class TestLoadCatalog:
         assert e_unk.weights_state == WEIGHTS_UNKNOWN          # no weights entry to join
 
     @pytest.mark.asyncio
+    async def test_bring_download_in_progress_live_stale_absent(self, tmp_path, monkeypatch):
+        """#617 disk-truth probe: bring_download_in_progress reads the pull-dir
+        download lock — in-progress for a LIVE holder (with pct from .incomplete
+        bytes), None for a STALE (dead-holder) lock or no lock at all."""
+        import subprocess
+        cd = CockpitData(ROOT, runner=full_runner())
+        monkeypatch.setattr(cd, "_bring_hf_home", lambda: tmp_path)
+        repo = "org/Tess-4-27B-FP8"
+
+        assert cd.bring_download_in_progress(repo) is None        # no lock → absent
+
+        pull = cd.bring_pull_dir(repo)
+        (pull / ".download.lock").mkdir(parents=True)
+        inc = pull / ".incomplete"
+        inc.mkdir()
+        (inc / "part.bin").write_bytes(b"x" * 1000)               # 1000 bytes staged
+
+        holder = subprocess.Popen(["sleep", "30"])
+        try:
+            (pull / ".download.lock" / "pid").write_text(
+                f"{holder.pid}\n2026-01-01T00:00:00+00:00\n", encoding="utf-8"
+            )
+            info = cd.bring_download_in_progress(repo, expected_gb=2e-6)  # 2000 B expected
+            assert info is not None and info["in_progress"] is True
+            assert info["pid"] == holder.pid
+            assert info["pct"] == 50                              # 1000 / 2000 B
+            # pct is None when the total size is unknown
+            assert cd.bring_download_in_progress(repo)["pct"] is None
+        finally:
+            holder.terminate()
+            holder.wait()
+
+        assert cd.bring_download_in_progress(repo) is None        # dead holder → stale
+
+    @pytest.mark.asyncio
     async def test_weights_download_plan_and_progress(self, tmp_path):
         """Download UX (service): the download plan is `WEIGHT_KEY=… setup.sh
         <model>` (disk write, no reconcile/confirm gate); progress = bytes-on-disk
@@ -715,6 +750,48 @@ class TestLoadCatalog:
         cd2 = CockpitData(ROOT, runner=full_runner(), download_runner=cap2)
         await cd2.run_weights_download("qwen3.6-27b", "autoround-int4")
         assert "WEIGHT_EXTRA_KEYS" not in cap2.env
+
+    @pytest.mark.asyncio
+    async def test_run_bring_download_apply_swap_flag_and_capture(self):
+        """Route-C apply-swap: run_bring_download(apply_swap=True) appends
+        --apply-swap to pull.sh AND captures the emitted serve-locally compose
+        from the `[apply-swap] compose: <path>` line (② Serve serves it). With
+        apply_swap=False it does neither — the plain Path-B fetch is unchanged."""
+        import asyncio
+
+        class _SwapDL:
+            def __init__(self, emit): self.cmd = None; self._on = None; self._emit = emit
+            def set_callbacks(self, on_line=None, **kw): self._on = on_line
+            async def start_raw(self, cmd, env=None, run_type=None, parser=None):
+                self.cmd = cmd
+                if self._on and self._emit:
+                    self._on("[apply-swap] compose: /tmp/_brought-x.yml")
+                h = type("H", (), {})(); h.done = asyncio.Event(); h.done.set(); h.exit_code = 0
+                return h
+
+        dl = _SwapDL(emit=True)
+        cd = CockpitData(ROOT, runner=full_runner(), download_runner=dl)
+        await cd.run_bring_download("some/Fine-Tune", "vllm/dual", apply_swap=True)
+        assert "--apply-swap" in dl.cmd, dl.cmd
+        assert cd.last_swap_compose() == "/tmp/_brought-x.yml"
+
+        assert "--emit-only" not in dl.cmd, dl.cmd    # default: full download
+
+        dl2 = _SwapDL(emit=False)
+        cd2 = CockpitData(ROOT, runner=full_runner(), download_runner=dl2)
+        await cd2.run_bring_download("some/Fine-Tune", "vllm/dual", apply_swap=False)
+        assert "--apply-swap" not in dl2.cmd, dl2.cmd
+        assert cd2.last_swap_compose() == ""
+
+        # emit_only=True (present weights) → --apply-swap AND --emit-only, so
+        # pull.sh emits the serve compose WITHOUT downloading (② Serve's no-[D] path)
+        dl3 = _SwapDL(emit=True)
+        cd3 = CockpitData(ROOT, runner=full_runner(), download_runner=dl3)
+        await cd3.run_bring_download(
+            "some/Fine-Tune", "vllm/dual", apply_swap=True, emit_only=True
+        )
+        assert "--apply-swap" in dl3.cmd and "--emit-only" in dl3.cmd, dl3.cmd
+        assert cd3.last_swap_compose() == "/tmp/_brought-x.yml"
 
     @pytest.mark.asyncio
     async def test_weights_state_partial_until_companion_present(self, tmp_path):
@@ -3658,3 +3735,51 @@ class TestStudioSidecarEnumeration:
         # No services/studio/* present → no sidecar rows (only any top-level dirs).
         names = CockpitData(tmp_path, runner=full_runner())._known_service_dirs()
         assert not any(n.startswith("studio-") for n in names)
+
+
+class TestServeOverrides:
+    """② Serve override editor — plan.env threading + compose-default pre-fill."""
+
+    def test_serve_generated_overrides_ride_plan_env(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        plan = cd.serve_generated("/tmp/x.yml", {
+            "MAX_MODEL_LEN": "65536", "SPEC": "off",
+            "KV_CACHE_DTYPE": "", "SERVED_NAME": "Foo",   # empty is dropped
+        })
+        assert plan.env["MAX_MODEL_LEN"] == "65536"
+        assert plan.env["SPEC"] == "off"
+        assert plan.env["SERVED_NAME"] == "Foo"
+        assert "KV_CACHE_DTYPE" not in plan.env          # empty override dropped
+        assert plan.env["MODEL_DIR"]                     # pinned (HF mount resolves)
+        # no overrides → only the pinned MODEL_DIR rides
+        assert cd.serve_generated("/tmp/x.yml").env == {"MODEL_DIR": cd.weights_model_dir()}
+
+    def test_serve_override_defaults_parses_sibling_compose(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        cd = CockpitData(repo_root, runner=full_runner())
+        d = cd.serve_override_defaults("vllm/dual", "org/MyFineTune")
+        assert d["SERVED_NAME"] == "MyFineTune"          # from the brought repo name
+        assert d["MAX_MODEL_LEN"] == "262144"            # parsed ${MAX_MODEL_LEN:-262144}
+        assert d["KV_CACHE_DTYPE"] == "fp8_e5m2"
+        assert d["SPEC"] == "on"
+        assert d["ENGINE"] == "vllm-stable"              # only parsing gives this
+        assert d["SPEC_DRAFTER"] == "MTP n=3"            # real drafter, not "on"
+
+    def test_engine_kv_formats_is_engine_specific(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        cd = CockpitData(repo_root, runner=full_runner())
+        vk = cd.engine_kv_formats("vllm-stable")
+        assert "fp8_e5m2" in vk and "int8_per_token_head" in vk
+        # a totally different engine → a totally different KV family
+        assert cd.engine_kv_formats("llama-cpp-mainline") == ["q4_0", "q5_0", "q8_0", "k8v4"]
+        # the editor's KV options come from the engine, not a generic list
+        assert cd.serve_override_defaults("vllm/dual", "org/Foo")["KV_OPTIONS"] == vk
+
+    def test_engine_drafters_and_options(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        cd = CockpitData(repo_root, runner=full_runner())
+        assert cd.engine_drafters("vllm-stable") == ["mtp", "mtp_assistant"]
+        assert "dflash" in cd.engine_drafters("beellama-local")
+        d = cd.serve_override_defaults("vllm/dual", "org/Foo")
+        assert d["DRAFTER_OPTIONS"] == ["mtp", "mtp_assistant"]   # engine-driven
+        assert d["SPEC_METHOD"] == "mtp" and d["SPEC_N"] == "3"

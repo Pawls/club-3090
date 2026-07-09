@@ -337,6 +337,11 @@ baselines:
     ttft_ms: 158
     prefill_tps: { 10k: 1364, 90k: 875 }
     quality_8pk: "107/150"
+    # thinking-ON here is pack-defaults (mixed regime), NOT force-on: the 2026-06-07
+    # #515 quant-A/B ran the fp8 dual-max config full 8-pack = 110/150 (autoround
+    # sibling 109/150); measured then but never promoted to this row until 2026-07-08.
+    # Source: results/quality/quality-2026-06-07T15-18-18.json (endpoint :8013).
+    quality_8pk_think_on: "110/150"
     ctx_validated: { tokens: 245760, niah: "clean@240K" }
     date: 2026-06-30
     engine_pin: "vllm/vllm-openai:v0.24.0"
@@ -408,26 +413,59 @@ baselines:
 
   vllm/qwen-27b-multi-max:
     # Cross-rig submission only — 4-card; our 2-card reference rig can't run it.
-    # ⚠ STALE: the only 4-card data (@Whamp #446) was measured on the OLD int8-PTH
-    # KV, before #595 flipped multi-max to fp8/e4m3 (and on a pre-v0.24.0 engine).
-    # Kept stale-flagged so the catalog shows something with the caveat — REPLACE
-    # with the pending 4-card fp8 re-test (the #584 request) when it lands.
+    # FRESH v0.24.0 fp8/e4m3-KV gate (the #584 re-test the header requested) —
+    # supersedes @Whamp's doubly-stale #446 (int8-PTH KV, pre-v0.24.0, 85/102).
+    # Promoted vllm/qwen-27b-multi-max → ✅ Production on this report (2026-07-07).
     submissions:
       4x3090-pcie:
-        # #446 (@Whamp, 4× 3090 PCIe x4/x16/x8/x16, aikitoria P2P kernel, 230 W):
-        # verify-full + verify-stress 7/7 + soak-continuous PASS, 85.09/102.43.
-        # int8-PTH KV (pre-#595 fp8 flip) + pre-v0.24.0 engine → doubly STALE.
-        narr_tps: 85.09
-        code_tps: 102.43
-        ctx_validated: { tokens: 240633, niah: "clean@240K" }
-        date: 2026-06-19
-        engine_pin: "vllm/vllm-openai:v0.22.0"
+        # #584 (@ryanmpelletier, 4× 3090 x16, Proxmox passthrough, v0.24.0, 350 W):
+        # attention backend FLASHINFER (the #595 fp8/e4m3 flip live at TP=4).
+        # verify-full 9/9 · verify-stress needles clean to 240,634 tok · soak-
+        # continuous PASS (0 err / 0 silent / <200 MiB, p50 124.94) · bench n=5 ·
+        # full 8-pack 111/150 (@ryanmpelletier built the benchlocal sandboxes) —
+        # ties the dual-max proxy 109 within noise → max-tier quality TP-invariant.
+        # Corroborated by a 2nd 4-card rig — #625 (@MoppelMat, bare metal, mixed
+        # x4/x8 lanes, 300 W): decode 79.2/101.6 (higher — bare metal), prefill
+        # 964/887 (lower — narrow lanes vs ryan's x16), soak PASS.
+        narr_tps: 74.10
+        code_tps: 91.30
+        ttft_ms: 133
+        prefill_tps: { 10k: 1275, 90k: 1141 }
+        quality_8pk: "111/150"
+        quality_env: { harness: "benchlocal-cli @ryanmpelletier, sandboxes built 2026-07-07 (cli-40 v1.0.2 · hermesagent-20 v1.0.0 · bugfind-15 v1.0.1); thinking-off" }
+        ctx_validated: { tokens: 240634, niah: "clean@240K" }
+        date: 2026-07-07
+        engine_pin: "vllm/vllm-openai:v0.24.0"
         rig: "4x3090-pcie"
-        power_cap_w: [230, 230, 230, 230]
-        source: "https://github.com/noonghunna/club-3090/issues/446"
-        submitted_by: "Whamp"
+        power_cap_w: [350, 350, 350, 350]
+        source: "https://github.com/noonghunna/club-3090/issues/584"  # + #625 (@MoppelMat, corroborating 4-card)
+        submitted_by: "ryanmpelletier"  # + MoppelMat (#625)
         tier: submitted
-        stale: true
+
+  vllm/qwen-27b-single-nvfp4:
+    # Cross-rig submission only — NVFP4 needs Hopper/Blackwell; our sm_86 rig
+    # can't run it. Community-validated on two 5090s (#613, #617).
+    submissions:
+      1x5090-pcie:
+        # #613 (@guybrush01, 5090, 185 GB RAM): the config sweep pinned MTP as the
+        # OOM cause — MTP-on OOMs at 98K, but PASSES at 65K + util 0.85. THIS is the
+        # 65K + MTP-on WIN: verify-stress all-pass (60K/90K needle clean, above-ctx
+        # cleanly rejected), MTP accept ~3.2 (draft ~74%), ~1.4 GB VRAM free — ~2x
+        # the SPEC=off throughput (71/71). Drove the default re-derate (98K/util-0.92
+        # → 65K/util-0.85, MTP kept). SPEC=off is the max-ctx (81K/98K @ 71) + tight-
+        # system-RAM path (@paulp83 28 GB host OOM-kills MTP load, #617). 8-pack owed.
+        narr_tps: 129.16
+        code_tps: 155.29
+        ttft_ms: 76
+        prefill_tps: { 10k: 4437 }
+        ctx_validated: { tokens: 58569, niah: "clean@58K (65K max-ctx)" }
+        date: 2026-07-08
+        engine_pin: "vllm/vllm-openai:v0.24.0"
+        rig: "1x5090-pcie"
+        power_cap_w: [600]   # 5090 uncapped (default=max=600 W); single-card → no allreduce
+        source: "https://github.com/noonghunna/club-3090/issues/613"  # + #617 (host-RAM axis)
+        submitted_by: "guybrush01"
+        tier: submitted
 
   vllm/qwen-35b-a3b-single-nvfp4:
     # Cross-rig submission only — NVFP4 needs Hopper/Blackwell; our sm_86 rig

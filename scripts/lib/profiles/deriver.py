@@ -195,14 +195,51 @@ def _load_kv_calc():
 
 
 # ---------------------------------------------------------------------------
-# HF_HOME resolution (--hf-home > $HF_HOME > $XDG_CACHE_HOME/huggingface > ~)
+# HF_HOME resolution
+#   --hf-home > $HF_HOME > $MODEL_DIR/.cache/huggingface > $XDG_CACHE_HOME/hf > ~
 # ---------------------------------------------------------------------------
+def _model_dir_from_env_or_dotenv() -> Optional[str]:
+    """MODEL_DIR from the environment, else parsed from the repo `.env` (the
+    SAME value switch.sh / launch.sh / c3 resolve). `None` if set in neither.
+    Read with `encoding="utf-8"` (non-UTF-8-locale rigs, #599)."""
+    env = os.environ.get("MODEL_DIR")
+    if env:
+        return env
+    try:
+        for raw in (REPO_ROOT / ".env").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            s = raw.strip().rstrip("\r")
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            if s.startswith("export "):
+                s = s[len("export "):]
+            key, _, val = s.partition("=")
+            if key.strip() == "MODEL_DIR":
+                val = val.strip().strip('"').strip("'")
+                return val or None
+    except OSError:
+        pass
+    return None
+
+
 def resolve_hf_home(hf_home: Optional[str] = None) -> Path:
+    """HF_HOME precedence: `--hf-home > $HF_HOME > $MODEL_DIR/.cache/huggingface
+    > $XDG_CACHE_HOME/huggingface > ~/.cache/huggingface`.
+
+    The MODEL_DIR step keeps a bare `pull.sh <repo>` — run with only `.env`'s
+    MODEL_DIR set and no explicit HF_HOME — on the MODEL DISK, instead of
+    silently falling to `~/.cache` on root (the footgun that misplaced a brought
+    model's weights, #617-followup). c3 is unaffected: it sets HF_HOME
+    explicitly, which still wins here."""
     if hf_home:
         return Path(hf_home).expanduser()
     env = os.environ.get("HF_HOME")
     if env:
         return Path(env).expanduser()
+    model_dir = _model_dir_from_env_or_dotenv()
+    if model_dir:
+        return Path(model_dir).expanduser() / ".cache" / "huggingface"
     xdg = os.environ.get("XDG_CACHE_HOME")
     if xdg:
         return Path(xdg).expanduser() / "huggingface"
@@ -315,6 +352,43 @@ def _siblings(api: dict) -> list[dict]:
     return out
 
 
+def _declares_mtp(config: dict) -> bool:
+    """True when config.json declares a multi-token-prediction head — Qwen3-Next
+    uses `mtp_num_hidden_layers`; other families use `num_nextn_predict_layers`.
+    Checks the top level AND a nested `text_config` (VLMs nest the LM config)."""
+    for cfg in (config or {}, (config or {}).get("text_config") or {}):
+        if not isinstance(cfg, dict):
+            continue
+        for key in ("mtp_num_hidden_layers", "num_nextn_predict_layers"):
+            v = cfg.get(key)
+            if isinstance(v, int) and v > 0:
+                return True
+    return False
+
+
+def _has_mtp_weight_file(api: dict) -> bool:
+    """True when the repo ships a dedicated MTP-head weights file — the layout
+    fine-tune re-quants use (e.g. `model_mtp_bf16.safetensors`)."""
+    for s in _siblings(api):
+        name = (s.get("rfilename") or "").lower()
+        if name.endswith(".safetensors") and ("mtp" in name or "nextn" in name):
+            return True
+    return False
+
+
+def detect_mtp_head(config: dict, api: dict) -> bool:
+    """Whether a brought checkpoint actually carries an MTP draft head, so the
+    Route-C weight-swap keeps `--speculative-config` instead of blanket-dropping
+    it. The blanket drop was a bug: fine-tunes that PRESERVE the head (e.g.
+    ThinkingCap) were served MTP-off. Signal (no extra fetch — config + siblings
+    are already in hand): config DECLARES the MTP layers AND a dedicated mtp
+    weights file is present. Ground-truth for the separate-file layout every
+    fine-tune uses. An embedded-head repo (head baked into the shards with no
+    named file) still falls back to drop — the named-file layout is the norm and
+    the alternative is reading each shard's index weight_map."""
+    return _declares_mtp(config) and _has_mtp_weight_file(api)
+
+
 def select_weight_files(
     api: dict,
 ) -> tuple[Optional[list[str]], Optional[DeriverError]]:
@@ -365,6 +439,20 @@ def select_weight_files(
             # Index present but no obvious shard naming — fall back to all
             # non-adapter top-level safetensors as the set.
             shards = sorted(safet)
+        else:
+            # A dedicated MTP/nextn head (e.g. `mtp_grafted.safetensors`) is a
+            # real weight the model needs with MTP enabled, but it's neither a
+            # `model-*` nor `-of-` shard, so the filter above drops it —
+            # which silently omitted Tess-4-27B-FP8's MTP head and would break
+            # MTP serving (club-3090 #617). `detect_mtp_head` already sees such a
+            # file; union it into the download set so it's actually fetched.
+            mtp_head = [
+                n for n in safet
+                if n not in shards
+                and ("mtp" in n.lower() or "nextn" in n.lower())
+            ]
+            if mtp_head:
+                shards = sorted(set(shards) | set(mtp_head))
         return shards, None
 
     # No index: must be exactly one complete set.
@@ -997,6 +1085,11 @@ def derive(
         "config_num_hidden_layers": _int(config or {}, "num_hidden_layers"),
         "config_num_attention_heads": _int(config or {}, "num_attention_heads"),
         "config_num_key_value_heads": _int(config or {}, "num_key_value_heads"),
+        # Additive: does the brought checkpoint carry an MTP draft head? The
+        # Route-C weight-swap (pull.sh _swap_path) reads this to keep vs drop
+        # --speculative-config, instead of the old blanket "fine-tune → no MTP"
+        # drop that silently served head-preserving fine-tunes MTP-off.
+        "has_mtp_head": detect_mtp_head(config or {}, api or {}),
     }
     res.diagnostics["resolution"] = "derived"
 

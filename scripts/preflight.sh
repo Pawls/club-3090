@@ -1425,3 +1425,85 @@ except Exception:
   fi
   return 0
 }
+
+# ── #633 — ik-llama cu13/cu12 driver-aware image selection ────────────────────
+# The pinned cu13 ik-llama image has a CUDA 13.2 runtime; on a driver whose
+# supported CUDA < 13.2 the forward-compat path fails on GeForce (CUDA error
+# 804) → silent CPU fallback → segfault crash-loop, with no actionable hint
+# (launch just times out after 600 s). Auto-pick the cu12 sibling build (same
+# build 4574, CUDA 12.6, backward-compatible with the 13.0 driver — validated on
+# a 580.159 rig, #633) unless the user pinned IK_LLAMA_IMAGE. ik-llama only.
+IK_LLAMA_CU13_MIN_CUDA="13.2"
+IK_LLAMA_CU12_FALLBACK="${IK_LLAMA_CU12_FALLBACK:-ghcr.io/ikawrakow/ik-llama-cpp:cu12-server-4574}"
+
+# _cuda_ge A B → 0 (true) iff major.minor A >= B
+_cuda_ge() {
+  local a1="${1%%.*}" b1="${2%%.*}" a2 b2
+  a2="${1#*.}"; [[ "$a2" == "$1" ]] && a2=0
+  b2="${2#*.}"; [[ "$b2" == "$2" ]] && b2=0
+  (( 10#${a1:-0} > 10#${b1:-0} )) && return 0
+  (( 10#${a1:-0} < 10#${b1:-0} )) && return 1
+  (( 10#${a2:-0} >= 10#${b2:-0} ))
+}
+
+# Driver's max supported CUDA (major.minor), or "" if undetectable.
+_driver_cuda_version() {
+  local v
+  v="$(nvidia-smi --query 2>/dev/null | grep -m1 -oE 'CUDA Version[[:space:]]*:[[:space:]]*[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' || true)"
+  [[ -z "$v" ]] && v="$(nvidia-smi 2>/dev/null | grep -m1 -oE 'CUDA Version:?[[:space:]]*[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' || true)"
+  printf '%s' "$v"
+}
+
+# preflight_single_card_util <compose_file> [variant]
+# Advisory WARN (never blocks; runs even under --force) when the user raises
+# GPU_MEMORY_UTILIZATION above the compose's validated default on a SINGLE-CARD
+# (TP<=1) config. On one GPU a higher util shrinks the free VRAM a large
+# tool-response prefill needs for its activation peak, so vLLM OOMs mid-prefill
+# even though boot succeeds (verify-stress step 2/8). Two 5090 testers hit this
+# by setting util=0.92 on the nvfp4 slug whose validated default is 0.85 (#617).
+# No-op unless the user overrode the env AND the compose ships a
+# `GPU_MEMORY_UTILIZATION:-<default>` (so it never fires for non-vLLM engines,
+# dual/multi-card, or a plain default run).
+preflight_single_card_util() {
+  local compose_file="$1" variant="${2:-}"
+  [[ -f "$compose_file" ]] || return 0
+  local user_util="${GPU_MEMORY_UTILIZATION:-}"
+  [[ -n "$user_util" ]] || return 0                 # only when explicitly overridden
+
+  local tp=""
+  if declare -F compose_meta_get >/dev/null 2>&1; then
+    tp="$(compose_meta_get "$compose_file" tensor-parallel 2>/dev/null || true)"
+  fi
+  [[ "$tp" =~ ^[0-9]+$ ]] || return 0               # unknown topology → stay quiet
+  (( tp <= 1 )) || return 0                          # single-card only
+
+  local default_util
+  default_util="$(command grep -oE 'GPU_MEMORY_UTILIZATION:-[0-9.]+' "$compose_file" | head -1 | sed -E 's/.*:-//')"
+  [[ -n "$default_util" ]] || return 0               # compose ships no util default
+
+  if awk -v u="$user_util" -v d="$default_util" 'BEGIN{exit !((u+0) > (d+0))}'; then
+    echo "[preflight] WARN:  GPU_MEMORY_UTILIZATION=${user_util} exceeds ${variant:-this config}'s validated single-card default of ${default_util}." >&2
+    echo "[preflight]        On one GPU a higher util steals the headroom a large tool-response prefill needs for its" >&2
+    echo "[preflight]        activation peak — vLLM can OOM mid-prefill (verify-stress step 2/8) even though boot succeeds." >&2
+    echo "[preflight]        Fix: grow context via MAX_MODEL_LEN and keep GPU_MEMORY_UTILIZATION <= ${default_util}. (#617)" >&2
+  fi
+  return 0
+}
+
+preflight_ik_llama_image() {
+  local variant="${1:-}"
+  [[ "$variant" == ik-llama/* ]] || return 0
+  if [[ -n "${IK_LLAMA_IMAGE:-}" ]]; then
+    echo "[preflight] ik-llama image pinned (.env/shell): ${IK_LLAMA_IMAGE}"
+    return 0
+  fi
+  local drv; drv="$(_driver_cuda_version)"
+  [[ -z "$drv" ]] && return 0                    # undetectable → leave compose default (cu13)
+  _cuda_ge "$drv" "$IK_LLAMA_CU13_MIN_CUDA" && return 0   # >=13.2 → cu13 runtime OK
+  export IK_LLAMA_IMAGE="$IK_LLAMA_CU12_FALLBACK"
+  echo "[preflight] ⚠ driver CUDA ${drv} < ${IK_LLAMA_CU13_MIN_CUDA} (the cu13 ik-llama pin's runtime)." >&2
+  echo "[preflight]   cu13 would forward-compat-fail on GeForce (error 804) → CPU fallback → crash loop (#633)." >&2
+  echo "[preflight]   Auto-selected the cu12 sibling build (same build, CUDA 12.6, backward-compatible):" >&2
+  echo "[preflight]     IK_LLAMA_IMAGE=${IK_LLAMA_CU12_FALLBACK}" >&2
+  echo "[preflight]   Pin IK_LLAMA_IMAGE in .env to override." >&2
+}

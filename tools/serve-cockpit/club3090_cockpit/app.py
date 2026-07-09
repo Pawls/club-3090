@@ -203,6 +203,36 @@ def _kv_label(e: "CatalogEntry") -> str:
     return _KV_LABELS.get(kv, kv or "—")
 
 
+# Spec Dec column — DERIVED from the registry `drafter` id (already in-app as
+# row.drafter; emitted at registry-emit.sh, threaded in services.py) → a compact
+# method[·mechanism] token, by PATTERN on the id (zero emit/guard change; the id
+# reliably encodes the mechanism).  DFlash is ALWAYS an external drafter, so it
+# needs no suffix; the built-in-vs-external split exists only WITHIN MTP, so the
+# suffix names the actual mechanism (`gguf` external GGUF drafter · `asst`
+# external assistant draft-model) — the "drafter type matters" distinction — not
+# a vague "ext".  The bare `MTP` = built-in head (the common qwen case).  The
+# slug detail card carries the full form (n= count + source).
+def _spec_token(drafter: str) -> str:
+    """Pure ``drafter``-id → compact spec-dec label.  '' when no drafter."""
+    dr = (drafter or "").strip().lower()
+    if not dr:
+        return ""
+    if "dflash" in dr:
+        return "DFlash"
+    if "ngram" in dr:
+        return "ngram"
+    if "assistant" in dr:      # gemma *-it-assistant → spec_method mtp_assistant
+        return "MTP·asst"
+    if "mtp" in dr:            # builtin head vs external gguf drafter
+        return "MTP·gguf" if "gguf" in dr else "MTP"
+    return "spec"              # unknown non-empty drafter — safety fallback
+
+
+def _spec_label(e: "CatalogEntry") -> str:
+    """Compact spec-dec method token for the catalog Spec Dec column ('—' = none)."""
+    return _spec_token(getattr(e.row, "drafter", "")) or "—"
+
+
 def _weights_glyph(e: CatalogEntry) -> str:
     """Download-state prefix for the catalog slug cell (Download UX).  ⏳NN%
     downloading · ⬇ absent (not on disk) · ⚠ partial (interrupted/wrong).
@@ -367,12 +397,22 @@ def funnel_slug_options(
         )
         tail = f"{model}-{quant}" if quant else model
         label = f"{topo or '—'}/{eng}/{tail}"
+        # Spec-dec facet (the Catalog Spec Dec column, mirrored into the funnel —
+        # a producer picks partly by which drafter a candidate enables).  Folded
+        # into the LABEL, not just appended, so two slugs identical on
+        # topology/engine/quant but differing only by drafter (e.g. fp8-mtp vs a
+        # no-drafter fp8) get disambiguated by `· MTP` instead of falling to the
+        # serving-stem tail.  Skipped for no-drafter slugs (keeps them clean).
+        spec = _spec_token(getattr(row, "drafter", ""))
+        if spec:
+            label = f"{label}  ·  {spec}"
         status = (getattr(row, "status", "") or "").strip().lower()
         raw.append((label, stem, ProfileOption(label=label, slug=slug, topology=topo or "—", status=status)))
     # §2b dogfood r2 (maintainer): the label is topology/engine/model-quant
-    # ONLY — a serving-stem tail duplicated the path axes and read as a
-    # second slug.  The stem is appended SOLELY to disambiguate genuine
-    # collisions (two slugs sharing all three axes, e.g. fp8-mtp vs turbo).
+    # (+ the spec-dec facet above) — a serving-stem tail duplicated the path axes
+    # and read as a second slug.  The stem is appended SOLELY to disambiguate
+    # genuine collisions that survive even the spec facet (two slugs sharing all
+    # axes AND drafter, e.g. fp8-mtp vs turbo).
     counts: dict[str, int] = {}
     for label, _stem, _o in raw:
         counts[label] = counts.get(label, 0) + 1
@@ -723,6 +763,11 @@ class HelpScreen(ModalScreen):
             "  ✅ production   ❗ caveats   🧪 experimental",
             "  🐣 incubating  👀 preview   🚧 upstream-gated   🚫 deprecated",
             "",
+            "[bold]Spec Dec column[/bold] (default drafter)",
+            "",
+            "  MTP built-in head · MTP·gguf ext GGUF drafter · MTP·asst ext assistant",
+            "  DFlash ext drafter · ngram · — none",
+            "",
             "[bold]Fit glyphs (local card)[/bold]",
             "",
             "  ● fits-clean   ◐ fits-constrained   ○ won't-fit   · skip / unknown",
@@ -844,13 +889,15 @@ class CatalogPane(Container):
         # Fit is STILL computed (it feeds the pop-up + the serving-row exemption);
         # it just no longer occupies a Catalog column.
         # Column budget, left→right: identity (model · slug) → config the user
-        # picks by (weights · kv) → money (ctx · TPS · 8pk) → topology/engine
+        # picks by (weights · kv · spec) → money (ctx · TPS · 8pk) → topology/engine
         # (largely slug-redundant, fold first on a narrow terminal) → status.
+        # `spec` groups with weights/kv (the serving-config facets): which drafter
+        # (MTP / MTP·gguf / MTP·asst / DFlash / — none) the slug enables by default.
         # Status is deliberately LAST: its glyph is the one emoji-width column, so
         # putting it at the tail means nothing follows it to misalign (belt +
         # braces with the VS16-free glyphs in _STATUS_GLYPH).
         # "(rig)" keeps the our-rig provenance at 4 chars ("our rig" cost 8 more).
-        table.add_columns("model", "slug", "weights", "kv", "ctx", "TPS (rig)", "8pk (rig)", "topo", "engine", "status")
+        table.add_columns("model", "slug", "weights", "kv", "spec", "ctx", "TPS (rig)", "8pk (rig)", "topo", "engine", "status")
         # Full enriched catalog, and the current filter substring.
         self._entries: list[CatalogEntry] = []
         self._filter: str = ""
@@ -974,6 +1021,7 @@ class CatalogPane(Container):
                 slug_cell,
                 _weights_label(e),
                 _kv_label(e),
+                _spec_label(e),
                 e.ctx_label or "—",
                 tps,
                 e.measurement.quality_label,
@@ -4996,16 +5044,67 @@ class LaneBringPane(Container):
             line.update("")
             line.add_class("funnel-hidden")
 
-    def populate(self, res: ByoResult) -> None:
+    def populate(self, res: ByoResult, weights_present: Optional[bool] = None,
+                 downloading: bool = False) -> None:
         card = self.query_one("#lane-bring-result-card", Static)
-        card.update(_byo_result_text(res))
+        card.update(_byo_result_text(res, weights_present, downloading))
 
 
-def _byo_result_text(res: ByoResult) -> str:
+def _byo_result_text(res: ByoResult, weights_present: Optional[bool] = None,
+                     downloading: bool = False) -> str:
     """Render a ByoResult into the verdict card text (shared by Run · BYO + the
-    producer lane's ① Bring stage)."""
+    producer lane's ① Bring stage).
+
+    ``weights_present`` (probed once by the caller) makes the Route-C next-step
+    honest: on disk → point at ② Serve (no download); absent → the [D] download
+    affordance.  ``None`` = unknown → keep the download prompt (safe default)."""
     if res.error:
         return f"[red]Fit-check failed:[/red] {res.error}"
+    # Route-C swap (a curated-arch fine-tune → serve via the sibling's recipe with
+    # the brought weights): the engine verdict is "no-fit-model" because the generic
+    # fit-math can't PRICE a curated-hybrid arch — but the OUTCOME is servable. A red
+    # "not eligible / no-fit-model" headline + "② Serve armed with <sibling>" read as
+    # a self-contradicting dead-end (and named the wrong model). Reframe: green
+    # "✓ Servable", the [D] next-step names the BROUGHT model, raw verdict dimmed for
+    # debugging. Non-swap cases (eligible / Route A / B / plain no-fit) fall through.
+    if str(res.route).upper() == "C" and res.sibling_slug:
+        brought = res.repo.rsplit("/", 1)[-1]
+        mtp = ("[dim]MTP dropped — no head in this checkpoint[/dim]"
+               if res.drop_spec_config
+               else "[dim]MTP kept — head present[/dim]")
+        # Presence-aware next-step: [D] emits the serve compose, so when the
+        # weights are already on disk it must NOT read as "download" — point
+        # straight at ② Serve (which emits the compose itself, no download).  And
+        # while a [D] download is IN FLIGHT, suppress the re-offer entirely (#617).
+        if downloading:
+            next_step = (
+                f"  [cyan]⏳ downloading {brought}…[/cyan] "
+                f"[dim](in progress — \\[k] cancels)[/dim]"
+            )
+        elif weights_present:
+            next_step = (
+                f"  [green]✓ weights on disk[/green] — [green]press[/green] "
+                f"[bold]\\[s][/bold] [green]to continue to ② Serve[/green] "
+                f"[dim](serves {brought} — no download)[/dim]"
+            )
+        else:
+            next_step = (
+                f"  [green]→ Press[/green] [bold]\\[D][/bold] "
+                f"[green]to download + serve[/green] [bold]{brought}[/bold]"
+            )
+        return "\n".join([
+            f"  [bold]{res.repo}[/bold]",
+            f"  [green]✓ Servable[/green] — a fine-tune of [green]{res.sibling_slug}[/green]",
+            f"  [bold]arch[/bold]  [cyan]{res.arch or '—'}[/cyan]",
+            "",
+            f"  [dim]How it serves:[/dim] reuses [green]{res.sibling_slug}[/green]'s proven "
+            "recipe (chat template, tools, spec-dec) with your weights.",
+            f"  {mtp}",
+            "",
+            next_step,
+            f"  [dim]engine verdict: {res.fit_verdict or 'no-fit-model'} → Route-C swap "
+            "(generic fit-math can't price a curated-hybrid arch)[/dim]",
+        ])
     lines: list[str] = []
     elig = "[green]eligible[/green]" if res.eligible else "[red]not eligible[/red]"
     lines.append(f"  [bold]{res.repo}[/bold]   {elig}")
@@ -5045,6 +5144,25 @@ def _byo_result_text(res: ByoResult) -> str:
     return "\n".join(lines)
 
 
+# ② Serve override-editor dropdown presets (dropdowns to prevent typos — the
+# resolved slug's own default is folded in at arm-time if it's not here; a trailing
+# "✎ custom…" sentinel reveals a free-text Input for any value not in the list).
+_OV_CTX = ["16384", "32768", "65536", "81920", "98304", "131072", "196608", "262144"]
+# The FULL vLLM 0.24.0 --kv-cache-dtype set (ground truth from EngineArgs), ordered
+# by relevance: fp8 family · int8/nvfp4 · turboquant family · raw dtypes.
+_OV_KV = [
+    "fp8_e5m2", "fp8_e4m3", "fp8", "fp8_per_token_head", "fp8_inc", "fp8_ds_mla",
+    "int8_per_token_head", "nvfp4",
+    "turboquant_4bit_nc", "turboquant_3bit_nc", "turboquant_k3v4_nc", "turboquant_k8v4",
+    "bfloat16", "float16", "auto",
+]
+_OV_UTIL = ["0.80", "0.85", "0.88", "0.90", "0.92", "0.95"]
+# SPEC value stays on/off (the compose's ${SPEC} gate); the label shows the real
+# drafter (set at arm-time from SPEC_DRAFTER) so it's not an uninformative "on".
+_OV_SPEC = ["on", "off"]
+_OV_CUSTOM = "__ov_custom__"   # sentinel: reveals the companion free-text Input
+
+
 class LaneServePane(Container):
     """② Serve — generate a minimal compose for the resolved CATALOG profile, then
     serve it (untested) through the reconcile-gated path (R3b-1, the critical new
@@ -5082,6 +5200,18 @@ class LaneServePane(Container):
         color: $text-muted;
         margin-top: 1;
     }
+    LaneServePane #lane-serve-overrides {
+        height: auto;
+        margin-top: 1;
+        border: round $primary-darken-2;
+        padding: 0 1;
+    }
+    LaneServePane #lane-serve-ov-title { margin-bottom: 1; }
+    LaneServePane #lane-serve-ov-preview { color: $text-muted; margin-bottom: 1; }
+    LaneServePane .ov-row { height: 3; margin-bottom: 0; }
+    LaneServePane .ov-lbl { width: 12; content-align: left middle; height: 3; }
+    LaneServePane .ov-row Input, LaneServePane .ov-row Select { width: 1fr; }
+    LaneServePane .ov-custom-hidden { display: none; }
     """
 
     def compose(self) -> ComposeResult:
@@ -5102,21 +5232,62 @@ class LaneServePane(Container):
             "[/yellow][/dim]",
             id="lane-serve-body",
         )
+        # Override editor — revealed (populated) only for a Route-C brought model
+        # with weights on disk (set_armed).  Values ride on the serve's plan.env →
+        # the compose's ${VAR} at up-time (no re-emit).
+        yield Vertical(
+            Label("[bold]Override before serve[/bold] [dim](optional · defaults from the "
+                  "resolved slug · ✎ custom… for any value)[/dim]", id="lane-serve-ov-title"),
+            Static("", id="lane-serve-ov-preview"),
+            Horizontal(Label("served as", classes="ov-lbl"),
+                       Input(id="ov-served-name"), classes="ov-row"),
+            Horizontal(Label("ctx", classes="ov-lbl"),
+                       Select([(v, v) for v in _OV_CTX] + [("✎ custom…", _OV_CUSTOM)],
+                              id="ov-ctx", allow_blank=False),
+                       Input(placeholder="custom ctx", id="ov-ctx-custom",
+                             classes="ov-custom-hidden"),
+                       classes="ov-row"),
+            Horizontal(Label("KV cache", classes="ov-lbl"),
+                       Select([(v, v) for v in _OV_KV] + [("✎ custom…", _OV_CUSTOM)],
+                              id="ov-kv", allow_blank=False),
+                       Input(placeholder="custom KV dtype", id="ov-kv-custom",
+                             classes="ov-custom-hidden"),
+                       classes="ov-row"),
+            Horizontal(Label("spec-dec", classes="ov-lbl"),
+                       Select([(v, v) for v in _OV_SPEC], id="ov-spec", allow_blank=False),
+                       classes="ov-row"),
+            Horizontal(Label("VRAM util", classes="ov-lbl"),
+                       Select([(v, v) for v in _OV_UTIL] + [("✎ custom…", _OV_CUSTOM)],
+                              id="ov-util", allow_blank=False),
+                       Input(placeholder="custom util", id="ov-util-custom",
+                             classes="ov-custom-hidden"),
+                       classes="ov-row"),
+            id="lane-serve-overrides", classes="funnel-hidden",
+        )
         yield Label(
-            "[dim]\\[⏎] generate + preview + serve (reconcile-gated · untested)[/dim]",
+            "[dim]\\[⏎] serve with the values above (reconcile-gated · 👤 untested)[/dim]",
             id="lane-serve-hint",
         )
 
     def set_status(self, text: str) -> None:
         self.query_one("#lane-serve-body", Static).update(text)
 
-    def set_armed(self, byo: "Optional[ByoResult]") -> None:
+    def set_armed(
+        self, byo: "Optional[ByoResult]",
+        overrides_defaults: Optional[dict] = None,
+    ) -> None:
         """N9 — pre-arm ② Serve from the cached ① Bring fit-check: show the
         resolved servable catalog target so ⏎ here serves it WITHOUT re-entering
         ① Bring.  Pure render off the cached ByoResult (no I/O).  When there's no
-        usable fit-check yet, restore the calm "run ① Bring first" placeholder."""
+        usable fit-check yet, restore the calm "run ① Bring first" placeholder.
+
+        For a Route-C brought model, ``overrides_defaults`` (from
+        ``serve_override_defaults``) pre-fills + reveals the override editor;
+        other routes hide it (the editor rides the swap compose's ${VAR} env)."""
         body = self.query_one("#lane-serve-body", Static)
+        ov = self.query_one("#lane-serve-overrides", Vertical)
         if byo is None or getattr(byo, "error", ""):
+            ov.add_class("funnel-hidden")
             body.update(
                 "[dim]Stage ② of the Bring & Validate pipeline.\n"
                 "\n"
@@ -5125,29 +5296,162 @@ class LaneServePane(Container):
                 "untested).[/dim]"
             )
             return
-        slug = (
-            getattr(byo, "sibling_slug", "")
-            or getattr(byo, "profile_like", "")
-        )
+        route = str(getattr(byo, "route", "") or "").upper()
+        sibling = getattr(byo, "sibling_slug", "")
         repo = getattr(byo, "repo", "") or "—"
-        lines = [
-            "[green]● armed from ① Bring[/green] — ⏎ serves the resolved catalog compose (untested):",
-            "",
-            f"  [bold]brought[/bold]   [cyan]{repo}[/cyan]",
-        ]
-        if slug:
-            lines.append(f"  [bold]serves[/bold]    [green]{slug}[/green]  [dim](resolved catalog profile)[/dim]")
+        brought = repo.rsplit("/", 1)[-1]
+        if route == "C" and sibling and overrides_defaults:
+            self._populate_overrides(overrides_defaults)
+            ov.remove_class("funnel-hidden")
         else:
-            lines.append(
-                "  [yellow]no servable catalog target resolved[/yellow] — the fit-check found "
-                "no sibling/profile slug (the bring-your-own weight-swap is a deferred follow-up)."
-            )
-        lines.append("")
-        lines.append(
-            "[yellow]Note: serves an UNTESTED reproduction of the catalog profile's "
-            "compose — NOT your brought model's weights.[/yellow]"
-        )
+            ov.add_class("funnel-hidden")
+        if route == "C" and sibling:
+            # #628/#630 — a Route-C fine-tune serves YOUR brought weights via the
+            # sibling's proven recipe (chat-template · tools · spec-dec), NOT a
+            # catalog reproduction.  Honest text + a clear serve action (no dead
+            # end — bring-funnel-design §2b item 7).
+            lines = [
+                f"[green]● armed from ① Bring[/green] — serves [bold]{brought}[/bold] "
+                "[dim](your brought weights)[/dim]:",
+                "",
+                f"  [bold]brought[/bold]  [cyan]{repo}[/cyan]",
+                f"  [bold]recipe[/bold]   [green]{sibling}[/green] "
+                "[dim](chat-template · tools · spec-dec — applied to your weights)[/dim]",
+                "",
+                "  [green]→ press [bold]\\[⏎][/bold] to serve[/green] "
+                "[dim](reconcile-gated · 👤 untested)[/dim]",
+            ]
+        else:
+            slug = sibling or getattr(byo, "profile_like", "")
+            lines = [
+                "[green]● armed from ① Bring[/green] — ⏎ serves the resolved catalog "
+                "compose (untested):",
+                "",
+                f"  [bold]brought[/bold]  [cyan]{repo}[/cyan]",
+            ]
+            if slug:
+                lines.append(
+                    f"  [bold]serves[/bold]   [green]{slug}[/green]  "
+                    "[dim](resolved catalog profile)[/dim]"
+                )
+                lines.append("")
+                lines.append(
+                    "[yellow]Note: serves an UNTESTED reproduction of the catalog "
+                    "profile's compose — NOT your brought model's weights.[/yellow]"
+                )
+            else:
+                lines.append(
+                    "  [yellow]no servable catalog target resolved[/yellow] — the "
+                    "fit-check found no sibling/profile slug."
+                )
         body.update("\n".join(lines))
+
+    def _populate_overrides(self, d: dict) -> None:
+        """Pre-fill the editor from the resolved slug's defaults + engine.  KV
+        options come from the ENGINE (not a generic vLLM list); SPEC shows the
+        real drafter; a "✎ custom…" tail reaches anything else.  Each dropdown
+        folds in the slug's own value if it isn't already a preset."""
+        try:
+            self.query_one("#ov-served-name", Input).value = str(d.get("SERVED_NAME", ""))
+        except Exception:
+            pass
+        # Preview: engine + the values this serve can override (the slug's defaults).
+        try:
+            drafter = d.get("SPEC_DRAFTER") or (
+                "on" if str(d.get("SPEC")) == "on" else "off")
+            self.query_one("#lane-serve-ov-preview", Static).update(
+                f"[dim]engine[/dim] [cyan]{d.get('ENGINE') or '—'}[/cyan]   "
+                f"[dim]· ctx[/dim] {d.get('MAX_MODEL_LEN', '?')}   "
+                f"[dim]· KV[/dim] {d.get('KV_CACHE_DTYPE', '?')}   "
+                f"[dim]· spec[/dim] {drafter}   "
+                f"[dim]· util[/dim] {d.get('GPU_MEMORY_UTILIZATION', '?')}"
+            )
+        except Exception:
+            pass
+        kv_opts = list(d.get("KV_OPTIONS") or _OV_KV)               # engine-declared
+        for wid, key, presets, custom in (
+            ("#ov-ctx", "MAX_MODEL_LEN", [(v, v) for v in _OV_CTX], True),
+            ("#ov-kv", "KV_CACHE_DTYPE", [(v, v) for v in kv_opts], True),
+            ("#ov-util", "GPU_MEMORY_UTILIZATION", [(v, v) for v in _OV_UTIL], True),
+        ):
+            try:
+                sel = self.query_one(wid, Select)
+                val = str(d.get(key, "")).strip()
+                opts = list(presets)
+                if val and val not in [o[1] for o in opts]:
+                    opts = [(val, val)] + opts          # fold in the slug's default
+                if custom:
+                    opts = opts + [("✎ custom…", _OV_CUSTOM)]
+                sel.set_options(opts)
+                sel.value = val if val in [o[1] for o in opts] else opts[0][1]
+            except Exception:
+                pass
+        # spec-dec: the dropdown lists the ENGINE's supported drafters + off; the
+        # VALUE is the drafter METHOD (or "off").  collect maps method→SPEC=on +
+        # DRAFTER_METHOD, off→SPEC=off (the swap entrypoint parameterizes the method).
+        try:
+            drafters = list(d.get("DRAFTER_OPTIONS") or [])
+            # fallback (engine not resolvable) → a plain on/off "on" option
+            cur = d.get("SPEC_METHOD") or (drafters[0] if drafters else "on")
+            spec_n = d.get("SPEC_N") or ""
+            spec_opts = [
+                ((f"{m} n={spec_n}" if (m == cur and spec_n) else m), m)
+                for m in drafters
+            ] or [("on", "on")]
+            spec_opts.append(("off — no spec-dec", "off"))
+            sel = self.query_one("#ov-spec", Select)
+            sel.set_options(spec_opts)
+            method_vals = [o[1] for o in spec_opts]
+            sel.value = (cur if (str(d.get("SPEC")) == "on" and cur in method_vals)
+                         else "off")
+        except Exception:
+            pass
+
+    def collect_overrides(self) -> dict:
+        """Read the editor fields → env overrides for the serve.  Only non-empty
+        values are returned (empty = keep the compose's own default).  A dropdown
+        on "✎ custom…" reads its companion free-text Input.  Returns ``{}`` when
+        the editor is hidden (non-Route-C serve — no override surface)."""
+        out: dict = {}
+        try:
+            if self.query_one("#lane-serve-overrides", Vertical).has_class("funnel-hidden"):
+                return {}
+        except Exception:
+            return {}
+        try:
+            name = self.query_one("#ov-served-name", Input).value.strip()
+            if name:
+                out["SERVED_NAME"] = name
+        except Exception:
+            pass
+        for wid, key, custom_id in (
+            ("#ov-ctx", "MAX_MODEL_LEN", "#ov-ctx-custom"),
+            ("#ov-kv", "KV_CACHE_DTYPE", "#ov-kv-custom"),
+            ("#ov-util", "GPU_MEMORY_UTILIZATION", "#ov-util-custom"),
+        ):
+            try:
+                v = self.query_one(wid, Select).value
+                if v == _OV_CUSTOM and custom_id:
+                    cv = self.query_one(custom_id, Input).value.strip()
+                    if cv:
+                        out[key] = cv
+                elif v not in (None, Select.BLANK, _OV_CUSTOM):
+                    out[key] = str(v)
+            except Exception:
+                pass
+        # spec-dec: the dropdown value is the drafter METHOD (or "off").  off →
+        # SPEC=off; a method → SPEC=on + DRAFTER_METHOD (the swap entrypoint's
+        # ${DRAFTER_METHOD} rebuilds --speculative-config for that drafter).
+        try:
+            sv = self.query_one("#ov-spec", Select).value
+            if sv == "off":
+                out["SPEC"] = "off"
+            elif sv not in (None, Select.BLANK):
+                out["SPEC"] = "on"
+                out["DRAFTER_METHOD"] = str(sv)
+        except Exception:
+            pass
+        return out
 
 
 class LanePromotePane(Container):
@@ -5822,6 +6126,11 @@ class CockpitApp(App):
         # Funnel §2b-6 — ① Bring: download the fit-checked repo's weights
         # (pull.sh real run — DISK write, no GPU claim; streams into the pane).
         Binding("D", "bring_download", "Download weights", show=False),
+        # [k] cancels an in-flight ① Bring download.  Shares "k" with serving_stop;
+        # check_action gates it to mode 1 + a live download so they're disjoint
+        # (same duplicate-key + check_action pattern as the modal's k=stop /
+        # k=cancel_download).
+        Binding("k", "bring_cancel_download", "Cancel download", show=True),
         # R3b-2 — producer lane: the ~43-min FULL validation battery
         # (report.sh --full) — confirm-gated, bg-streamed, producer-only, uses the
         # serving model (claims no GPU); NEVER auto-fired.
@@ -6087,6 +6396,18 @@ class CockpitApp(App):
         if self._surface != "producer" and action in self._PRODUCER_ONLY:
             return False
 
+        # [k] cancels an in-flight ① Bring download — enabled ONLY in mode 1 with
+        # a live download, so the shared "k" falls through to serving_stop
+        # everywhere else (mode 1 is producer-only, so no surface leak).
+        if action == "bring_cancel_download":
+            # Cancelable when this session started a download (tracker) OR a
+            # disk-truth download lock is live for the fit-checked repo (a
+            # prior session / bare pull.sh — the tracker can't see it). #617.
+            return self._active_mode == 1 and (
+                bool(self._active_bring_download())
+                or self._bring_disk_download()[1] is not None
+            )
+
         # Arrow-key focus descent (tab bar ↔ primary list).  These are gated here —
         # BEFORE _ALWAYS_ON — so the result is fully controlled (neither is in
         # _ALWAYS_ON / _PRODUCER_ONLY).  show=False, so the bool only governs whether
@@ -6166,7 +6487,8 @@ class CockpitApp(App):
             if self._active_mode == 0:
                 return self._current_subtab() == "tab-containers"
             if self._active_mode == 1:
-                return self._active_validate_tab() == "tab-evidence"
+                # ① Bring (advance → ② Serve) + ④ Measure (submit-to-localmaxxing)
+                return self._active_validate_tab() in ("tab-bring", "tab-evidence")
             return False
 
         # Sub-tab cycle keys: both modes have sub-tabs (merged 0 = 4 tabs; lane 1
@@ -7443,13 +7765,29 @@ class CockpitApp(App):
         res = await self._data.byo_check(repo, profile_like)
         # Cache the arch facts for the lane ② Serve + the Promote scaffold (Phase 5).
         self._last_byo = res
+        # Probe on-disk ONCE (skip on a fit-check error) — feeds BOTH the verdict
+        # card's presence-aware next-step and the weights-line below, so they can't
+        # disagree (the [D]-when-already-present contradiction).
+        weights_present = bool(
+            not getattr(res, "error", "")
+            and self._data.bring_weights_present(repo)
+        )
+        # #617: a re-run fit-check (or refresh) must SEE an in-flight [D] download
+        # for this repo — render "⏳ downloading" + suppress the [D] re-offer,
+        # rather than the stale disk verdict that invites a second 20+ GB fetch.
+        # Two sources: the in-memory tracker (this session) OR disk truth (the
+        # pull-dir download lock) — the latter survives a c3 restart AND sees a
+        # download started outside this session (a bare pull.sh --apply-swap).
+        disk_dl = self._data.bring_download_in_progress(repo)
+        downloading = (repo in self._active_bring_download()) or bool(disk_dl)
         if lane_pane is not None:
-            lane_pane.populate(res)
+            lane_pane.populate(res, weights_present, downloading=downloading)
         # N9 — carry the fit-check result forward: pre-arm ② Serve with the
         # resolved target so the producer pipeline flows ① → ② without re-entry.
         try:
+            armed_byo = res if not getattr(res, "error", "") else None
             self.query_one("#lane-serve-pane", LaneServePane).set_armed(
-                res if not getattr(res, "error", "") else None
+                armed_byo, self._armed_overrides_defaults(armed_byo)
             )
         except Exception:
             pass
@@ -7458,10 +7796,17 @@ class CockpitApp(App):
         if lane_pane is not None:
             if getattr(res, "error", ""):
                 lane_pane.set_weights_line("")
-            elif self._data.bring_weights_present(repo):
+            elif downloading:
+                pct = (disk_dl or {}).get("pct")
+                pcts = f" (resuming {pct}%)" if isinstance(pct, int) else ""
+                lane_pane.set_weights_line(
+                    f"  [cyan]⏳ downloading{pcts}…[/cyan] [dim](in progress — leave "
+                    "it running; \\[k] cancels)[/dim]"
+                )
+            elif weights_present:
                 lane_pane.set_weights_line(
                     "  [green]✓ weights on disk[/green] — "
-                    "[green]→ ② Serve[/green] [dim](\\[2/]] next stage)[/dim]"
+                    "[green]→ ② Serve[/green] [dim](press \\[s] to continue)[/dim]"
                 )
             else:
                 lane_pane.set_weights_line(
@@ -7469,6 +7814,52 @@ class CockpitApp(App):
                     "to download via pull.sh [dim](SHA-verified, streams here; "
                     "disk write only, no GPU claim)[/dim]"
                 )
+
+    def _active_bring_download(self) -> dict:
+        """repo → {handle, profile_like, apply_swap} for an in-flight ① Bring
+        [D] download (lazy).  Repo-keyed so a re-run fit-check / refresh can SEE
+        the download in flight — the parity gap with the catalog
+        ``_active_downloads`` that produced BOTH #617 dogfood bugs: the
+        'apply-swap did not complete' false-negative (verdict raced the marker)
+        and the re-offer-[D] double-download (fit-check was blind to the run)."""
+        d = getattr(self, "_bring_downloads", None)
+        if d is None:
+            d = {}
+            self._bring_downloads = d
+        return d
+
+    def _bring_disk_download(self):
+        """``(repo, info)`` when a disk-truth download lock is live for the
+        CURRENTLY fit-checked repo, else ``(None, None)``.  Lets [k] cancel a
+        download this session's in-memory tracker can't see — one started
+        before a c3 restart or by a bare ``pull.sh --apply-swap`` (#617)."""
+        byo = self._last_byo
+        repo = getattr(byo, "repo", "") if byo is not None else ""
+        if not repo:
+            return None, None
+        info = self._data.bring_download_in_progress(repo)
+        return (repo, info) if info is not None else (None, None)
+
+    def _kill_bring_pid(self, pid) -> None:
+        """Best-effort kill of a disk-detected download holder (its PID from
+        the pull-dir lock).  Tries the process GROUP first (takes the `hf`
+        child too), then the bare PID.  A leaked lock self-heals via the
+        downloader's stale-reclaim regardless."""
+        import os as _os
+        import signal as _sig
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return
+        if pid <= 0:
+            return
+        try:
+            _os.killpg(_os.getpgid(pid), _sig.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                _os.kill(pid, _sig.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     def action_bring_download(self) -> None:
         """[D] — §2b-6: download the fit-checked repo's weights (the REAL
@@ -7485,15 +7876,85 @@ class CockpitApp(App):
             )
             return
         repo = getattr(byo, "repo", "")
+        # No-op if a download for this repo is already in flight — mirrors the
+        # catalog Download's "No-op if already downloading this slug"; stops a
+        # second 20+ GB fetch of the same repo (#617).  [k] cancels.
+        if repo in self._active_bring_download():
+            self.notify(
+                f"Already downloading {repo} — press [k] to cancel.",
+                title="Download", timeout=4,
+            )
+            return
+        # Disk-truth guard: a download from a PRIOR c3 session or a bare
+        # pull.sh holds the pull-dir lock but isn't in this session's tracker —
+        # still must not stack a duplicate (#617).  [k] cancels it.
+        _disk = self._data.bring_download_in_progress(repo)
+        if _disk is not None:
+            self.notify(
+                f"Already downloading {repo} (pid {_disk.get('pid')}) — "
+                "press [k] to cancel.",
+                title="Download", timeout=4,
+            )
+            return
         if self._data.bring_weights_present(repo):
             self.notify("Weights already on disk.", title="Download", timeout=3)
             return
+        # One download at a time (shared runner + exclusive worker): starting a
+        # new repo supersedes any prior in-flight entry (the old worker's await is
+        # cancelled), so clear stale keys — otherwise an abandoned repo could stick
+        # as "already downloading" and block a later re-download of it.
+        self._active_bring_download().clear()
+        # Register synchronously so a fast re-press / re-fit-check sees it at once
+        # (the worker fills in the real handle).  Popped on terminal completion or
+        # [k] cancel.
+        self._active_bring_download()[repo] = {
+            "handle": None,
+            "profile_like": getattr(byo, "profile_like", ""),
+            "apply_swap": bool(getattr(byo, "route", "") == "C"),
+        }
         self.run_bring_download_worker(repo, getattr(byo, "profile_like", ""))
+
+    def action_bring_cancel_download(self) -> None:
+        """[k] — cancel the in-flight ① Bring download (kills the pull.sh / hf
+        process group via the runner's SIGINT→TERM→KILL, same path as the catalog
+        cancel).  check_action gates this to mode 1 + an active download so the
+        shared [k] falls through to serving_stop everywhere else."""
+        dls = self._active_bring_download()
+        if dls:
+            # In-session download → cancel via the runner (SIGINT→TERM→KILL).
+            repo = next(iter(dls))
+            dls.pop(repo, None)
+            self._cancel_bring_download()
+        else:
+            # Disk-detected download (prior session / bare pull.sh) → kill the
+            # lock holder PID directly; the downloader's stale-reclaim frees the
+            # lock. (#617)
+            repo, info = self._bring_disk_download()
+            if info is None:
+                return
+            self._kill_bring_pid(info.get("pid"))
+        try:
+            self.query_one("#lane-bring-pane", LaneBringPane).set_weights_line(
+                "  [yellow]download cancelled[/yellow] — press [bold]\\[D][/bold] to restart"
+            )
+        except Exception:
+            pass
+        self.notify(f"Cancelled download of {repo}.", title="Download", timeout=3)
+
+    @work(group="bring-download-ctl")
+    async def _cancel_bring_download(self) -> None:
+        await self._data.cancel_weights_download()
 
     @work(exclusive=True, group="bring-download")
     async def run_bring_download_worker(self, repo: str, profile_like: str) -> None:
-        """§2b-6/7 — stream the pull.sh download into the weights line, then
-        re-probe and hand off to ② Serve."""
+        """§2b-6/7 — stream the pull.sh download into the weights line, poll to
+        TRUE completion, then hand the verdict off an AUTHORITATIVE disk re-stat
+        (not the captured apply-swap marker).  Mirrors the catalog run_download's
+        robustness so #617's two bugs can't recur: (a) the tracker keeps the run
+        visible to a concurrent re-fit-check; (b) the verdict is derived from
+        weights-present, so a Route-C download whose weights landed but whose
+        marker was missed reads as ✓ (→ ② Serve emit-only), NOT a false failure."""
+        import asyncio
         lane_pane = None
         try:
             lane_pane = self.query_one("#lane-bring-pane", LaneBringPane)
@@ -7507,27 +7968,75 @@ class CockpitApp(App):
                 clipped = line.strip()[-100:]
                 try:
                     lane_pane.set_weights_line(
-                        f"  [cyan]downloading[/cyan] [dim]{escape(clipped)}[/dim]"
+                        f"  [cyan]⏳ downloading[/cyan] [dim]{escape(clipped)}[/dim] "
+                        "[dim](\\[k] cancels)[/dim]"
                     )
                 except Exception:
                     pass
 
-        handle = await self._data.run_bring_download(repo, profile_like, on_line=_on_line)
+        # Route-C fine-tune → apply-swap: pull.sh downloads the brought weights
+        # AND emits a serve-locally clone of the sibling compose (--model at the
+        # weights). Any other route is the plain Path-B fetch.
+        apply_swap = bool(
+            self._last_byo is not None
+            and getattr(self._last_byo, "route", "") == "C"
+        )
+        self._bring_swap_compose = ""
+        handle = await self._data.run_bring_download(
+            repo, profile_like, apply_swap=apply_swap, on_line=_on_line
+        )
+        # Attach the real handle to the tracker entry (registered synchronously in
+        # action_bring_download).  If it's already gone, we were cancelled before
+        # the spawn returned — bail without rendering.
+        info = self._active_bring_download().get(repo)
+        if info is None:
+            return
+        info["handle"] = handle
+        # Poll to true completion (catalog run_download pattern) so the tracker —
+        # and thus the "⏳ downloading" fit-check render — stays live for the whole
+        # fetch, not just the initial await.
         try:
-            await handle.done.wait()
+            while not handle.done.is_set():
+                try:
+                    await asyncio.wait_for(handle.done.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
         except Exception:
             pass
+        # Superseded (exclusive-worker replacement) or [k]-cancelled → the tracker
+        # no longer holds this repo.  Do NOT render a stale verdict; the owner of
+        # the newer state renders instead.
+        if repo not in self._active_bring_download():
+            return
+        self._active_bring_download().pop(repo, None)
         if lane_pane is None:
             return
-        if self._data.bring_weights_present(repo):
+        # AUTHORITATIVE: disk truth (re-stat) wins over the exit code / marker race.
+        present = self._data.bring_weights_present(repo)
+        swap_compose = self._data.last_swap_compose() if apply_swap else ""
+        if apply_swap and swap_compose:
+            self._bring_swap_compose = swap_compose
+            lane_pane.set_weights_line(
+                "  [green]✓ weights + swap compose ready[/green] — "
+                "[green]→ ② Serve[/green] [dim](serves the brought model)[/dim]"
+            )
+        elif present and apply_swap:
+            # Weights DID land but no compose was captured — NOT a failure: ② Serve
+            # re-emits the swap compose from the present weights (apply-swap
+            # --emit-only, no re-download).  #617.
+            lane_pane.set_weights_line(
+                "  [green]✓ weights downloaded[/green] — [green]→ ② Serve[/green] "
+                "[dim](press \\[s]; emits the swap compose from disk — no re-download)[/dim]"
+            )
+        elif present:
             lane_pane.set_weights_line(
                 "  [green]✓ weights downloaded[/green] — "
-                "[green]→ ② Serve[/green] [dim](\\[2/]] next stage)[/dim]"
+                "[green]→ ② Serve[/green] [dim](press \\[s] to continue)[/dim]"
             )
         else:
             lane_pane.set_weights_line(
-                "  [red]download did not complete[/red] — check the pull.sh output "
-                "[dim](re-press \\[D] to retry)[/dim]"
+                "  [red]download did not complete[/red] — weights not on disk; "
+                "check the pull.sh output [dim](re-press \\[D] to retry)[/dim]"
             )
 
     # ── Explain ──────────────────────────────────────────────────────────────────────
@@ -8529,7 +9038,7 @@ class CockpitApp(App):
           primary action.)"""
         tab = self._active_validate_tab()
         if tab == "tab-bring":
-            self._trigger_lane_bring()
+            self._trigger_lane_bring()          # ⏎ ALWAYS fit-checks (advance = [s])
         elif tab == "tab-serve":
             self.action_serve_untested()
         elif tab == "tab-run":
@@ -8538,6 +9047,42 @@ class CockpitApp(App):
             self._open_evidence_report()
         elif tab == "tab-promote":
             self.action_promote_catalog()
+
+    def _bring_advance_to_serve(self) -> None:
+        """[s] on ① Bring — advance to the pre-armed ② Serve, but ONLY when the
+        fit-checked target is servable AND its weights are on disk.  ⏎ stays
+        fit-check; [s] is the explicit "proceed" (the reported "⏎ re-ran the
+        fit-check" fix — a dedicated key, not an overload).  Guards:
+          - no servable fit-check yet → ask the user to fit-check (⏎) first;
+          - weights absent → [D] download is the next step, not ② Serve."""
+        byo = self._last_byo
+        servable = bool(
+            byo is not None
+            and not getattr(byo, "error", "")
+            and (getattr(byo, "sibling_slug", "") or getattr(byo, "profile_like", ""))
+        )
+        if not servable:
+            self.notify(
+                "Fit-check a model first (⏎ on ① Bring).",
+                title="② Serve", severity="warning", timeout=3,
+            )
+            return
+        if not self._data.bring_weights_present(getattr(byo, "repo", "")):
+            self.notify(
+                "Weights not on disk yet — press [D] to download first.",
+                title="② Serve", severity="warning", timeout=4,
+            )
+            return
+        self._advance_to_serve()
+
+    def _advance_to_serve(self) -> None:
+        """Advance the Bring & Validate lane from ① Bring to the pre-armed
+        ② Serve stage (⏎'s "proceed" after a successful fit-check).  ② Serve was
+        armed by the fit-check's set_armed, so ⏎ there serves straightaway."""
+        try:
+            self.query_one("#validate-tabs", TabbedContent).active = "tab-serve"
+        except Exception:
+            pass
 
     def _run_validation_selected(self) -> None:
         """Stage the selected Run step as a confirm-gated validation launch."""
@@ -8787,11 +9332,17 @@ class CockpitApp(App):
     def action_s_key(self) -> None:
         """[s] is context-sensitive:
           - merged mode 0 · Containers : gated `docker restart <name>`.
+          - Bring & Validate · ① Bring  : advance to the armed ② Serve (weights on disk).
           - Bring & Validate · ④ Measure : gated submit-to-localmaxxing for the tag.
         Other contexts ignore it."""
-        if self._active_mode == 1 and self._active_validate_tab() == "tab-evidence":
-            self.action_evidence_submit()
-            return
+        if self._active_mode == 1:
+            tab = self._active_validate_tab()
+            if tab == "tab-bring":
+                self._bring_advance_to_serve()
+                return
+            if tab == "tab-evidence":
+                self.action_evidence_submit()
+                return
         self.action_container_restart()
 
     def action_container_restart(self) -> None:
@@ -9505,12 +10056,34 @@ class CockpitApp(App):
                 timeout=4,
             )
             return
-        # The CATALOG slug whose compose we reproduce: the Route-C sibling, else
-        # the profile-like the fit-check was run against.  We do NOT swap in the
-        # brought model's weights (no --repo on generate-compose.sh yet) and we do
-        # NOT fall back to a generic profile — if neither resolves, this route has
-        # no servable target yet (the bring-your-own weight-swap is a pending
-        # follow-up).
+        # Route-C apply-swap: if the [D] download emitted a serve-locally clone of
+        # the sibling compose (--model at the BROUGHT weights + MTP per the head),
+        # serve THAT directly — not a reproduction of the sibling's own catalog
+        # compose. This is the bring-your-own weight-swap, now wired.
+        swap_compose = getattr(self, "_bring_swap_compose", "")
+        if swap_compose and getattr(self._last_byo, "route", "") == "C":
+            self._serve_generated_compose(swap_compose)
+            return
+        # Route-C with the weights ALREADY on disk but no swap compose emitted yet
+        # (the user went straight to ② Serve because [D] was hidden — weights
+        # present): emit the serve-locally clone NOW with do_download=False (no
+        # download), then serve it.  This is the present-weights path that needs no
+        # [D] step — the "② Serve owns the compose emission" half of the UX fix.
+        if (
+            getattr(self._last_byo, "route", "") == "C"
+            and getattr(self._last_byo, "sibling_slug", "")
+            and self._data.bring_weights_present(getattr(self._last_byo, "repo", ""))
+        ):
+            self.run_bring_emit_and_serve(
+                getattr(self._last_byo, "repo", ""),
+                getattr(self._last_byo, "profile_like", ""),
+            )
+            return
+        # Otherwise (non-swap route, or the swap download hasn't run) the CATALOG
+        # slug whose compose we reproduce: the Route-C sibling, else the
+        # profile-like the fit-check was run against.  We do NOT fall back to a
+        # generic profile — if neither resolves, this route has no servable
+        # target yet.
         slug = (
             getattr(self._last_byo, "sibling_slug", "")
             or getattr(self._last_byo, "profile_like", "")
@@ -9526,6 +10099,49 @@ class CockpitApp(App):
             )
             return
         self.generate_and_preview_compose(slug)
+
+    @work(exclusive=True, group="bring-emit-serve")
+    async def run_bring_emit_and_serve(self, repo: str, profile_like: str) -> None:
+        """② Serve for a Route-C brought model whose weights are ALREADY on disk:
+        emit the serve-locally swap compose WITHOUT downloading (pull.sh
+        --apply-swap --emit-only), then hand it to the reconcile-gated serve.
+        This is the present-weights path — no [D] download step needed."""
+        lane_pane = None
+        try:
+            lane_pane = self.query_one("#lane-serve-pane", LaneServePane)
+            lane_pane.set_status(
+                "[dim]Emitting serve compose[/dim] "
+                "[dim](apply-swap --emit-only — weights on disk, no download)…[/dim]"
+            )
+        except Exception:
+            pass
+        from rich.markup import escape
+
+        def _on_line(line: str) -> None:
+            if lane_pane is not None:
+                try:
+                    lane_pane.set_status(f"[dim]{escape(line.strip()[-100:])}[/dim]")
+                except Exception:
+                    pass
+
+        self._bring_swap_compose = ""
+        handle = await self._data.run_bring_download(
+            repo, profile_like, apply_swap=True, emit_only=True, on_line=_on_line
+        )
+        try:
+            await handle.done.wait()
+        except Exception:
+            pass
+        swap_compose = self._data.last_swap_compose()
+        if not swap_compose:
+            self.notify(
+                "② Serve: apply-swap --emit-only produced no compose — see the log. "
+                "You can still press [D] to download + emit.",
+                title="② Serve", severity="warning", timeout=6,
+            )
+            return
+        self._bring_swap_compose = swap_compose
+        self._serve_generated_compose(swap_compose)
 
     @work(exclusive=True, group="generate-compose")
     async def generate_and_preview_compose(self, slug: str) -> None:
@@ -9566,6 +10182,23 @@ class CockpitApp(App):
             )
         )
 
+    def _armed_overrides_defaults(self, byo) -> Optional[dict]:
+        """② Serve override-editor pre-fill for a Route-C armed model (else None,
+        which keeps the editor hidden — the editor rides the swap compose's env)."""
+        if (
+            byo is None
+            or getattr(byo, "error", "")
+            or str(getattr(byo, "route", "") or "").upper() != "C"
+            or not getattr(byo, "sibling_slug", "")
+        ):
+            return None
+        try:
+            return self._data.serve_override_defaults(
+                getattr(byo, "profile_like", ""), getattr(byo, "repo", "")
+            )
+        except Exception:
+            return None
+
     def _serve_generated_compose(self, compose_path: str) -> None:
         """Stage the serve of a GENERATED compose through the reconcile gate.
 
@@ -9576,7 +10209,14 @@ class CockpitApp(App):
         # entry staged by a PRIOR catalog serve so that stale slug can NEVER drive
         # a false "✓ serving <that model>" via _serve_slug_for / failure capture.
         self._staged_entry = None
-        plan = self._data.serve_generated(compose_path)
+        # ② Serve override editor — collect the field values (empty when the editor
+        # is hidden / non-Route-C).  They ride on plan.env → the compose's ${VAR}.
+        overrides = {}
+        try:
+            overrides = self.query_one("#lane-serve-pane", LaneServePane).collect_overrides()
+        except Exception:
+            overrides = {}
+        plan = self._data.serve_generated(compose_path, overrides or None)
         self.push_screen(ConfirmActionScreen(plan))
 
     # ── Phase 5 · Hook 2: Promote the BYO model to the catalog (design §3.5b) ──────────
@@ -9733,7 +10373,9 @@ class CockpitApp(App):
         # resolved target is shown WITHOUT re-entering ① Bring (the pipeline flows).
         if tab_id == "tab-serve":
             try:
-                self.query_one("#lane-serve-pane", LaneServePane).set_armed(self._last_byo)
+                self.query_one("#lane-serve-pane", LaneServePane).set_armed(
+                    self._last_byo, self._armed_overrides_defaults(self._last_byo)
+                )
             except Exception:
                 pass
         # Only respond to tabs that belong to the current mode's active panel.
@@ -9805,6 +10447,20 @@ class CockpitApp(App):
         try:
             sel_id = event.select.id
         except Exception:
+            return
+        # ② Serve override editor — the "✎ custom…" sentinel reveals + focuses the
+        # companion free-text Input (any value the engine dropdown doesn't list,
+        # e.g. turboquant_4bit_nc); any real pick hides it again.
+        if sel_id in ("ov-ctx", "ov-kv", "ov-util"):
+            try:
+                inp = self.query_one(f"#{sel_id}-custom", Input)
+                if event.value == _OV_CUSTOM:
+                    inp.remove_class("ov-custom-hidden")
+                    inp.focus()
+                else:
+                    inp.add_class("ov-custom-hidden")
+            except Exception:
+                pass
             return
         if sel_id == "catalog-model-select":
             val = event.value

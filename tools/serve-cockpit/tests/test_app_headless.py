@@ -941,13 +941,13 @@ class TestNavNodesExist:
             # (F6 shortened "our rig" → "rig" for column budget).
             # Serve-confirm rework: the "fit" column moved into the serve pop-up.
             # Model-filter: a "model" column leads the table (group-by-model view).
-            # Layout, left→right: identity (model · slug) → config (weights · kv)
-            # → money (ctx · TPS · 8pk) → topology/engine (slug-redundant, fold
-            # first) → status LAST (its emoji glyph is the one variable-width cell,
-            # so nothing follows it to misalign — see _STATUS_GLYPH note).
+            # Layout, left→right: identity (model · slug) → config (weights · kv
+            # · spec) → money (ctx · TPS · 8pk) → topology/engine (slug-redundant,
+            # fold first) → status LAST (its emoji glyph is the one variable-width
+            # cell, so nothing follows it to misalign — see _STATUS_GLYPH note).
             for expected in (
-                "model", "slug", "weights", "kv", "ctx", "TPS (rig)", "8pk (rig)",
-                "topo", "engine", "status",
+                "model", "slug", "weights", "kv", "spec", "ctx", "TPS (rig)",
+                "8pk (rig)", "topo", "engine", "status",
             ):
                 assert expected in col_labels, f"missing {expected!r}: {col_labels}"
             # "source" is gone.
@@ -958,9 +958,12 @@ class TestNavNodesExist:
             assert col_labels[0] == "model", col_labels
             # status is the LAST column (emoji-width slop has nothing after it).
             assert col_labels[-1] == "status", col_labels
-            # config (weights · kv) sits between the identity and the money columns.
+            # config (weights · kv · spec) sits between the identity and the money
+            # columns, in that order (the three serving-config facets grouped).
             assert col_labels.index("weights") < col_labels.index("ctx"), col_labels
             assert col_labels.index("kv") < col_labels.index("ctx"), col_labels
+            assert col_labels.index("spec") < col_labels.index("ctx"), col_labels
+            assert col_labels.index("kv") < col_labels.index("spec"), col_labels
             # every money column sits LEFT of topo/engine.
             fold = col_labels.index("topo")
             for money in ("ctx", "TPS (rig)", "8pk (rig)"):
@@ -1127,10 +1130,12 @@ class TestCatalogWired:
             pane.set_filter("")
             assert len(pane._filtered_entries()) == 2
 
-    def _label_entry(self, quant: str, weights_format: str = "", quant_label: str = ""):
+    def _label_entry(self, quant: str, weights_format: str = "", quant_label: str = "",
+                     drafter: str = ""):
         """Minimal CatalogEntry whose compose path carries the given <quant>/ dir
         (weights_variant derives from the path) + optional threaded format /
-        quant_label (the emit weights_quant_label / weights_format joins)."""
+        quant_label (the emit weights_quant_label / weights_format joins) +
+        optional drafter id (the emit drafter join → Spec Dec column)."""
         from club3090_cockpit.data import CatalogEntry as _CE
         from club3090_tui_core import VariantRow as _VR
 
@@ -1146,6 +1151,7 @@ class TestCatalogWired:
             object.__setattr__(row, "weights_format", weights_format)
         if quant_label:
             object.__setattr__(row, "weights_quant_label", quant_label)
+        object.__setattr__(row, "drafter", drafter)
         return _CE(row=row)
 
     def test_weights_label_quant_segment_beats_provider_prefix(self):
@@ -1193,6 +1199,84 @@ class TestCatalogWired:
             _weights_label(self._label_entry("mudler-apex-compact"))
             == "mudler-apex-compact"
         )
+
+    def test_spec_label_from_drafter_id(self):
+        """The Spec Dec column derives METHOD·mechanism from the registry drafter
+        id (already in-app as row.drafter).  DFlash is always external → no suffix;
+        the built-in-vs-external split lives WITHIN MTP → `gguf` / `asst` name the
+        mechanism.  None → '—'."""
+        from club3090_cockpit.app import _spec_label, _spec_token
+
+        for drafter, want in {
+            "qwen-mtp-builtin": "MTP",
+            "carnice-mtp-gguf": "MTP·gguf",
+            "unsloth-mtp-gguf": "MTP·gguf",
+            "qwopus-mtp-gguf": "MTP·gguf",
+            "gemma-it-assistant": "MTP·asst",
+            "gemma-26b-it-assistant": "MTP·asst",
+            "anbeeld-qwen-dflash": "DFlash",
+            "gemma-dflash": "DFlash",
+            "zlab-qwen-dflash": "DFlash",
+        }.items():
+            assert _spec_label(self._label_entry("fp8", drafter=drafter)) == want, drafter
+        # No drafter → the column shows an em-dash; the pure token is empty so the
+        # funnel can skip the suffix entirely.
+        assert _spec_label(self._label_entry("fp8", drafter="")) == "—"
+        assert _spec_token("") == ""
+        assert _spec_token("some-future-ngram-drafter") == "ngram"
+
+    def test_byo_result_route_c_reframes_as_servable(self):
+        """A Route-C swap (curated-arch fine-tune) reframes the engine's
+        'no-fit-model' verdict into a positive, actionable card — regression guard
+        for the self-contradicting fit-check ('not eligible' red + '② Serve armed
+        with <sibling>' green, which named the wrong model)."""
+        from dataclasses import replace
+        from club3090_cockpit.app import _byo_result_text
+        from club3090_cockpit.data import ByoResult
+        res = ByoResult(
+            repo="josefprusa/ThinkingCap-Qwen3.6-27B-int4-AutoRound-v1",
+            profile_like="vllm/dual", arch="Qwen3_5ForConditionalGeneration",
+            eligible=False, fit_verdict="no-fit-model", note="engine jargon",
+            route="C", sibling_slug="qwen3.6-27b", quant_match="auto_round",
+            drop_spec_config=False, error=None,
+        )
+        txt = _byo_result_text(res)
+        assert "✓ Servable" in txt                       # positive headline
+        assert "not eligible" not in txt                 # no scary red for a servable swap
+        assert "\\[D]" in txt                            # explicit [D] next-step
+        # the [D] action names the BROUGHT model, not the sibling
+        action = txt.split("→ Press")[1]
+        assert "ThinkingCap-Qwen3.6-27B-int4-AutoRound-v1" in action
+        assert "qwen3.6-27b" in txt                      # sibling recipe named
+        assert "MTP kept" in txt                         # has_mtp_head True
+        # raw verdict only in the dim debug line, not as the headline
+        assert txt.index("no-fit-model") > txt.index("✓ Servable")
+        # no-head fine-tune → MTP dropped
+        assert "MTP dropped" in _byo_result_text(replace(res, drop_spec_config=True))
+        # a normal eligible model is UNCHANGED (old card: eligible + ② Serve armed)
+        plain = _byo_result_text(replace(
+            res, eligible=True, fit_verdict="fits-clean", route=None, sibling_slug=None,
+        ))
+        assert "eligible" in plain and "② Serve" in plain and "✓ Servable" not in plain
+
+    def test_byo_result_downloading_suppresses_d_reoffer(self):
+        """#617: while a ① Bring [D] download is IN FLIGHT, the Route-C card must
+        show '⏳ downloading' and NOT re-offer [D] — otherwise a refresh invites a
+        second 20+ GB fetch of the same repo."""
+        from club3090_cockpit.app import _byo_result_text
+        from club3090_cockpit.data import ByoResult
+        res = ByoResult(
+            repo="josefprusa/Tess-4-27B-FP8", profile_like="vllm/dual",
+            arch="Qwen3_5ForConditionalGeneration", eligible=False,
+            fit_verdict="no-fit-model", route="C", sibling_slug="qwen3.6-27b",
+            quant_match="auto_round", drop_spec_config=False, error=None,
+        )
+        txt = _byo_result_text(res, weights_present=False, downloading=True)
+        assert "downloading" in txt                 # in-flight signalled
+        assert "\\[D]" not in txt                    # [D] re-offer suppressed
+        assert "→ Press" not in txt                  # ...and its prompt
+        # not-downloading still offers [D] (regression guard for the default path)
+        assert "\\[D]" in _byo_result_text(res, weights_present=False, downloading=False)
 
     @pytest.mark.asyncio
     async def test_catalog_submission_legend_in_status_line(self):
@@ -1697,6 +1781,88 @@ class TestBringFunnelStagedReveal:
             assert "on disk" in text and "② Serve" in text
 
     @pytest.mark.asyncio
+    async def test_bring_download_tracked_guarded_and_cancelable(self, monkeypatch, tmp_path):
+        """#617 parity: an in-flight ① Bring download is tracked so a re-fit-check
+        SEES it (⏳ downloading, not the [D] re-offer), a second [D] no-ops instead
+        of double-fetching, and [k] cancels it."""
+        from club3090_cockpit.data import ByoResult
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_bring(pilot)
+            repo, prof = "unsloth/Qwen3-27B-abliterated", "vllm/dual"
+            app.run_byo_check(repo, prof)
+            await _settle(pilot)
+            line = app.query_one("#lane-bring-weights-line", Static)
+            assert "not on disk" in str(line.render())    # baseline: [D] affordance
+            # simulate an in-flight download for this repo
+            app._active_bring_download()[repo] = {
+                "handle": None, "profile_like": prof, "apply_swap": False,
+            }
+            # bug 2: a re-fit-check now shows "downloading", not the stale verdict
+            app.run_byo_check(repo, prof)
+            await _settle(pilot)
+            assert "downloading" in str(line.render())
+            # no-op guard: [D] while in-flight must NOT launch a second worker
+            app._active_mode = 1
+            app.action_bring_download()
+            await _settle(pilot)
+            assert app._active_bring_download()[repo]["handle"] is None  # no worker ran
+            # [k] cancels → tracker cleared
+            app.action_bring_cancel_download()
+            await _settle(pilot)
+            assert repo not in app._active_bring_download()
+
+    @pytest.mark.asyncio
+    async def test_bring_download_disk_detected_suppresses_noops_cancels(
+        self, monkeypatch, tmp_path
+    ):
+        """#617 disk-truth: a download detected ON DISK (in-memory tracker EMPTY
+        — a prior c3 session or a bare pull.sh holds the pull-dir lock) still
+        shows '⏳ downloading', no-ops a fresh [D] instead of stacking a
+        duplicate, and [k] kills the lock holder PID."""
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_bring(pilot)
+            repo, prof = "unsloth/Qwen3-27B-abliterated", "vllm/dual"
+            # disk says in-progress (pid 424242); the in-memory tracker stays EMPTY
+            monkeypatch.setattr(
+                app._data, "bring_download_in_progress",
+                lambda r, expected_gb=None: (
+                    {"in_progress": True, "pid": 424242, "pct": 42}
+                    if r == repo else None
+                ),
+            )
+            app.run_byo_check(repo, prof)
+            await _settle(pilot)
+            line = app.query_one("#lane-bring-weights-line", Static)
+            assert "downloading" in str(line.render())     # disk-detected, tracker empty
+            assert not app._active_bring_download()
+
+            # fresh [D] must NOT launch a worker (disk-guard blocks the duplicate)
+            app._active_mode = 1
+            launched = {"n": 0}
+            monkeypatch.setattr(
+                app, "run_bring_download_worker",
+                lambda *a, **k: launched.__setitem__("n", launched["n"] + 1),
+            )
+            app.action_bring_download()
+            await _settle(pilot)
+            assert launched["n"] == 0
+            assert not app._active_bring_download()
+
+            # [k] kills the disk holder PID (no in-memory handle to cancel)
+            killed = {"pid": None}
+            monkeypatch.setattr(
+                app, "_kill_bring_pid",
+                lambda pid: killed.__setitem__("pid", pid),
+            )
+            app.action_bring_cancel_download()
+            await _settle(pilot)
+            assert killed["pid"] == 424242
+
+    @pytest.mark.asyncio
     async def test_inspect_error_reveals_nothing(self):
         responses = fake_responses(
             **{"deriver.py --inventory": ok(json.dumps(
@@ -1773,6 +1939,32 @@ class TestFunnelSlugOptionsPure:
         assert by_slug["vllm/minimal"] == "single/vllm/qwen3.6-27b-autoround-int4"
         assert by_slug["vllm/dual"] == "dual/vllm/qwen3.6-27b-autoround-int4  ·  fp8-mtp"
         assert by_slug["vllm/qwen-27b-dual-turbo"] == "dual/vllm/qwen3.6-27b-autoround-int4  ·  turbo"
+
+    def test_funnel_spec_facet_folds_into_label_and_disambiguates(self):
+        """The Spec Dec facet is mirrored into the funnel label (a producer picks
+        partly by which drafter a candidate enables).  It's FOLDED into the label
+        so two slugs identical on topology/engine/quant but differing ONLY by
+        drafter split on `· MTP` instead of falling to the serving-stem tail;
+        no-drafter slugs stay clean."""
+        from types import SimpleNamespace as NS
+
+        from club3090_cockpit.app import funnel_slug_options
+
+        rows = [
+            NS(slug="vllm/dual-mtp", engine="vllm-stable", model="qwen3.6-27b",
+               file="fp8-mtp.yml", status="production", compose_dir="",
+               drafter="qwen-mtp-builtin",
+               compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml"),
+            NS(slug="vllm/dual-plain", engine="vllm-stable", model="qwen3.6-27b",
+               file="base.yml", status="production", compose_dir="", drafter="",
+               compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/base.yml"),
+        ]
+        by_slug = {o.slug: o.label for o in funnel_slug_options(rows, "safetensors")}
+        # Same topology/engine/quant, differ only by drafter → the spec facet
+        # disambiguates; NO stem tail is appended (the spec split already made the
+        # labels distinct).  The no-drafter sibling stays bare.
+        assert by_slug["vllm/dual-mtp"] == "dual/vllm/qwen3.6-27b-autoround-int4  ·  MTP"
+        assert by_slug["vllm/dual-plain"] == "dual/vllm/qwen3.6-27b-autoround-int4"
 
     def test_size_floor_hides_too_small_topologies_only(self):
         from club3090_cockpit.app import funnel_slug_options
@@ -9299,19 +9491,20 @@ class TestTier1PrimaryActionAndSKeyHonesty:
                 assert app.check_action("s_key", ()) is False, tab
 
     @pytest.mark.asyncio
-    async def test_s_key_gated_to_evidence_only_in_lane(self):
-        """In the Bring & Validate lane [s] is valid ONLY on ④ Measure (submit),
-        not on ① Bring / ② Serve / ③ Gate / ⑤ Promote."""
+    async def test_s_key_gated_to_bring_and_evidence_in_lane(self):
+        """In the Bring & Validate lane [s] is valid on ① Bring (advance → ②
+        Serve) and ④ Measure (submit), NOT on ② Serve / ③ Gate / ⑤ Promote."""
         app, _, _ = make_app(surface="producer")
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
             await pilot.press("2")
             await _settle(pilot)
             tc = app.query_one("#validate-tabs", TabbedContent)
-            tc.active = "tab-evidence"
-            await pilot.pause()
-            assert app.check_action("s_key", ()) is True
-            for tab in ("tab-bring", "tab-serve", "tab-run", "tab-promote"):
+            for tab in ("tab-bring", "tab-evidence"):
+                tc.active = tab
+                await pilot.pause()
+                assert app.check_action("s_key", ()) is True, tab
+            for tab in ("tab-serve", "tab-run", "tab-promote"):
                 tc.active = tab
                 await pilot.pause()
                 assert app.check_action("s_key", ()) is False, tab
@@ -10238,7 +10431,11 @@ class TestProducerLaneHandoff:
             assert "unsloth/Qwen3-27B-abliterated" in body   # the brought repo
 
     @pytest.mark.asyncio
-    async def test_bring_result_points_forward_to_serve(self):
+    async def test_bring_result_points_forward_to_serve(self, monkeypatch, tmp_path):
+        # Route-C fit-check, weights ABSENT → the card's next-step points at the
+        # [D] download (which emits the serve compose + serves).  The presence-
+        # aware card MUST show the download prompt here, not the ② Serve pointer.
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
         app, _, _ = make_app(surface="producer")
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.press("2")
@@ -10248,8 +10445,198 @@ class TestProducerLaneHandoff:
             card = str(app.query_one("#lane-bring-pane", LaneBringPane).query_one(
                 "#lane-bring-result-card", Static
             ).render())
-            assert "→ ② Serve" in card
+            assert "[D]" in card and "download" in card
             assert "vllm/dual" in card
+
+    @pytest.mark.asyncio
+    async def test_bring_result_present_points_to_serve(self, monkeypatch, tmp_path):
+        # Route-C fit-check, weights already ON DISK → the card drops the [D]
+        # download prompt and points straight at ② Serve (no download needed).
+        # This is the [D]-when-already-present contradiction fix.
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            # land the brought weights at the pull dir the presence probe reads
+            d = app._data.bring_pull_dir("unsloth/Qwen3-27B-abliterated")
+            d.mkdir(parents=True)
+            (d / "model.safetensors").write_bytes(b"x")
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            card = str(app.query_one("#lane-bring-pane", LaneBringPane).query_one(
+                "#lane-bring-result-card", Static
+            ).render())
+            assert "② Serve" in card and "no download" in card
+            assert "[D]" not in card               # the download prompt is gone
+            assert "vllm/dual" in card
+
+    @pytest.mark.asyncio
+    async def test_bring_s_key_advances_to_serve_when_present(self, monkeypatch, tmp_path):
+        # After a servable fit-check with weights ON DISK, [s] on ① Bring ADVANCES
+        # to the pre-armed ② Serve (the dedicated "proceed" key).
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            d = app._data.bring_pull_dir("unsloth/Qwen3-27B-abliterated")
+            d.mkdir(parents=True)
+            (d / "model.safetensors").write_bytes(b"x")
+            app.query_one("#lane-bring-url-input", Input).value = "unsloth/Qwen3-27B-abliterated"
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            app.query_one("#validate-tabs", TabbedContent).active = "tab-bring"
+            app.action_s_key()                                   # [s] on ① Bring
+            await _settle(pilot)
+            assert app.query_one("#validate-tabs", TabbedContent).active == "tab-serve"
+
+    @pytest.mark.asyncio
+    async def test_bring_enter_always_fitchecks_never_advances(self, monkeypatch, tmp_path):
+        # ⏎ on ① Bring ALWAYS fit-checks — even with weights on disk it must NOT
+        # skip to ② Serve (advance is [s]'s job; ⏎ stays fit-check).
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            d = app._data.bring_pull_dir("unsloth/Qwen3-27B-abliterated")
+            d.mkdir(parents=True)
+            (d / "model.safetensors").write_bytes(b"x")
+            app.query_one("#lane-bring-url-input", Input).value = "unsloth/Qwen3-27B-abliterated"
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            app.query_one("#validate-tabs", TabbedContent).active = "tab-bring"
+            app._validate_primary()                              # ⏎ on ① Bring
+            await _settle(pilot)
+            assert app.query_one("#validate-tabs", TabbedContent).active == "tab-bring"
+
+    @pytest.mark.asyncio
+    async def test_bring_s_key_no_advance_when_weights_absent(self, monkeypatch, tmp_path):
+        # [s] with weights ABSENT → stays on ① Bring ([D] download is the next
+        # step, not ② Serve).
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            app.query_one("#lane-bring-url-input", Input).value = "unsloth/Qwen3-27B-abliterated"
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            app.query_one("#validate-tabs", TabbedContent).active = "tab-bring"
+            app.action_s_key()
+            await _settle(pilot)
+            assert app.query_one("#validate-tabs", TabbedContent).active == "tab-bring"
+
+    @pytest.mark.asyncio
+    async def test_serve_override_editor_reveals_prefills_and_collects(self, monkeypatch, tmp_path):
+        # Route-C fit-check → the ② Serve override editor is revealed + pre-filled
+        # from the resolved slug's defaults; an edit round-trips via collect_overrides.
+        from textual.widgets import Input as _I, Select as _S
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 46)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            pane = app.query_one("#lane-serve-pane", LaneServePane)
+            ov = pane.query_one("#lane-serve-overrides")
+            assert not ov.has_class("funnel-hidden")            # revealed for Route-C
+            assert pane.query_one("#ov-served-name", _I).value  # pre-filled served-name
+            assert pane.query_one("#ov-kv", _S).value == "fp8_e5m2"
+            assert pane.query_one("#ov-spec", _S).value == "on"
+            # edits round-trip
+            pane.query_one("#ov-served-name", _I).value = "MyCustomName"
+            pane.query_one("#ov-ctx", _S).value = "65536"
+            pane.query_one("#ov-spec", _S).value = "off"
+            ovr = pane.collect_overrides()
+            assert ovr["SERVED_NAME"] == "MyCustomName"
+            assert ovr["MAX_MODEL_LEN"] == "65536"
+            assert ovr["SPEC"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_serve_override_editor_hidden_and_empty_without_route_c(self):
+        # No fit-check → editor hidden and collect_overrides returns {} (so a
+        # non-Route-C serve applies no overrides).
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 46)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            pane = app.query_one("#lane-serve-pane", LaneServePane)
+            assert pane.query_one("#lane-serve-overrides").has_class("funnel-hidden")
+            assert pane.collect_overrides() == {}
+
+    @pytest.mark.asyncio
+    async def test_serve_override_custom_kv_and_preview(self, monkeypatch, tmp_path):
+        # Preview shows the engine; the "✎ custom…" KV sentinel reveals the
+        # companion Input and collect reads it (reaches turboquant_4bit_nc even
+        # though the engine dropdown doesn't list it).
+        from textual.widgets import Input as _I, Select as _S
+        from club3090_cockpit.app import _OV_CUSTOM
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 48)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            pane = app.query_one("#lane-serve-pane", LaneServePane)
+            assert "engine" in str(pane.query_one("#lane-serve-ov-preview", Static).render())
+            # custom starts hidden; a real user pick of "✎ custom…" reveals it via
+            # on_select_changed (same idiom as ① Bring's profile hatch — the reveal
+            # is verified there + by a posted Select.Changed; programmatic .value=
+            # skips the message, so here we assert the FUNCTIONAL contract).
+            assert pane.query_one("#ov-kv-custom", _I).has_class("ov-custom-hidden")
+            # sentinel on the dropdown → collect reads the companion Input, so a
+            # KV dtype the engine list omits (turboquant_4bit_nc) is still reachable.
+            pane.query_one("#ov-kv", _S).value = _OV_CUSTOM
+            pane.query_one("#ov-kv-custom", _I).value = "turboquant_4bit_nc"
+            assert pane.collect_overrides()["KV_CACHE_DTYPE"] == "turboquant_4bit_nc"
+
+    @pytest.mark.asyncio
+    async def test_serve_override_spec_selects_drafter_method(self, monkeypatch, tmp_path):
+        # The spec dropdown VALUE is the drafter method; collect maps method →
+        # SPEC=on + DRAFTER_METHOD, and "off" → SPEC=off (no DRAFTER_METHOD).
+        from textual.widgets import Select as _S
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 48)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            pane = app.query_one("#lane-serve-pane", LaneServePane)
+            sel = pane.query_one("#ov-spec", _S)
+            # simulate the engine-driven drafter options, then switch the type
+            sel.set_options([("MTP n=3", "mtp"),
+                             ("mtp_assistant", "mtp_assistant"),
+                             ("off — no spec-dec", "off")])
+            sel.value = "mtp_assistant"
+            ovr = pane.collect_overrides()
+            assert ovr["SPEC"] == "on" and ovr["DRAFTER_METHOD"] == "mtp_assistant"
+            sel.value = "off"
+            ovr2 = pane.collect_overrides()
+            assert ovr2["SPEC"] == "off" and "DRAFTER_METHOD" not in ovr2
+
+    @pytest.mark.asyncio
+    async def test_serve_armed_route_c_serves_your_weights(self, monkeypatch, tmp_path):
+        # ② Serve armed for a Route-C brought model reflects the TRUTH: serves
+        # YOUR weights via the sibling recipe — NOT a catalog reproduction, and no
+        # dead end (bring-funnel-design §2b item 7).
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            body = str(app.query_one("#lane-serve-pane", LaneServePane).query_one(
+                "#lane-serve-body", Static
+            ).render())
+            assert "your brought weights" in body
+            assert "to serve" in body                          # a clear action, no dead end
+            assert "NOT your brought model" not in body        # stale contradiction is gone
 
     @pytest.mark.asyncio
     async def test_serve_tab_rearms_from_cached_byo(self):

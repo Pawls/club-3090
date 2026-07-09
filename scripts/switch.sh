@@ -100,6 +100,11 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   done < "${ROOT_DIR}/.env"
   unset _env_line _env_key _env_val
 fi
+# #632 — surface a user engine-image pin (ik-llama / llama.cpp images are NOT
+# profile-injected, so a .env/shell pin is the only override path; echo it so a
+# wrong-image boot is never silent).  Fires only when actually set.
+[[ -n "${IK_LLAMA_IMAGE:-}" ]] && echo "[switch] ik-llama image pinned: ${IK_LLAMA_IMAGE}"
+[[ -n "${LLAMACPP_IMAGE:-}" ]] && echo "[switch] llama.cpp image pinned: ${LLAMACPP_IMAGE}"
 
 # Surface the resolved MODEL_DIR + its source so the precedence is unambiguous
 # (the exact confusion behind #425 / #187). Unset → the compose's built-in
@@ -1022,11 +1027,15 @@ up_variant() {
     # Engine-agnostic: warn if a multi-card (TP>=2) target sits on a narrow/asymmetric
     # PCIe link, where the per-layer NCCL all-reduce is the bottleneck (club-3090#142).
     preflight_pcie_lane_width "${full_dir}/${file}" || true
+    # Single-card util-override guard — runs even under --force (the nvfp4 slug
+    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+    preflight_single_card_util "${full_dir}/${file}" "$v" || true
   fi
   gpu_preflight
 
   echo "[switch] bringing up: ${v}  (${dir}/${file})"
   export_variant_engine_pin "$v"
+  preflight_ik_llama_image "$v"   # #633 — cu12 fallback on <13.2 drivers (unless pinned)
   (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d --remove-orphans)
 }
 

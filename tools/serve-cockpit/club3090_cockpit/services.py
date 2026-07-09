@@ -996,11 +996,66 @@ class CockpitData:
         except OSError:
             return False
 
+    def bring_download_in_progress(
+        self, repo: str, expected_gb: Optional[float] = None
+    ) -> Optional[dict]:
+        """Disk-truth in-progress probe for a brought download (club-3090 #617).
+
+        Returns ``{"in_progress": True, "pid": int, "pct": <0-100|None>}`` when a
+        LIVE download lock is held for this repo — downloader.py writes
+        ``<pull_dir>/.download.lock/pid`` = holder PID + UTC start on acquire and
+        removes it on release. Unlike the in-memory ``_active_bring_download``
+        tracker, this survives a c3 restart AND sees a download started outside
+        this session (e.g. a bare ``pull.sh --apply-swap``), so the fit-check can
+        REFLECT a running download instead of re-offering [D] and stacking a
+        duplicate. Returns None when no lock, a STALE lock (dead holder), or an
+        unreadable one. A cheap stat — safe to call on every fit-check render.
+        ``pct`` from ``.incomplete`` bytes / ``expected_gb`` when the size is
+        known, else None."""
+        d = self.bring_pull_dir(repo)
+        try:
+            raw = (d / ".download.lock" / "pid").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            pid = int(raw[0].strip())
+        except (OSError, ValueError, IndexError):
+            return None
+        if pid <= 0:
+            return None
+        try:
+            os.kill(pid, 0)                 # signal 0 = liveness probe
+        except ProcessLookupError:
+            return None                     # stale (dead holder) — not running
+        except PermissionError:
+            pass                            # alive, just not ours
+        except OSError:
+            return None
+        pct = None
+        if expected_gb and expected_gb > 0:
+            try:
+                got = sum(
+                    f.stat().st_size
+                    for f in (d / ".incomplete").rglob("*")
+                    if f.is_file()
+                )
+                pct = max(0, min(100, int(got / (expected_gb * 1e9) * 100)))
+            except OSError:
+                pct = None
+        return {"in_progress": True, "pid": pid, "pct": pct}
+
+    def last_swap_compose(self) -> str:
+        """The serve-locally compose emitted by the most recent Route-C
+        apply-swap download ("" if none). Captured from pull.sh's
+        ``[apply-swap] compose: <path>`` line; ② Serve serves it directly."""
+        return getattr(self, "_last_swap_compose", "")
+
     async def run_bring_download(
         self,
         repo: str,
         profile_like: str,
         *,
+        apply_swap: bool = False,
+        emit_only: bool = False,
         on_line: Optional[Callable[[str], None]] = None,
     ) -> Any:
         """§2b-6 — the lane's weights download: the REAL ``pull.sh`` run
@@ -1012,10 +1067,31 @@ class CockpitData:
         (conftest blocks the real spawn)."""
         env = dict(os.environ)
         env.setdefault("HF_HOME", str(self._bring_hf_home()))
-        if on_line is not None:
-            self._download_runner.set_callbacks(on_line=on_line)
+        self._last_swap_compose = ""
+
+        def _capture(line: str) -> None:
+            # Route-C apply-swap prints "[apply-swap] compose: <path>" — capture
+            # it so ② Serve can serve the emitted sibling-clone compose.
+            marker = "[apply-swap] compose:"
+            if marker in line:
+                self._last_swap_compose = line.split(marker, 1)[1].strip()
+            if on_line is not None:
+                on_line(line)
+
+        if apply_swap or on_line is not None:
+            self._download_runner.set_callbacks(on_line=_capture)
+        cmd = ["bash", "scripts/pull.sh", repo, "--profile-like", profile_like]
+        if apply_swap:
+            # The BYO weight-swap ACTION: download the brought weights AND emit a
+            # serve-locally clone of the sibling compose (--model at the weights).
+            cmd.append("--apply-swap")
+        if emit_only:
+            # Weights already on disk — skip the download, JUST emit the serve
+            # compose (do_download=False).  ② Serve uses this so a present-weights
+            # serve needs no [D] step.  Only meaningful alongside --apply-swap.
+            cmd.append("--emit-only")
         return await self._download_runner.start_raw(
-            ["bash", "scripts/pull.sh", repo, "--profile-like", profile_like],
+            cmd,
             env=env,
             run_type="download",
             parser=None,
@@ -2136,7 +2212,93 @@ class CockpitData:
             return _fail(res.stdout.strip()[:300] or "generator emitted no compose")
         return {"compose_path": tmp_path, "compose_yaml": yaml_text, "error": ""}
 
-    def serve_generated(self, compose_path: str) -> ActionPlan:
+    def serve_override_defaults(self, profile_like: str, repo: str) -> dict[str, str]:
+        """Pre-fill values for the ② Serve override editor, read from the resolved
+        ``profile_like`` sibling compose's ``${VAR:-default}`` env knobs (+ the
+        brought repo name for SERVED_NAME).  Best-effort: any field we can't parse
+        falls back to a sane default.  Pure READ (regex over the compose text) —
+        no PyYAML (keeps this importable on the launcher's stdlib-only path)."""
+        import re as _re
+        out = {
+            "SERVED_NAME": repo.rsplit("/", 1)[-1] if repo else "",
+            "MAX_MODEL_LEN": "262144",
+            "KV_CACHE_DTYPE": "fp8_e5m2",
+            "GPU_MEMORY_UTILIZATION": "0.92",
+            "SPEC": "on",
+            "SPEC_DRAFTER": "",   # e.g. "MTP n=3" — the real drafter (label only)
+            "ENGINE": "",         # e.g. "vllm-stable" — for the ② Serve preview
+        }
+        try:
+            import sys as _sys
+            if str(self.repo_root) not in _sys.path:
+                _sys.path.insert(0, str(self.repo_root))   # cwd-independent import
+            from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+            entry = COMPOSE_REGISTRY.get(profile_like)
+            if entry:
+                out["ENGINE"] = str(entry.get("engine", "") or "")
+                txt = (self.repo_root / entry["compose_path"]).read_text(encoding="utf-8")
+                for var in ("MAX_MODEL_LEN", "KV_CACHE_DTYPE", "GPU_MEMORY_UTILIZATION"):
+                    m = _re.search(r"\$\{" + var + r":-([^}]+)\}", txt)
+                    if m:
+                        out[var] = m.group(1).strip().strip('"')
+                # Real drafter for the SPEC label ("on" is uninformative): parse the
+                # sibling's --speculative-config method + num_speculative_tokens.
+                sm = _re.search(r'"method"\s*:\s*"([a-z0-9_]+)"', txt)
+                if sm:
+                    method = sm.group(1)
+                    nm = _re.search(r'"num_speculative_tokens"\s*:\s*(\d+)', txt)
+                    out["SPEC_METHOD"] = method                    # raw, e.g. "mtp"
+                    out["SPEC_N"] = nm.group(1) if nm else ""
+                    out["SPEC_DRAFTER"] = (
+                        f"{method.upper()} n={nm.group(1)}" if nm else method.upper())
+        except Exception:
+            pass
+        # KV + drafter dropdown options come from the ENGINE's supported set (not a
+        # generic vLLM list) — vLLM, llama.cpp, beellama each support a different
+        # family.  The "✎ custom…" hatch (KV) reaches anything not listed.
+        out["KV_OPTIONS"] = self.engine_kv_formats(out["ENGINE"])
+        out["DRAFTER_OPTIONS"] = self.engine_drafters(out["ENGINE"])
+        return out
+
+    def _engine_yaml_list(self, engine: str, key: str) -> list:
+        """A top-level YAML list block (``key:`` then ``  - item``) from the
+        engine profile.  Stdlib line-parse — the c3 path has no PyYAML.  Empty
+        list → the caller uses a generic fallback."""
+        out: list = []
+        if not engine:
+            return out
+        try:
+            p = (self.repo_root / "scripts" / "lib" / "profiles"
+                 / "engines" / f"{engine}.yml")
+            grab = False
+            for ln in p.read_text(encoding="utf-8").splitlines():
+                if ln.strip().startswith(f"{key}:"):
+                    grab = True
+                    continue
+                if grab:
+                    st = ln.strip()
+                    if st.startswith("- "):
+                        item = st[2:].split("#", 1)[0].strip().strip('"')
+                        if item:
+                            out.append(item)
+                    elif st and not st.startswith("#"):
+                        break   # dedented → end of the list block
+        except Exception:
+            pass
+        return out
+
+    def engine_kv_formats(self, engine: str) -> list:
+        """KV dtypes the ENGINE declares support for (``supported_kv_formats``)."""
+        return self._engine_yaml_list(engine, "supported_kv_formats")
+
+    def engine_drafters(self, engine: str) -> list:
+        """Spec-dec drafters the ENGINE declares support for
+        (``supported_drafters`` — vLLM: mtp/mtp_assistant; beellama: dflash/…)."""
+        return self._engine_yaml_list(engine, "supported_drafters")
+
+    def serve_generated(
+        self, compose_path: str, overrides: Optional[dict[str, str]] = None
+    ) -> ActionPlan:
         """Serve a GENERATED (producer-lane ②) compose, badged untested.
 
         Serving a generated compose CLAIMS the GPU exactly like any serve, so the
@@ -2144,13 +2306,24 @@ class CockpitData:
         through the SAME ConfirmActionScreen → run_reconcile_for_modal →
         dispatch_action gate (the dual-writer lease MUST hold).  We launch it via
         ``docker compose -f <path> up`` — the generated compose is a verbatim
-        minimal reproduction, NOT a registry slug switch.sh knows about."""
+        minimal reproduction, NOT a registry slug switch.sh knows about.
+
+        ``overrides`` (the ② Serve editor's field values — MAX_MODEL_LEN /
+        KV_CACHE_DTYPE / SPEC / GPU_MEMORY_UTILIZATION / SERVED_NAME) ride on
+        ``plan.env`` and interpolate into the compose's ``${VAR}`` at up-time —
+        so a re-tuned serve needs no compose rewrite.  MODEL_DIR is pinned here
+        too so the sibling's HF-cache mount resolves off the models disk."""
+        env: dict[str, str] = {"MODEL_DIR": self.weights_model_dir()}
+        for k, v in (overrides or {}).items():
+            if v is not None and str(v) != "":
+                env[k] = str(v)
         return ActionPlan(
             kind="serve",
             cmd=["docker", "compose", "-f", compose_path, "up", "-d"],
             description=f"serve generated compose {Path(compose_path).name} (untested)",
             requires_reconcile=True,
             requires_confirm=True,
+            env=env,
         )
 
     def set_default(self, slug: str) -> ActionPlan:
@@ -2444,9 +2617,15 @@ class CockpitData:
             import os as _os
 
             try:
+                # plan.env (e.g. the ② Serve override editor's field values) is
+                # merged OVER os.environ so `docker compose up` interpolates the
+                # re-tuned ${MAX_MODEL_LEN}/${KV_CACHE_DTYPE}/${SPEC}/… .
+                _run_env = dict(_os.environ)
+                if plan.env:
+                    _run_env.update(plan.env)
                 state = await self._write_runner.start_raw(
                     plan.cmd,
-                    env=dict(_os.environ),
+                    env=_run_env,
                     run_type=run_type or plan.kind,
                     parser=run_parser,
                 )
