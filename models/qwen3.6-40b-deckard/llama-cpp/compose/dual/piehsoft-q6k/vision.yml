@@ -15,13 +15,13 @@
 #       so BOTH stay selectable in Hermes/LiteLLM (only one runs at a time under the
 #       GPU mutex). Boot this to try Deckard WITH images; boot mtp.yml for the MTP
 #       speedup (+59%/+104%) without vision. You lose MTP here — that is the trade.
-#     - VISION UNVERIFIED until first boot. The mmproj is mradermacher's, built from
-#       the SAME DavidAU Deckard base our PiehSoft trunk derives from (PiehSoft only
-#       injected the MTP head into the LM; the vision tower is untouched), and it
-#       matches Deckard's dense hidden_size 5120 / qwen3_5 vision tower. Confirm on
-#       boot: mmproj tensors load ("clip_model_loader"), then POST an image and
-#       check it is actually described. If images drop, mount DavidAU's Deckard
-#       chat_template.jinja via --chat-template-file (its <|vision_start|> markers).
+#     - VISION CONFIRMED WORKING 2026-07-10: mmproj loads (mtmd ~873 MiB), and an
+#       image round-trips correctly both direct (:8200) and through LiteLLM (:4000
+#       — the Hermes path), finish_reason=stop. The mmproj is mradermacher's, built
+#       from the SAME DavidAU Deckard base our PiehSoft trunk derives from (PiehSoft
+#       only injected the MTP head into the LM; the vision tower is untouched), and
+#       it matches Deckard's dense hidden_size 5120 / qwen3_5 vision tower. Embedded
+#       --jinja template handles the image markers fine (no external template needed).
 #     - GPU0 (desktop card) also carries the vision tower (~601 MB). Dropping MTP
 #       frees GPU1's draft context to offset it, so 131072 should still fit — but
 #       GPU0 is the tight card (~2.6 GB free at 131072). If it OOMs on a desktop
