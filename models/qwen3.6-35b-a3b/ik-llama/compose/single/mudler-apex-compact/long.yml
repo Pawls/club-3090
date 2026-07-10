@@ -40,6 +40,10 @@ services:
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
       - ../../../patches/apex-qwen-chat-template.jinja:/etc/apex-qwen-chat-template.jinja:ro
+    # WSL2: Docker device_ids does NOT isolate GPUs (both are always visible to CUDA),
+    # so pin via CUDA_VISIBLE_DEVICES inside the container instead. =1 → GPU1 only.
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     command: >-
       --host 0.0.0.0
       --port 8080

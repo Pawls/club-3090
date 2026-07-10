@@ -83,3 +83,44 @@ model_list:
       model: openai/deckard-40b
       api_base: http://host.docker.internal:8199/v1
       api_key: EMPTY
+
+  # === Local single-rig additions (Paul, 2026-07) — carnice / ik-single / omni ===
+
+  # Carnice-V2-27B Q8 (beellama, dual) at :8070. Text-only agentic SFT.
+  - model_name: carnice-v2
+    litellm_params:
+      model: openai/Carnice-V2-27B-Q8_0-mtp.gguf
+      api_base: http://host.docker.internal:8070/v1
+      api_key: EMPTY
+
+  # Qwen3.6-35B-A3B APEX compact (ik_llama, SINGLE card GPU1) at :8056. No served-name →
+  # upstream id IS the full mount path (note the // after openai/ is the prefix boundary).
+  - model_name: apex-35b-compact
+    litellm_params:
+      model: "openai//models/qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf"
+      api_base: http://host.docker.internal:8056/v1
+      api_key: EMPTY
+
+  # Qwen3-Omni-30B (vllm-omni, dual) at :8042 — vision/audio brain. Full-path upstream id.
+  # max_tokens is FORCE-CAPPED to 8192 by the custom_hooks.py pre-call hook (Hermes requires
+  # context_length>=64K, then uses it AS max_tokens → 0 input room without the cap). See that file.
+  - model_name: omni-30b
+    litellm_params:
+      model: "openai//models/qwen3-omni-30b-a3b-instruct-int4-autoround"
+      api_base: http://host.docker.internal:8042/v1
+      api_key: EMPTY
+
+# === Param handling (added 2026-07, revised after the reasoning_effort 400) ===
+# drop_params: true → LiteLLM discards params it KNOWS a backend can't use (e.g.
+# reasoning_effort, which Hermes sends unconditionally from agent.reasoning_effort but
+# llama.cpp/vLLM chat endpoints reject). Without this it 400s the whole request.
+# KEY: this only drops params in LiteLLM's KNOWN-OpenAI map. Non-OpenAI sampling
+# extensions (top_k / min_p / repetition_penalty) are UNKNOWN to that map → passed
+# through untouched. VERIFIED 2026-07-09 via direct-vs-proxied seeded diff: byte-identical
+# generation with drop_params: true, so sampling fidelity is intact. (drop_params: false
+# was wrong — it turned benign unsupported-param drops into hard 400s.)
+litellm_settings:
+  drop_params: true
+  # Pre-call hook that force-caps omni-30b max_tokens (see custom_hooks.py). Client value
+  # can't otherwise be overridden, and Hermes sends max_tokens=context_length (>=64K) for omni.
+  callbacks: custom_hooks.proxy_handler_instance

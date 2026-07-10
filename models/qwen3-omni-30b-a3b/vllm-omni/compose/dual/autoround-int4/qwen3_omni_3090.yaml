@@ -18,7 +18,11 @@ connectors:
 
 stages:
   - stage_id: 0          # Thinker — multimodal understanding + text generation
-    max_model_len: 65536
+    # 65536 needs 3.0 GiB KV but GPU0 shares ~1.7 GiB with the Windows desktop (drives the
+    # monitors), leaving only ~2.98 GiB → off-by-20-MiB crash loop. Can't raise util (0.92 +
+    # desktop already near 24 GB). 49152 (48K) fits with margin against desktop spikes and is
+    # ample for the frame/short-video workflow. Restore to 65536 only if GPU0 is desktop-free.
+    max_model_len: 49152
     max_num_batched_tokens: 2048
     max_num_seqs: 8
     gpu_memory_utilization: 0.92
@@ -32,7 +36,7 @@ stages:
       seed: 42
 
   - stage_id: 1          # Talker — text+hidden -> audio codec tokens (must match thinker max_model_len:
-    max_model_len: 65536 #          the prompt flows through every stage, so a short value broadcast-crashes it)
+    max_model_len: 49152 #          the prompt flows through every stage, so a short value broadcast-crashes it)
     max_num_batched_tokens: 2048
     max_num_seqs: 8
     gpu_memory_utilization: 0.55

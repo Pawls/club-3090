@@ -1,0 +1,114 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-35B-A3B-APEX-MTP (mudler APEX Quality GGUF)
+#   Engine:    ik_llama.cpp (ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143)
+#   Topology:  Dual 3090 (TP=2)
+#   Drafter:   MTP n=5, p-min 0.0
+#   KV:        q8_0 K + q8_0 V + -khad/-vhad Hadamard
+#   Vision:    NO
+#   Default ctx: 1048576  (YaRN factor-4 over the 262144 native ceiling)
+#   Genesis:   N/A — ik_llama.cpp engine (Genesis is a vLLM patch set)
+#   Status:    🧪 EVAL ONLY — 1M-context YaRN bring-up lane, UNTESTED
+#   Caveats:
+#     - QUALITY UNPROVEN past native 262144. This is static YaRN 4x: it degrades
+#       accuracy at ALL positions (short prompts included) and coherence/recall
+#       beyond ~262K is unvalidated on this stack (repo NIAH only proven to 240K).
+#       Do NOT leave this variant running for normal-length work — use the 196608
+#       sibling (../mudler-apex-quality/mtp.yml) for that.
+#     - Streaming-prefill path (ik_llama.cpp) dodges vLLM Cliff 2/3, so filling a
+#       1M window is feasible here where vLLM would stall/OOM — but a cold 1M
+#       prefill is still SLOW. Bench prefill/TTFT before trusting it interactively.
+#     - Display-card headroom: --fit balances BOTH cards symmetrically; GPU0 is
+#       the Windows display + WSL2 card (~3.5 GB overhead) and wants MORE free
+#       than GPU1. Raise FIT_MARGIN, or drop --fit for a manual TENSOR_SPLIT
+#       biased toward GPU1 (see the override block). KV @1M q8_0 ≈ 5.7 GB/card;
+#       drop KV_TYPE=q4_0 (Hadamard recovers most of it) to roughly halve that.
+#     - MTP n=5 at 1M is untested; if draft acceptance tanks, set MTP_DRAFT_N_MAX=0
+#       (or lower) to fall back to plain decode.
+#   Best for:  Pushing the hybrid-MoE KV advantage (10 growing attn layers) to a
+#              1M window on dual 3090 — the ONLY 35B path that fits 1M here; the
+#              dense 27B needs ~34 GB/card of KV at 1M and cannot.
+# ---------------------------------------------------------------------------
+# Sibling composes in this directory:
+#   mtp.yml     — 196608 ctx, native (no rope scaling), q8_0 KV. The stable
+#                 dual quality lane. Prefer it for anything ≤262K.
+#   yarn-1m.yml — THIS FILE. 1048576 ctx via YaRN 4x. Experimental, quality
+#                 unproven past native; for long-context capacity testing only.
+# ---------------------------------------------------------------------------
+# Qwen3.6-35B-A3B MoE on ik_llama.cpp — dual 3090, APEX Quality GGUF, 1M YaRN.
+#
+# target: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+#
+# Why the hybrid MoE can do 1M here: only 10 of 40 layers are full-attention
+# (KV-growing); the other 30 are Gated DeltaNet (fixed-size recurrent state).
+# So KV scales with 10 layers, not 40 — ~5.7 GB/card q8_0 at 1M. See
+# docs/KV_MATH.md → Qwen3.6-35B-A3B section.
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR              host dir to mount as /models  (default: ../../../../../../models-cache)
+#   GGUF_FILE              path under /models  (default: qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf)
+#   CTX_SIZE               KV pool size        (default: 1048576)
+#   ROPE_SCALE             YaRN expansion N    (default: 4  → 262144 x4 = 1048576)
+#   YARN_ORIG_CTX          YaRN original ctx   (default: 262144  = n_ctx_train / n_ctx_orig_yarn)
+#   FIT_MARGIN             per-card fit margin (default: 1024  — bump to protect the GPU0 desktop)
+#   BATCH_SIZE             llama.cpp -b        (default: 2048)
+#   UBATCH_SIZE            llama.cpp -ub       (default: 512)
+#   NP                     parallel slots      (default: 1)
+#   KV_TYPE                K and V quant type  (default: q8_0  — try q4_0 for more headroom)
+#   MTP_DRAFT_N_MAX        MTP draft tokens    (default: 5  — set 0 to disable spec-decode)
+#   DRAFT_P_MIN            draft accept floor  (default: 0.0)
+#   TENSOR_SPLIT           manual tensor split (unset; --fit auto-balances. To protect
+#                          GPU0, drop --fit below and set e.g. 0.40,0.60 + MAIN_GPU=1)
+#   REASONING              thinking gate       (default: off)
+#   REASONING_FORMAT       reasoning routing   (default: deepseek)
+#   PORT                   host port           (default: 8057)
+#   CUDA_VISIBLE_DEVICES   which GPUs to use   (default: 0,1)
+
+services:
+  ik-llama-qwen36-35b-a3b-apex-quality-yarn-1m:
+    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143}
+    container_name: "${ESTATE_CONTAINER:-ik-llama-qwen36-35b-a3b-apex-quality-yarn-1m}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8057}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+      - ../../../patches/apex-qwen-chat-template.jinja:/etc/apex-qwen-chat-template.jinja:ro
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      --model /models/${GGUF_FILE:-qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf}
+      --fit
+      --fit-margin ${FIT_MARGIN:-1024}
+      --split-mode graph
+      --max-gpu 2
+      --ctx-size ${CTX_SIZE:-1048576}
+      --rope-scaling yarn
+      --rope-scale ${ROPE_SCALE:-4}
+      --yarn-orig-ctx ${YARN_ORIG_CTX:-262144}
+      -b ${BATCH_SIZE:-2048}
+      -ub ${UBATCH_SIZE:-512}
+      -np ${NP:-1}
+      -ctk ${KV_TYPE:-q8_0}
+      -ctv ${KV_TYPE:-q8_0}
+      -khad
+      -vhad
+      --spec-type mtp:n_max=${MTP_DRAFT_N_MAX:-5},p_min=${DRAFT_P_MIN:-0.0}
+      --merge-qkv
+      -fa on
+      --jinja
+      --chat-template-file /etc/apex-qwen-chat-template.jinja
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0,1}}"]
+              capabilities: [gpu]

@@ -69,6 +69,8 @@ services:
       --deploy-config /cfg/qwen3_omni_3090.yaml
       --port 8091
       --trust-remote-code
+      --enable-auto-tool-choice
+      --tool-call-parser ${TOOL_PARSER:-hermes}
       --kv-cache-dtype ${KV_CACHE_DTYPE:-fp8}
     deploy:
       resources:

@@ -64,6 +64,12 @@
 #   BATCH_SIZE / UBATCH_SIZE  -b / -ub   (default: 2048 / 512 — A/B'd: bigger is FLAT, keep lean)
 #   KV_TYPE_K / KV_TYPE_V     K/V cache  (default: q8_0 / q8_0)
 #   NP           parallel slots          (default: 1)
+#   NO_MMAP      host-RAM (WSL2)          (default: unset → mmap ON, canonical. Set
+#                                          NO_MMAP=true in .env to add --no-mmap: weights load
+#                                          straight to VRAM instead of mmap'ing the ~29GB GGUF
+#                                          into WSL2 page cache. Opt-in only. NOTE: any
+#                                          non-empty value enables it, so NO_MMAP=false ALSO
+#                                          enables — to disable, remove/blank the line.)
 #   REASONING    thinking gate           (default: on — Carnice is a reasoning/agentic SFT; 'off' = fast)
 #   REASONING_FORMAT / REASONING_BUDGET  (defaults: deepseek / 4096)
 #   PORT         host port               (default: 8070)
@@ -99,6 +105,7 @@ services:
       --flash-attn on
       --cache-ram 0
       --no-host
+      ${NO_MMAP:+--no-mmap}
       --jinja
       --reasoning ${REASONING:-on}
       --reasoning-format ${REASONING_FORMAT:-deepseek}

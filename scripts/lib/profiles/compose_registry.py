@@ -512,6 +512,16 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="APEX-MTP community MoE GGUF — eval-only bring-up lane, not yet validated.",
     ),
+    "ik-llama/apex-yarn-1m-dual": _entry(
+        model="qwen3.6-35b-a3b", weights_variant="mudler-apex-quality", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q8_0",
+        tp=2, max_ctx=1048576, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml",
+        default_port=8057,
+        kvcalc_key="SKIP",
+        status="experimental",
+        status_note="APEX-Quality MoE GGUF at 1M ctx via YaRN factor-4 (over native 262K) — eval-only, UNTESTED. Shares mudler-apex-quality weights with apex-mtp-quality-dual. Quality past 262K unproven; run a NIAH ladder before trusting the window. ik streaming-prefill dodges the vLLM Cliff 2/3 wall.",
+    ),
     "llamacpp/hauhaucs-35ba3b-dual": _entry(
         model="qwen3.6-35b-a3b", weights_variant="morikomorizz-q6kp", workload="fast-chat",
         engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q8_0",
