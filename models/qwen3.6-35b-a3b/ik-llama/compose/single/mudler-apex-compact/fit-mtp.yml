@@ -111,6 +111,7 @@ services:
       --parallel-tool-calls
       --reasoning ${REASONING:-off}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}}'
       --temp ${TEMP:-${TEMPERATURE:-0.6}}
       --top-p ${TOP_P:-0.95}
       --top-k ${TOP_K:-20}
