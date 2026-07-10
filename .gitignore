@@ -43,8 +43,14 @@ venv/
 # Docker compose state
 **/compose/*.log
 
-# Local env overrides
-.env
+# Local env overrides.
+# NOTE: the blanket `.env` ignore was removed (pawl-custom, 2026-07-10) so that
+# machine-local compose `.env` overrides show up in `git status` / are trackable
+# on this personal branch — they hold only non-secret tuning knobs (CTX_SIZE,
+# TENSOR_SPLIT, REASONING, ...). The one secret-bearing file is the REPO-ROOT
+# `.env` (live HF_TOKEN) — it stays ignored via the anchored `/.env` below.
+# Any NEW secret-bearing env file must be added here explicitly or named *.env.local.
+/.env
 *.env.local
 
 # Local safety backups of compose files (e.g. docker-compose.yml.default)
