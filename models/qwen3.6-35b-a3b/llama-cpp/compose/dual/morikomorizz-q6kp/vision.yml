@@ -1,0 +1,90 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-35B-A3B-Uncensored-HauhauCS (morikomorizz Q6_K_P) + mmproj
+#   Engine:    llama.cpp (mainline server-cuda-b9570)
+#   Topology:  Dual 3090 (layer-split -ts 0.5,0.5 — even; no MTP draft card to offset)
+#   Drafter:   NONE — MTP dropped on purpose (see "Why MTP off" below)
+#   KV:        q8_0 K + q8_0 V
+#   Vision:    YES — mmproj-BF16 (~0.86 GB) — THE reason this variant exists
+#   Template:  GGUF-embedded (--jinja)
+#   Max ctx:   262144 (native — kept full: dropping the MTP draft KV frees ~3 GB,
+#              which offsets the vision tower, so no ctx trim was needed)
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - Sibling of mtp.yml — same GGUF, same port/alias (8073 / hauhau-35b), so
+#       this is a DROP-IN SWAP: `down` mtp.yml, `up` vision.yml. They are mutually
+#       exclusive (both bind 8073). Default daily driver stays mtp.yml (MTP on,
+#       no vision); boot THIS one when you need image input, then flip Hermes
+#       supports_vision:true for hauhau-35b.
+#     - VISION UNVERIFIED until first boot — same check as apex vision.yml: confirm
+#       mmproj tensors load and an image is actually described. If images are
+#       dropped, the embedded template may lack vision markers → mount unsloth's
+#       35B-A3B chat_template.jinja via --chat-template-file.
+#     - Uncensored fine-tune — see mtp.yml for the content caveat.
+#   Best for:  Uncensored dual-card 35B-A3B at full 262K WITH vision, when you can
+#              spare MTP's code-decode boost for image input.
+# ---------------------------------------------------------------------------
+# Why MTP off:  llama.cpp's multimodal (mtmd) path and the speculative draft path
+#   are mutually exclusive — you cannot run --mmproj together with --spec-type
+#   draft-mtp. Per the maintainer's rule for this repo, vision is only added where
+#   it does NOT cost MTP on the model's DEFAULT config; hauhau's default (mtp.yml)
+#   keeps MTP, and THIS opt-in sibling trades it for vision. Bonus: dropping the
+#   draft head frees its bundled draft KV (~3 GB skew at 262K), which is exactly
+#   what makes room for the vision tower without trimming context.
+#
+# All other knobs + the full model rationale: see the sibling mtp.yml header.
+# Override defaults via the co-located .env (MODEL_DIR, CTX_SIZE, TENSOR_SPLIT,
+# REASONING, PRESERVE_THINKING, SERVED_NAME, PORT, ...).
+#
+# Quick start (from this directory):
+#   MODEL_DIR=/home/pawl/models docker compose -f vision.yml up -d
+#   curl http://localhost:8073/v1/models   # -> hauhau-35b
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 48
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 1
+
+services:
+  llama-cpp-hauhaucs-35ba3b:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9570}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-hauhaucs-35ba3b-vision}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8073}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP-Q6_K_P.gguf}
+      --mmproj /models/${MMPROJ_FILE:-qwen3.6-35b-a3b-gguf/mmproj/mmproj-BF16.gguf}
+      --alias ${SERVED_NAME:-hauhaucs-35ba3b-dual}
+      -c ${CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-512}
+      -ngl 99
+      -ts ${TENSOR_SPLIT:-0.5,0.5}
+      -fa on
+      --cache-type-k ${KV_TYPE:-q8_0}
+      --cache-type-v ${KV_TYPE:-q8_0}
+      -np ${NP:-1}
+      --jinja
+      --reasoning ${REASONING:-on}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}}'
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.1}
+      --repeat-last-n ${REPEAT_LAST_N:-256}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,104 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-35B-A3B-APEX (mudler I-Compact GGUF) + Qwen3.6-35B-A3B mmproj
+#   Engine:    llama.cpp (mainline server-cuda-b9570) — NOT ik-llama
+#   Topology:  Single 3090 (GPU1 headless, x4 irrelevant to single-GPU inference)
+#   Drafter:   none (MTP off — net-negative on this a3b MoE, and mmproj is
+#              mutually exclusive with the draft path anyway)
+#   KV:        q8_0 K + q5_0 V (K-high/V-low; frees VRAM for the vision tower)
+#   Vision:    YES — mmproj-BF16 (~0.86 GB) — THE reason this variant exists
+#   Template:  GGUF-embedded (--jinja) — see "Vision caveat" below
+#   Max ctx:   200K default (trimmed from apex-ik's 262K to seat the vision tower;
+#              raise CTX_SIZE toward 262K if boot VRAM allows)
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - VISION UNVERIFIED until first boot. mudler's APEX GGUF is a text-trunk
+#       conversion (Qwen3_5MoeForCausalLM); the mmproj is unsloth's stock
+#       Qwen3.6-35B-A3B projector. Architecturally they pair (shared 2048 hidden),
+#       but confirm on boot: (1) log shows "clip_model_loader" / mmproj tensors
+#       loaded, (2) POST an image to /v1/chat/completions and check it is actually
+#       described, not ignored. If images are dropped, mount unsloth's 35B-A3B
+#       chat_template.jinja via --chat-template-file (its template carries the
+#       <|vision_start|> markers the embedded text template may lack).
+#     - This is the MAINLINE-engine sibling of the shipped ik-llama apex
+#       (models/qwen3.6-35b-a3b/ik-llama/.../mudler-apex-compact/). What you trade
+#       vs. ik for the vision gain: ik's MoE-tuned prompt-processing kernels,
+#       --fit auto-offload, and -khad/-vhad per-head KV quant. Decode is
+#       bandwidth-bound on one fully-offloaded card so decode TPS should be ~even;
+#       prefill/TTFT on very long prompts MAY be somewhat slower on mainline.
+#       Not benched yet — run bench.sh MODEL=apex-35b-vision to quantify.
+#   Best for:  Single-card APEX daily driver WITH vision (share UI screenshots),
+#              at a modest ctx + prefill cost vs the ik text-only apex. ⭐ vision
+# ---------------------------------------------------------------------------
+# Why this variant exists:
+#   ik_llama.cpp (the shipped apex engine) has NO --mmproj — it cannot do vision
+#   at all. Qwen3.6-35B-A3B *is* a VL model (unsloth ships mmproj-BF16/F16/F32),
+#   so serving the same APEX trunk on MAINLINE llama.cpp + the mmproj is the only
+#   way to give apex image input. MTP is off either way (A/B'd net-negative on
+#   this MoE, see the ik .env), so switching engines costs no drafter.
+#
+#   The APEX I-Compact GGUF loads on mainline unchanged: its "I-" prefix is
+#   imatrix (not ik), the tensors are standard K-quants (Q3_K/Q4_K/Q8_0), and the
+#   bundled MTP head rides mainline llama.cpp PR #22673 — we simply don't enable
+#   --draft-mtp here.
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR        host dir mounted as /models  (default: ../../../../../../models-cache)
+#   GGUF_FILE        trunk path under /models
+#   MMPROJ_FILE      vision projector under /models
+#   CTX_SIZE         KV pool size        (default: 200000; raise toward 262144 if it fits)
+#   KV_TYPE_K/_V     K / V quant         (defaults: q8_0 / q5_0)
+#   REASONING        thinking gate       (default: off; =on for deepseek <think>, =auto request-driven)
+#   PRESERVE_THINKING keep prior <think>  (default: false)
+#   SERVED_NAME      --alias value       (default: apex-35b-vision)
+#   PORT             host port           (default: 8058; the ik apex is 8056)
+#
+# Quick start (from this directory):
+#   MODEL_DIR=/home/pawl/models CUDA_VISIBLE_DEVICES=1 docker compose -f vision.yml up -d
+#   curl http://localhost:8058/v1/models   # -> apex-35b-vision
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  llama-cpp-apex-35ba3b-vision:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9570}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-apex-35ba3b-vision}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8058}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf}
+      --mmproj /models/${MMPROJ_FILE:-qwen3.6-35b-a3b-gguf/mmproj/mmproj-BF16.gguf}
+      --alias ${SERVED_NAME:-apex-35b-vision}
+      -c ${CTX_SIZE:-200000}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-1024}
+      -ngl 99
+      -fa on
+      --cache-type-k ${KV_TYPE_K:-q8_0}
+      --cache-type-v ${KV_TYPE_V:-q5_0}
+      -np ${NP:-1}
+      --jinja
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}}'
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-1}}"]
+              capabilities: [gpu]

@@ -84,6 +84,15 @@ model_list:
       api_base: http://host.docker.internal:8199/v1
       api_key: EMPTY
 
+  # Qwen3.6-35B-A3B-Uncensored-HauhauCS ("hauhau" — MoE, llama.cpp dual 3090, MTP n=3,
+  # reasoning ON, 262K). Launched via `launch.sh llamacpp/hauhaucs-35ba3b-dual` → :8073.
+  # Both-cards mode (GPU-mutex). Served alias set to hauhau-35b via SERVED_NAME in its .env.
+  - model_name: hauhau-35b
+    litellm_params:
+      model: openai/hauhau-35b
+      api_base: http://host.docker.internal:8073/v1
+      api_key: EMPTY
+
   # === Local single-rig additions (Paul, 2026-07) — carnice / ik-single / omni ===
 
   # Carnice-V2-27B Q8 (beellama, dual) at :8070. Text-only agentic SFT.
@@ -99,6 +108,16 @@ model_list:
     litellm_params:
       model: "openai//models/qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf"
       api_base: http://host.docker.internal:8056/v1
+      api_key: EMPTY
+
+  # apex-35b-vision — SAME APEX trunk on MAINLINE llama.cpp + Qwen3.6-35B-A3B mmproj,
+  # so it accepts images (the ik-llama apex above cannot — no --mmproj). MTP off,
+  # friendly --alias, single card @ :8058. GPU-mutex with every other GPU service.
+  # llama-cpp/compose/single/mudler-apex-compact/vision.yml.
+  - model_name: apex-35b-vision
+    litellm_params:
+      model: openai/apex-35b-vision
+      api_base: http://host.docker.internal:8058/v1
       api_key: EMPTY
 
   # Qwen3-Omni-30B (vllm-omni, dual) at :8042 — vision/audio brain. Full-path upstream id.
