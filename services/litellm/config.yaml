@@ -130,6 +130,16 @@ model_list:
       api_base: http://host.docker.internal:8058/v1
       api_key: EMPTY
 
+  # apex-35b-vision-ik — PREFERRED apex-vision: same ik_llama engine as the text apex
+  # (keeps its MoE speed) + --mmproj, vs apex-35b-vision above which is on mainline
+  # llama.cpp. Boot-verified 2026-07-10 (image round-trips, 42/42 layers on GPU). @:8057.
+  # ik-llama/compose/single/mudler-apex-compact/vision.yml.
+  - model_name: apex-35b-vision-ik
+    litellm_params:
+      model: openai/apex-35b-vision-ik
+      api_base: http://host.docker.internal:8057/v1
+      api_key: EMPTY
+
   # Qwen3-Omni-30B (vllm-omni, dual) at :8042 — vision/audio brain. Full-path upstream id.
   # max_tokens is FORCE-CAPPED to 8192 by the custom_hooks.py pre-call hook (Hermes requires
   # context_length>=64K, then uses it AS max_tokens → 0 input room without the cap). See that file.

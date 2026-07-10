@@ -1,0 +1,97 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-35B-A3B-APEX (mudler I-Compact GGUF) + Qwen3.6-35B-A3B mmproj
+#   Engine:    ik_llama.cpp (SAME image as the ik apex text compose — vision is a
+#              flag, not an engine change)
+#   Topology:  Single 3090 (GPU1 headless)
+#   Drafter:   none (MTP off — net-negative on this a3b MoE per the ik .env A/B;
+#              NOT a vision limit — ik runs --mmproj + --spec-type mtp together)
+#   KV:        q4_0 K + q4_0 V (per-head -khad/-vhad)
+#   Vision:    YES — mmproj-BF16 (~862 MB) + --image-{min,max}-tokens
+#   Template:  GGUF-embedded (--jinja) — native, so image markers are handled
+#   Max ctx:   131072 default (vision + image-encode buffer share the 24 GB with
+#              KV; the ik 27b vision sibling caps ~160K on one card — start lower)
+#   Genesis:   N/A
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - THE PREFERRED apex-vision path: keeps ik_llama's MoE-tuned kernels + --fit
+#       auto-offload + per-head KV quant, unlike the mainline llama-cpp apex vision
+#       variant (models/.../llama-cpp/.../mudler-apex-compact/vision.yml), which
+#       traded those away on the mistaken belief ik couldn't do vision. It can —
+#       the shipped ik 27b iq4ks-mtp-vision.yml uses this exact image with --mmproj.
+#     - -b 1024 is MANDATORY for vision on this ik build: the image-encode compute
+#       buffer scales hard with -b (-b 4096 → ~4 GB, OOMs at boot with a projector;
+#       -b 1024 → ~1 GB). -ub is cosmetic here (engine forces n_ubatch=n_batch).
+#     - VISION UNVERIFIED on apex until first boot (engine capability is proven on
+#       the 27b; apex is a different — MoE — model). Confirm: mmproj/clip loads,
+#       an image is described, per-card VRAM has margin. If tight, lower CTX further
+#       or IMAGE_MAX_TOKENS.
+#     - Shares the co-located .env (MODEL_DIR, CUDA_VISIBLE_DEVICES=1, MTP off).
+#       Distinct identity via own vars so the .env's PORT=8056 / CTX_SIZE=262144
+#       (tuned for the text mtp.yml) don't collide:
+#         APEX_VISION_PORT  (default 8057)   VISION_CTX_SIZE (default 131072)
+#   Best for:  Single-card APEX daily driver WITH vision, keeping ik's speed. ⭐
+# ---------------------------------------------------------------------------
+# Just the ik apex mtp.yml + --mmproj + --image-*-tokens + the vision-required
+# -b 1024. mmproj is unsloth's Qwen3.6-35B-A3B projector (shared with the mainline
+# apex/hauhau vision variants). MTP stays off (net-negative on this MoE — a perf
+# choice, not a vision constraint).
+#
+# Quick start (from this directory):
+#   MODEL_DIR=/home/pawl/models docker compose -f vision.yml up -d
+#   curl http://localhost:8057/v1/models
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: ik-llama-local
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+
+services:
+  ik-llama-apex-35ba3b-vision:
+    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143}
+    container_name: "${ESTATE_CONTAINER:-ik-llama-apex-35ba3b-vision}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${APEX_VISION_PORT:-8057}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      --model /models/${GGUF_FILE:-qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf}
+      --mmproj /models/${MMPROJ_FILE:-qwen3.6-35b-a3b-gguf/mmproj/mmproj-BF16.gguf}
+      --image-min-tokens ${IMAGE_MIN_TOKENS:-1024}
+      --image-max-tokens ${IMAGE_MAX_TOKENS:-1024}
+      --alias ${VISION_SERVED_NAME:-apex-35b-vision-ik}
+      --fit
+      --fit-margin 256
+      -ngl 99
+      --ctx-size ${VISION_CTX_SIZE:-131072}
+      -b ${BATCH_SIZE:-1024}
+      -ub ${UBATCH_SIZE:-1024}
+      -np ${NP:-1}
+      -ctk ${KV_TYPE:-q4_0}
+      -ctv ${KV_TYPE:-q4_0}
+      -khad
+      -vhad
+      --spec-type mtp:n_max=${MTP_DRAFT_N_MAX:-0},p_min=${DRAFT_P_MIN:-0.0}
+      --recurrent-ckpt-mode auto
+      --merge-qkv
+      -fa on
+      --jinja
+      --parallel-tool-calls
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-1}}"]
+              capabilities: [gpu]

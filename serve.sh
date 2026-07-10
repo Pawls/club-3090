@@ -36,6 +36,7 @@ declare -A SHORTCUTS=(
   [hauhau]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/mtp.yml"
   [hauhau-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/vision.yml"
   [apex]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/mtp.yml"
+  [apex-vision-ik]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/vision.yml"
   [apex-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/single/mudler-apex-compact/vision.yml"
   [carnice]="models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml"
   [27b-single]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/fp8-mtp.yml"
