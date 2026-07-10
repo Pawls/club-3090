@@ -84,6 +84,16 @@ model_list:
       api_base: http://host.docker.internal:8199/v1
       api_key: EMPTY
 
+  # deckard-40b-vision — SAME Deckard trunk on mainline llama.cpp + the Deckard-matched
+  # mmproj (mradermacher, hidden 5120), so it accepts images. MTP traded away (mtmd ⊕
+  # draft-mtp exclusive). Alternative to deckard-40b above; both selectable, one runs at
+  # a time (GPU mutex). vision.yml @ :8200. llama-cpp/compose/dual/piehsoft-q6k/vision.yml.
+  - model_name: deckard-40b-vision
+    litellm_params:
+      model: openai/deckard-40b-vision
+      api_base: http://host.docker.internal:8200/v1
+      api_key: EMPTY
+
   # Qwen3.6-35B-A3B-Uncensored-HauhauCS ("hauhau" — MoE, llama.cpp dual 3090, MTP n=3,
   # reasoning ON, 262K). Launched via `launch.sh llamacpp/hauhaucs-35ba3b-dual` → :8073.
   # Both-cards mode (GPU-mutex). Served alias set to hauhau-35b via SERVED_NAME in its .env.

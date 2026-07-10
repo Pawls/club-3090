@@ -1,0 +1,98 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-40B-Deckard (uncensored dense merge, Q6_K) + Deckard mmproj
+#   Engine:    llama.cpp (mainline server-cuda-b9570)
+#   Topology:  Dual 3090 (layer-split; inherits TENSOR_SPLIT from the shared .env)
+#   Drafter:   NONE — MTP dropped on purpose (mtmd ⊕ draft-mtp are exclusive)
+#   KV:        q8_0 K + q8_0 V
+#   Vision:    YES — Deckard-matched mmproj-Q8_0 (~601 MB) — the reason this exists
+#   Template:  GGUF-embedded (--jinja)
+#   Max ctx:   131072 (inherits CTX_SIZE; see the GPU0-fit caveat below)
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - ALTERNATIVE to the ✅ mtp.yml — distinct identity (deckard-40b-vision @ :8200)
+#       so BOTH stay selectable in Hermes/LiteLLM (only one runs at a time under the
+#       GPU mutex). Boot this to try Deckard WITH images; boot mtp.yml for the MTP
+#       speedup (+59%/+104%) without vision. You lose MTP here — that is the trade.
+#     - VISION UNVERIFIED until first boot. The mmproj is mradermacher's, built from
+#       the SAME DavidAU Deckard base our PiehSoft trunk derives from (PiehSoft only
+#       injected the MTP head into the LM; the vision tower is untouched), and it
+#       matches Deckard's dense hidden_size 5120 / qwen3_5 vision tower. Confirm on
+#       boot: mmproj tensors load ("clip_model_loader"), then POST an image and
+#       check it is actually described. If images drop, mount DavidAU's Deckard
+#       chat_template.jinja via --chat-template-file (its <|vision_start|> markers).
+#     - GPU0 (desktop card) also carries the vision tower (~601 MB). Dropping MTP
+#       frees GPU1's draft context to offset it, so 131072 should still fit — but
+#       GPU0 is the tight card (~2.6 GB free at 131072). If it OOMs on a desktop
+#       spike: step CTX down (114688 / 98304) OR shift weight off GPU0 with
+#       TENSOR_SPLIT=1.3,1.0 (MTP-off means GPU1 no longer needs the extra headroom).
+#     - Uncensored fine-tune — see mtp.yml for the content caveat.
+#   Best for:  Trying Deckard's uncensored dense chat WITH image input, MTP traded away.
+# ---------------------------------------------------------------------------
+# Why MTP off:  llama.cpp's multimodal (mtmd) path and the speculative draft path
+#   are mutually exclusive — --mmproj cannot run with --spec-type draft-mtp. Deckard's
+#   MTP is its headline win, so this is the deliberate opposite trade from mtp.yml:
+#   give up MTP to gain vision. Both composes ship so you can pick per task.
+#
+# All shared knobs + the full model/engine-pin rationale: see the sibling mtp.yml.
+# This variant inherits the co-located .env (MODEL_DIR, CUDA_VISIBLE_DEVICES,
+# TENSOR_SPLIT, CTX_SIZE, KV_TYPE, REASONING, PRESERVE_THINKING). Its OWN identity
+# (port + alias) uses distinct vars so the shared .env's PORT=8199 / defaults do not
+# collide:  DECKARD_VISION_PORT (default 8200), VISION_SERVED_NAME (deckard-40b-vision).
+#
+# Quick start (from this directory):
+#   MODEL_DIR=/home/pawl/models docker compose -f vision.yml up -d
+#   curl http://localhost:8200/v1/models   # -> deckard-40b-vision
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 48
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 1
+
+services:
+  llama-cpp-deckard-40b-vision:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9570}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-deckard-40b-vision}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${DECKARD_VISION_PORT:-8200}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # ⚠ -np 1 is intentional — one decode stream per dual-card config.
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-qwen3.6-40b-deckard-gguf/piehsoft-q6k/Qwen3.6-40B-Deckard-MTP-Q6_K.gguf}
+      --mmproj /models/${MMPROJ_FILE:-qwen3.6-40b-deckard-gguf/mmproj/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking.mmproj-Q8_0.gguf}
+      --alias ${VISION_SERVED_NAME:-deckard-40b-vision}
+      -c ${CTX_SIZE:-131072}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-512}
+      -ngl 99
+      -ts ${TENSOR_SPLIT:-1,1}
+      -fa on
+      --cache-type-k ${KV_TYPE:-q8_0}
+      --cache-type-v ${KV_TYPE:-q8_0}
+      -np ${NP:-1}
+      --jinja
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}}'
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.1}
+      --repeat-last-n ${REPEAT_LAST_N:-256}
+      --dry-multiplier ${DRY_MULTIPLIER:-0.0}
+      --dry-base ${DRY_BASE:-1.75}
+      --dry-allowed-length ${DRY_ALLOWED_LENGTH:-2}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
