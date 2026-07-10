@@ -3,8 +3,11 @@
 #   Model:     Qwen3.6-35B-A3B-APEX (mudler I-Compact GGUF) + Qwen3.6-35B-A3B mmproj
 #   Engine:    llama.cpp (mainline server-cuda-b9570) — NOT ik-llama
 #   Topology:  Single 3090 (GPU1 headless, x4 irrelevant to single-GPU inference)
-#   Drafter:   none (MTP off — net-negative on this a3b MoE, and mmproj is
-#              mutually exclusive with the draft path anyway)
+#   Drafter:   none (MTP off — net-negative on THIS a3b MoE per the ik .env A/B:
+#              off ~84 vs n=2 ~55 TPS. NOT a vision limitation: --mmproj and
+#              --spec-type draft-mtp DO coexist on b9570 (confirmed on the Deckard
+#              variant) — MTP is left off here purely for apex's own throughput.
+#              To try it anyway, add: --spec-type draft-mtp --spec-draft-n-max 2)
 #   KV:        q8_0 K + q5_0 V (K-high/V-low; frees VRAM for the vision tower)
 #   Vision:    YES — mmproj-BF16 (~0.86 GB) — THE reason this variant exists
 #   Template:  GGUF-embedded (--jinja) — see "Vision caveat" below

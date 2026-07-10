@@ -2,40 +2,37 @@
 # Profile (at-a-glance):
 #   Model:     Qwen3.6-35B-A3B-Uncensored-HauhauCS (morikomorizz Q6_K_P) + mmproj
 #   Engine:    llama.cpp (mainline server-cuda-b9570)
-#   Topology:  Dual 3090 (layer-split -ts 0.5,0.5 — even; no MTP draft card to offset)
-#   Drafter:   NONE — MTP dropped on purpose (see "Why MTP off" below)
+#   Topology:  Dual 3090 (layer-split — inherits TENSOR_SPLIT from the shared .env)
+#   Drafter:   MTP n=3 (--spec-type draft-mtp) — kept, alongside vision
 #   KV:        q8_0 K + q8_0 V
-#   Vision:    YES — mmproj-BF16 (~0.86 GB) — THE reason this variant exists
+#   Vision:    YES — Qwen3.6-35B-A3B mmproj-BF16 (~862 MB)
 #   Template:  GGUF-embedded (--jinja)
-#   Max ctx:   262144 (native — kept full: dropping the MTP draft KV frees ~3 GB,
-#              which offsets the vision tower, so no ctx trim was needed)
+#   Max ctx:   262144 (native; verify VRAM on boot — see the note below)
 #   Genesis:   N/A — llama.cpp engine
 #   Status:    🧪 Experimental
 #   Caveats:
-#     - Sibling of mtp.yml — same GGUF, same port/alias (8073 / hauhau-35b), so
-#       this is a DROP-IN SWAP: `down` mtp.yml, `up` vision.yml. They are mutually
-#       exclusive (both bind 8073). Default daily driver stays mtp.yml (MTP on,
-#       no vision); boot THIS one when you need image input, then flip Hermes
-#       supports_vision:true for hauhau-35b.
-#     - VISION UNVERIFIED until first boot — same check as apex vision.yml: confirm
-#       mmproj tensors load and an image is actually described. If images are
-#       dropped, the embedded template may lack vision markers → mount unsloth's
-#       35B-A3B chat_template.jinja via --chat-template-file.
+#     - VISION + MTP: kept BOTH. The engine (b9570) runs --mmproj and --spec-type
+#       draft-mtp together — CONFIRMED on the sibling Deckard variant (same engine):
+#       both load, images round-trip, MTP still drafts (~0.71 acceptance). MTP is
+#       lossless and image tokens live in prefill, so vision quality is unchanged.
+#       (This corrects the earlier belief that they were mutually exclusive.)
+#     - UNVERIFIED on hauhau specifically until first boot — the engine capability is
+#       confirmed, but hauhau's VRAM at 262K + MTP + the ~862 MB mmproj is tighter
+#       than Deckard's. Check boot: mmproj loads + "speculative decoding context
+#       initialized" + per-card free VRAM. If a card is tight, either trim CTX_SIZE
+#       (e.g. 229376) or rebalance via VISION_TENSOR_SPLIT.
+#     - Sibling of mtp.yml — same GGUF, same port/alias (8073 / hauhau-35b), a
+#       DROP-IN SWAP: `down` mtp.yml, `up` vision.yml. Mutually exclusive (both bind
+#       8073). Boot THIS when you need image input; flip Hermes supports_vision:true
+#       for hauhau-35b when you do.
 #     - Uncensored fine-tune — see mtp.yml for the content caveat.
-#   Best for:  Uncensored dual-card 35B-A3B at full 262K WITH vision, when you can
-#              spare MTP's code-decode boost for image input.
+#   Best for:  Uncensored dual-card 35B-A3B at 262K WITH vision AND MTP.
 # ---------------------------------------------------------------------------
-# Why MTP off:  llama.cpp's multimodal (mtmd) path and the speculative draft path
-#   are mutually exclusive — you cannot run --mmproj together with --spec-type
-#   draft-mtp. Per the maintainer's rule for this repo, vision is only added where
-#   it does NOT cost MTP on the model's DEFAULT config; hauhau's default (mtp.yml)
-#   keeps MTP, and THIS opt-in sibling trades it for vision. Bonus: dropping the
-#   draft head frees its bundled draft KV (~3 GB skew at 262K), which is exactly
-#   what makes room for the vision tower without trimming context.
-#
-# All other knobs + the full model rationale: see the sibling mtp.yml header.
-# Override defaults via the co-located .env (MODEL_DIR, CTX_SIZE, TENSOR_SPLIT,
-# REASONING, PRESERVE_THINKING, SERVED_NAME, PORT, ...).
+# Just mtp.yml + --mmproj. All shared knobs + the full model rationale: see the
+# sibling mtp.yml header. Inherits the co-located .env (MODEL_DIR, CTX_SIZE,
+# TENSOR_SPLIT, MTP_DRAFT_N_MAX, REASONING, PRESERVE_THINKING, SERVED_NAME, PORT).
+# Override the split independently of mtp.yml via VISION_TENSOR_SPLIT if the vision
+# tower unbalances the cards.
 #
 # Quick start (from this directory):
 #   MODEL_DIR=/home/pawl/models docker compose -f vision.yml up -d
@@ -66,11 +63,13 @@ services:
       -b ${BATCH_SIZE:-4096}
       -ub ${UBATCH_SIZE:-512}
       -ngl 99
-      -ts ${TENSOR_SPLIT:-0.5,0.5}
+      -ts ${VISION_TENSOR_SPLIT:-${TENSOR_SPLIT:-0.55,0.45}}
       -fa on
       --cache-type-k ${KV_TYPE:-q8_0}
       --cache-type-v ${KV_TYPE:-q8_0}
       -np ${NP:-1}
+      --spec-type draft-mtp
+      --spec-draft-n-max ${MTP_DRAFT_N_MAX:-3}
       --jinja
       --reasoning ${REASONING:-on}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
