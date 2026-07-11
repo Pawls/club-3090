@@ -30,31 +30,52 @@ software/quant). Under load the cards pull only ~140 W / 55–77% util = **comm-
   x8 would ~2× TP throughput. Until then: prefer single-GPU serving for fit-on-one models.
 - Concurrency (`max_num_seqs`) still helps — batching amortizes the all-reduce, partially hiding x4.
 
-## 1. GPU-mutex reality (2× 3090 = 48 GB, no NVLink)
+## 1. Which model for what (GPU-mutex: only ONE runs at a time)
 
-Each of these wants **BOTH cards** — only ONE runs at a time:
+2× 3090 = 48 GB, no NVLink. **Single-card** models sit on GPU1 and leave GPU0 free for the Windows
+desktop; **dual-card** models use both. Only one GPU model runs at a time — bring the current one DOWN
+first (`docker compose … down`, `./serve.sh <name>` does the swap for you, or `gpu-mode`).
 
-| Scene | Both cards? | Use for |
+**Single card (GPU1, frees the desktop GPU) — fastest, snappiest:**
+
+| Model · port | Use for |
+|---|---|
+| **apex-35b-compact** · 8056 | ⭐ daily **TEXT** driver — 35B MoE, ~90 TPS, thinking-ON+preserve, 262K ctx |
+| **apex-35b-vision-ik** · 8057 | ⭐ daily driver **+ VISION** (share UI screenshots) — same speed/thinking, 131K ctx |
+| qwen3.6-27b (single) · 8021 | dense 27B + vision + MTP, ~28K ctx — fast solo, no x4 tax |
+
+**Both cards (dual) — bigger models / more context / concurrency:**
+
+| Model · port | Split | Use for |
 |---|---|---|
-| Carnice V2 27B Q8 (beellama) | yes (0.55/0.45 split) | daily chat / agent brain |
-| Qwen3.6-35B-A3B (vLLM) | yes (TP=2) | long-ctx MoE text |
-| Qwen3-Omni-30B (vLLM-omni) | yes (thinker→GPU0, talker→GPU1) | **video / image / audio analysis brain** |
-| APEX-Quality 1M (ik-llama, YaRN) | yes (TP=2) | 1M-context experiments |
-| Video generation (ComfyUI / ai-studio) | yes (22B DiT DisTorch) | `gpu-mode ai-studio` |
+| **deckard-40b** · 8199  (+`-vision` · 8200) | 1,1 | ⭐ **deliberation / hard reasoning** — uncensored dense 40B, thinking-ON, MTP (+59/104%). Vision variant keeps MTP + adds images |
+| **hauhau-35b** · 8073  (+vision swap) | even | uncensored **35B-A3B** MoE, thinking-ON, MTP n=3, 262K. Vision swap adds images |
+| **carnice-v2** · 8070 | 0.55/0.45 | agentic-SFT "agent brain", Q8 quality, thinking-ON+preserve |
+| **qwen3.6-27b** (dual) · 8010 | TP=2 | dense 27B + vision + **262K**, tools/MTP — big-ctx **image analysis** |
+| **qwen3.6-35b-a3b** · 8051 | TP=2 | MoE + vision + 262K + **concurrency** (parallel subagents, MAX_NUM_SEQS=4) |
+| **agents-a1** · 8072 | TP=2 | agentic thinking model (thinking forced ON via LiteLLM hook) |
+| **omni-30b** · 8042 | thinker→GPU0 / talker→GPU1 | image / audio / **VIDEO** understanding — via a light UI, **not** Hermes (§11) |
+| apex-yarn-1m · 8057 | TP=2 | 1M-context experiments (🧪 candidate to deprecate; **8057 clashes with apex-vision-ik**) |
+| video generation | DiT | `gpu-mode ai-studio` (ComfyUI/LTX) |
 
-Bring the current one DOWN before starting another (`docker compose ... down`, or `gpu-mode` swaps for you).
+Rule of thumb: **apex for speed, Deckard for deliberation, add `-vision`/`-ik` when you need images.**
+Thinking is a per-model `.env` flip (§12), not a reason to switch models. Uncensored → Deckard or hauhau.
 
 ---
 
 ## 2. Models — port · container · compose · served-name
 
-| Model | Port | Container | Compose (`-f`) | Served model id |
-|---|---|---|---|---|
-| **Carnice V2 27B Q8** | 8070 | `beellama-carnice-v2-dual` | `models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml` | `Carnice-V2-27B-Q8_0-mtp.gguf` |
-| **Qwen3.6-27B** (vLLM) | 8010 | `vllm-qwen36-27b-dual` | `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml` | `qwen3.6-27b` |
-| **Qwen3.6-35B-A3B** (vLLM) | 8051 | `vllm-qwen36-35b-a3b-dual` | `models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/fp8.yml` | `qwen3.6-35b-a3b-autoround` |
-| **Qwen3-Omni-30B** (video) | 8042 | `vllm-omni-qwen3-omni-30b` | `models/qwen3-omni-30b-a3b/vllm-omni/compose/dual/autoround-int4/omni.yml` | auto (path id) |
-| **APEX-Quality 1M** (ik, YaRN) | 8057 | `ik-llama-qwen36-35b-a3b-apex-quality-yarn-1m` | `models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml` | auto |
+| Model | Port | Container | Compose (`-f`) | Served model id | HF source |
+|---|---|---|---|---|---|
+| **Carnice V2 27B Q8** | 8070 | `beellama-carnice-v2-dual` | `models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml` | `Carnice-V2-27B-Q8_0-mtp.gguf` | [`stuchapin/Carnice-V2-27B-MTP-GGUF`](https://huggingface.co/stuchapin/Carnice-V2-27B-MTP-GGUF) (`Carnice-V2-27B-Q8_0-mtp.gguf`) |
+| **Qwen3.6-27B** (vLLM) | 8010 | `vllm-qwen36-27b-dual` | `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml` | `qwen3.6-27b` | [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound) |
+| **Qwen3.6-35B-A3B** (vLLM) | 8051 | `vllm-qwen36-35b-a3b-dual` | `models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/fp8.yml` | `qwen3.6-35b-a3b-autoround` | [`Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound`](https://huggingface.co/Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound) |
+| **Qwen3-Omni-30B** (video) | 8042 | `vllm-omni-qwen3-omni-30b` | `models/qwen3-omni-30b-a3b/vllm-omni/compose/dual/autoround-int4/omni.yml` | auto (path id) | [`Intel/Qwen3-Omni-30B-A3B-Instruct-int4-AutoRound`](https://huggingface.co/Intel/Qwen3-Omni-30B-A3B-Instruct-int4-AutoRound) |
+| **APEX-Quality 1M** (ik, YaRN) | 8057 | `ik-llama-qwen36-35b-a3b-apex-quality-yarn-1m` | `models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml` | auto | [`mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF`](https://huggingface.co/mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF) (`...I-Quality.gguf`) |
+| **apex-35b-compact** (ik, single, ⭐daily text) | 8056 | `ik-llama-…apex-compact-long` | `models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/mtp.yml` | auto (path id) | mudler (`…I-Compact.gguf`) |
+| **apex-35b-vision-ik** (ik, single, ⭐daily+vision) | 8057 | `ik-llama-apex-35ba3b-vision` | `…/ik-llama/compose/single/mudler-apex-compact/vision.yml` | `apex-35b-vision-ik` | mudler I-Compact + [`unsloth/…35B-A3B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) `mmproj-BF16` |
+| **Deckard-40B** (llama.cpp, dual) | 8199 (+vision 8200) | `llama-cpp-deckard-40b[-vision]` | `models/qwen3.6-40b-deckard/llama-cpp/compose/dual/piehsoft-q6k/{mtp,vision}.yml` | `deckard-40b[-vision]` | [`PiehSoft/…Deckard-MTP-Q6_K`](https://huggingface.co/PiehSoft/Qwen3.6-40B-Deckard-MTP-Q6_K) (+ mradermacher mmproj) |
+| **hauhau-35B** (llama.cpp, dual) | 8073 | `llama-cpp-hauhaucs-35ba3b[-vision]` | `models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/{mtp,vision}.yml` | `hauhau-35b` | [`morikomorizz/…HauhauCS-MTP`](https://huggingface.co/morikomorizz/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP) (+ unsloth mmproj) |
 
 **WSL2 GPU-pinning gotcha:** Docker `device_ids: ["1"]` does NOT isolate GPUs under WSL2 (both stay
 visible to CUDA → `--fit` splits the model across both over the x4 link). Pin via **`CUDA_VISIBLE_DEVICES`
@@ -263,26 +284,38 @@ litellm `model:` is `openai/` + the FULL mount path (note the `//`).
 **GPU-mutex:** exactly ONE GPU model at a time (single- or dual-card). LiteLLM (`:4000`, CPU-only)
 and Hermes stay up always. **Two launch methods:**
 - **Cockpit (c3):** activate the repo-root venv (`source .venv/bin/activate`) → run `c3` → pick the slug in the TUI (start/stop). See [[cockpit-launch-setup]].
-- **CLI:** `bash scripts/switch.sh <slug>` from repo root — GPU-mutex-aware (brings others down, this one up).
-- **Manual (not in registry):** `cd <compose dir> && docker compose -f <file> up -d`.
+- **CLI (registry slugs):** `bash scripts/switch.sh <slug>` from repo root — GPU-mutex-aware (brings others down, this one up).
+- **⭐ `./serve.sh` (project root — for models NOT in the registry/cockpit):** evicts whatever GPU model is
+  running, then boots the target. `./serve.sh <name>` where name is a shortcut (`deckard`, `deckard-vision`,
+  `hauhau`, `hauhau-vision`, `apex`, `apex-vision-ik`, `apex-vision`, `carnice`, `27b-single`) or a compose
+  path. `./serve.sh --list` shows shortcuts, `--status` shows what's on the cards, `--down` just evicts.
+  This is how you launch the vision/deckard/hauhau variants (none are registered).
+- **Manual:** `cd <compose dir> && docker compose -f <file> up -d`.
 
 | # | Config · port | Launch (slug or manual) | Custom vs stock repo | Use case | Status |
 |---|---|---|---|---|---|
-| 1 | **apex-35b-compact** · 8056 | `ik-llama/apex-mtp-compact-long` (cockpit / switch.sh) | repo compose **+ our `CUDA_VISIBLE_DEVICES` env block** (WSL2 GPU-pin fix, [[rig-pcie-x4-bottleneck]]); `.env`: GPU1, NP=1, CTX 196608, MTP off | ⭐ **Daily TEXT driver** — 35B MoE, ~90 TPS, 196K ctx, single card (frees GPU0) | ✅ keep — Hermes default |
+| 1 | **apex-35b-compact** · 8056 | `ik-llama/apex-mtp-compact-long` (or `./serve.sh apex`) | repo compose **+ our `CUDA_VISIBLE_DEVICES` env block** ([[rig-pcie-x4-bottleneck]]); `.env`: GPU1, NP=1, CTX **262144**, MTP off, **thinking-ON+preserve** | ⭐ **Daily TEXT driver** — 35B MoE, ~90 TPS, 262K ctx, single card (frees GPU0), reasoning blocks | ✅ keep — Hermes default |
 | 2 | **qwen3.6-27b** · 8010 | `vllm/dual` | stock repo compose | Dense 27B **+ VISION** + 262K, dual, tools/MTP | ✅ keep — best for **IMAGE analysis** (262K ctx absorbs Hermes' ~40K agent overhead) |
 | 3 | **qwen3.6-35b-a3b** · 8051 | `vllm/qwen-35b-a3b-dual` | stock + `.env` MAX_NUM_SEQS=4 | MoE + vision + 262K dual, real concurrency (subagents) | ⚠️ **overlaps #1** — keep only if you need MoE vision/concurrency; else redundant |
 | 4 | **carnice-v2** · 8070 | `beellama/carnice-v2-dual-q8-mtp` | repo compose **+ our NO_MMAP toggle**; `.env` NO_MMAP=true | Agentic-SFT reasoning brain, Q8 quality, both cards | ✅ keep — the "agent brain" flavor |
 | 5 | **omni-30b** · 8042 | MANUAL: `cd models/qwen3-omni-30b-a3b/vllm-omni/compose/dual/autoround-int4 && docker compose -f omni.yml up -d` | repo compose **+ our tool-choice flags**; `.env` PORT=8042; **NOT registered** | Image/audio/**video** UNDERSTANDING, both cards, 64K ctx | ✅ keep — only multimodal-IN model. Use via a **light UI, NOT Hermes agent** (64K too tight for agent overhead) |
-| 6 | **apex-yarn-1m** · 8057 | `ik-llama/apex-yarn-1m-dual` | **NEW compose we authored** + registry entry | 1M-context experiments (YaRN 4×), both cards | 🧪 experimental, quality UNPROVEN >262K — **candidate to deprecate** unless actively testing 1M |
-| 7 | **litellm** · 4000 | MANUAL: `start-litellm.bat` or `cd services/litellm && docker compose up -d` | **ENTIRELY custom** (not in repo master); config + `custom_hooks.py` (omni max_tokens cap + modalities force) | Unified OpenAI gateway → ONE Hermes provider, all models | ✅ keep — always up, CPU-only, no GPU |
+| 6 | **apex-yarn-1m** · 8057 | `ik-llama/apex-yarn-1m-dual` | **NEW compose we authored** + registry entry | 1M-context experiments (YaRN 4×), both cards | 🧪 experimental, quality UNPROVEN >262K — **candidate to deprecate**; ⚠ **8057 clashes with apex-vision-ik** |
+| 7 | **litellm** · 4000 | MANUAL: `start-litellm.bat` or `cd services/litellm && docker compose up -d` | **ENTIRELY custom** (not in repo master); config + `custom_hooks.py` (omni max_tokens cap + modalities force + agents-a1 thinking) | Unified OpenAI gateway → ONE Hermes provider, all models | ✅ keep — always up, CPU-only, no GPU |
+| 8 | **apex-35b-vision-ik** · 8057 | `./serve.sh apex-vision-ik` | **NEW** ik vision compose (mudler I-Compact + unsloth mmproj-BF16); shares apex `.env` | ⭐ **daily driver + VISION** (screenshots) — ~90 TPS, thinking-ON, 131K, single card. Keeps ik speed | ✅ keep — screenshot driver |
+| 9 | **deckard-40b** · 8199 (**+vision** · 8200) | `./serve.sh deckard` / `deckard-vision` | **NEW** mainline llama.cpp; MTP n=2, thinking-ON+preserve; vision = +mradermacher mmproj (MTP kept) | ⭐ **deliberation / hard reasoning** — uncensored dense 40B, ~41 TPS, 131K. Vision variant = same + images | ✅ keep — the "think hard" model |
+| 10 | **hauhau-35b** · 8073 (**+vision swap**) | `./serve.sh hauhau` / `hauhau-vision` | **NEW** mainline llama.cpp; MTP n=3, thinking-ON, uncensored; vision = +unsloth mmproj | Uncensored 35B-A3B MoE, 262K, both cards. Vision swap adds images | 🧪 keep — uncensored MoE flavor |
+| 11 | **agents-a1** · 8072 | `cd models/agents-a1/… && docker compose up -d` | vLLM fp8 (generated compose) + LiteLLM thinking hook (`AGENTS_A1_THINKING`) | Agentic thinking model, thinking forced ON, both cards | 🧪 eval — weights ~36 GB; niche agentic |
 
 **Redundancy / deprecation:**
 - **The 35B MoE exists 3 ways** — apex-single (#1, daily), 35b-a3b vLLM dual (#3), apex-1M (#6). #1 is the driver;
   #3 only earns its slot for MoE **vision + concurrency**; #6 is an unvalidated 1M experiment. **To trim: park #6**,
   and drop #3 unless you actually use MoE subagents/vision.
-- **Vision options** — #2 (27b, 262K) and #3 (35b-a3b, 262K) do images; #5 (omni) does image+audio+video. For Hermes
-  IMAGE work use **#2** (big ctx). For media understanding use **#5 via a light UI** (see §11).
-- Not run by you but in the registry (ignore unless needed): agents-a1, gemma-4-31b/12b/26b, deckard-40b, diffusiongemma.
+- **Vision options (lots now)** — single-card fast: **#8 apex-vision-ik** (screenshots on the daily driver).
+  Dual: #2 (27b 262K), #3 (35b-a3b 262K), #9 deckard-vision, #10 hauhau-vision. Media (audio/video): #5 omni
+  via a light UI (§11). Quick screenshot → **#8**; big-ctx image analysis → **#2**; uncensored + images → #9/#10.
+- **mmproj + MTP coexist** (llama.cpp b9570 & ik) — vision variants keep their drafter; only apex leaves MTP
+  off (net-negative on that MoE, not a vision limit). See §12 / the compose headers.
+- Not run by you but in the registry (ignore unless needed): gemma-4-31b/12b/26b, diffusiongemma.
 
 ---
 
@@ -303,9 +336,17 @@ instead of "seeing" it. For plain multimodal chat you want a THIN OpenAI-compati
   frames first and attach the frames as images. Omni sees images perfectly (validated); it's the
   *video-file* path that no OpenAI UI wires up.
 - **Open WebUI setup (done 2026-07-09):** launcher `C:\Users\Paul\.local\bin\open-webui-serve.cmd` edited
-  → `--port 8088` (8080 collided) + `OPENAI_API_BASE_URL=http://localhost:4000/v1` +
+  → `--port 8088` (8080 collided) + `OPENAI_API_BASE_URL=http://127.0.0.1:4000/v1` +
   `OPENAI_API_KEY=sk-litellm-master-key`. Open http://localhost:8088, pick omni-30b. Runs on GPU-mutex —
   omni must be the live model.
+- ⚠️ **Windows → WSL-published Docker ports: always `127.0.0.1`, never `localhost`.** Windows resolves
+  `localhost` to `::1` first; under `networkingMode=mirrored` these ports don't serve IPv6, so every call
+  eats a failed `::1` connect first. `curl` hides this (Happy Eyeballs races the families, ~0.2s cost);
+  clients that walk `getaddrinfo` serially do not — this was the cause of the Hermes desktop UI hangs
+  (fixed 2026-07-10 in its `config.yaml`, and here). Note LiteLLM runs on the **native WSL Docker engine**
+  (`default` context, unix socket), *not* Docker Desktop — don't debug this via Docker Desktop.
+  Container-internal routes (`host.docker.internal:<port>` in `services/litellm/config.yaml`) are
+  unaffected; nothing there needs changing.
 - **Open WebUI routes uploads BY FILE TYPE (this is the whole gotcha):**
   - **IMAGE (PNG/JPG)** → sent as VISION → Omni sees it. ✅ Upload the extracted frame, not the clip.
   - **Non-image file (mp4, pdf, …)** → goes to the **document/RAG pipeline**: tries text extraction, a video
@@ -330,3 +371,56 @@ instead of "seeing" it. For plain multimodal chat you want a THIN OpenAI-compati
   omni :8042 up. `python3 describe_videos.py "<folder>" [--frames 3]`. Validated 2026-07-09: read player
   names/stage/timer off the HUD (vs the filename-guess "Fox"). Stage-2 organize (copy into category folders,
   originals untouched) = TODO, build on request.
+
+---
+
+## 12. Thinking / preserve-reasoning capability (per model)
+
+**Two separate things:**
+- **Thinking** (aka reasoning): the model emits a `<think>…</think>` block before answering. Good for hard
+  multi-step logic / debugging / planning; costs latency + output tokens + context. NOT a quality downgrade
+  when OFF and NOT a quality upgrade "for free" when ON — it's a *speed vs deliberation* trade.
+- **Preserve-thinking**: keep prior turns' `<think>` blocks in the multi-turn context (Qwen
+  `preserve_thinking` template kwarg). Only matters when thinking is ON. `true` = better reasoning
+  continuity across turns; `false` = saves context. Independent of whether thinking is on.
+
+| Model (Hermes id) | Engine | Thinking | Preserve | Toggle (env in the compose `.env`) | Default |
+|---|---|---|---|---|---|
+| **apex-35b-compact** · 8056 | ik-llama | ✅ | ✅¹ | `REASONING=off\|on\|auto` + `PRESERVE_THINKING` | thinking **on** / preserve true² |
+| **apex-35b-vision-ik** · 8057 | ik-llama | ✅ | ✅¹ | `REASONING` + `PRESERVE_THINKING` | thinking **on** / preserve true² |
+| **apex-35b-vision** · 8058 | llama.cpp (mainline) | ✅ | ✅ | `REASONING` + `PRESERVE_THINKING` | off / preserve false |
+| **deckard-40b** (+`-vision` :8200) · 8199 | llama.cpp | ✅ | ✅ | `REASONING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
+| **hauhau-35b** (+vision swap) · 8073 | llama.cpp | ✅ | ✅ | `REASONING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
+| **carnice-v2** · 8070 | beellama | ✅ | ✅ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
+| **qwen3.6-27b** · 8010/8021 | vLLM | ✅ | ✅ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **off** / preserve true |
+| **qwen3.6-35b-a3b** · 8051 | vLLM | ✅ | ⚠️ only `enable` wired³ | `ENABLE_THINKING` | thinking off |
+| **agents-a1** · 8072 | vLLM + LiteLLM hook | ✅ | ✅ | `AGENTS_A1_THINKING` in `custom_hooks.py` | **on** (forced by hook) |
+| **omni-30b** · 8042 | vLLM-omni | ❌ not a thinking model | — | — | — |
+| gemma-4-* (not run by you) | varies | some variants ✅ | varies | — | — |
+
+¹ WIRED + VERIFIED 2026-07-10: ik-llama *does* support `--chat-template-kwargs` (checked `--help`), both
+apex templates implement `preserve_thinking` (custom apex template + the GGUF-embedded native), and a
+prior-turn recall test with `REASONING=on PRESERVE_THINKING=true` retained the earlier `<think>` (model
+recalled an injected codeword). Wired into all four apex ik composes (mtp/long/fit-mtp/vision).
+² apex default flipped to thinking-ON + preserve 2026-07-10 (Paul's choice): the thinking on/off A/B was a
+quality wash on apex (8/8 both ways, quick probe), so thinking costs latency + tokens, not correctness.
+Set `REASONING=off` in the apex `.env` to go back to max-snappy.
+³ the 35b-a3b vLLM `--default-chat-template-kwargs` sets `enable_thinking` only, not `preserve_thinking`.
+Trivially addable — ask to wire it.
+
+**The lever is the compose/.env default, NOT the Hermes setting.** Hermes' `agent.reasoning_effort` is
+**dropped by LiteLLM** (`drop_params`, see §9) — it does nothing to these backends. To change thinking, edit
+the model's `.env` (`REASONING` / `ENABLE_THINKING`) and **recreate** the container (§0). To actually SEE the
+`<think>` block in the Hermes UI, also set `display.show_reasoning: true` (it's `false` now → it thinks but
+hides it).
+
+**When to turn thinking ON:** hard debugging, multi-file refactors, tricky algorithms/math, planning a task
+before doing it. **When OFF:** quick chat, simple edits, latency-sensitive/agentic loops, or when context is
+tight (thinking + preserve eat the window). Thinking does *not* "frequently cause weaker code" — on hard
+problems it usually reduces errors; its cost is speed + tokens, not correctness. If you like thinking blocks
+and don't mind slower replies, turning it on for apex is low-risk (the same-family hauhau 8-pack A/B was a
+wash: think-off 103 vs think-on 105 / 150). For an apex-specific number, run `scripts/quality-test.sh --quick`
+with `REASONING=on` vs `off`.
+
+**⚠ Port note (2026-07-10):** apex-35b-vision-ik and the older apex-yarn-1m both default to **:8057** — they
+never run together (GPU-mutex) but if you want both registered distinctly, move one to :8059.
