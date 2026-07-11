@@ -393,7 +393,7 @@ instead of "seeing" it. For plain multimodal chat you want a THIN OpenAI-compati
 | **hauhau-35b** (+vision swap) · 8073 | llama.cpp | ✅ | ✅ | `REASONING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
 | **carnice-v2** · 8070 | beellama | ✅ | ✅ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
 | **qwen3.6-27b** · 8010/8021 | vLLM | ✅ | ✅ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **off** / preserve true |
-| **qwen3.6-35b-a3b** · 8051 | vLLM | ✅ | ⚠️ set-but-DEAD³ | `ENABLE_THINKING` (+ `PRESERVE_THINKING`, dead) | thinking **ON**³ |
+| **qwen3.6-35b-a3b** · 8051 | vLLM | ✅ | ✅³ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **ON** / preserve true³ |
 | **agents-a1** · 8072 | vLLM + LiteLLM hook | ✅ | ✅ | `AGENTS_A1_THINKING` in `custom_hooks.py` | **on** (forced by hook) |
 | **omni-30b** · 8042 | vLLM-omni | ❌ not a thinking model | — | — | — |
 | gemma-4-* (not run by you) | varies | some variants ✅ | varies | — | — |
@@ -407,9 +407,11 @@ quality wash on apex (8/8 both ways, quick probe), so thinking costs latency + t
 Set `REASONING=off` in the apex `.env` to go back to max-snappy.
 ³ 35b-a3b vLLM is thinking-**ON**: its `.env` sets `ENABLE_THINKING=true` (comment: "testing whether
 reasoning improves agentic comprehension vs the 27b") — the compose *fallback* is false, the `.env`
-overrides it. BUT `PRESERVE_THINKING=true` in that `.env` is a **dead no-op**: the compose's
-`--default-chat-template-kwargs` wires only `enable_thinking`, not `preserve_thinking` (same dead-code
-carnice had pre-fix). To make preserve actually work, wire it into fp8.yml — ask.
+overrides it. `PRESERVE_THINKING=true` is now WIRED (2026-07-10): fp8.yml's `--default-chat-template-kwargs`
+carries both keys (`{"enable_thinking": …, "preserve_thinking": …}`, matching the 27b vLLM pattern), and the
+AutoRound weights' embedded `chat_template.jinja` implements `preserve_thinking` on-disk (2 refs, same as
+enable_thinking) — so no froggeric-style template mount is needed here. Was a dead no-op before (same
+dead-code carnice had pre-fix); no longer.
 
 **The lever is the compose/.env default, NOT the Hermes setting.** Hermes' `agent.reasoning_effort` is
 **dropped by LiteLLM** (`drop_params`, see §9) — it does nothing to these backends. To change thinking, edit
