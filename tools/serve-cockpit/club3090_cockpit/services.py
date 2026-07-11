@@ -286,6 +286,15 @@ class CockpitData:
         download_runner: Optional[SubprocessRunner] = None,
     ):
         self.repo_root = Path(repo_root)
+        # Make the repo's `scripts` package importable process-wide: c3 runs from
+        # tools/serve-cockpit/, so the repo root ISN'T on sys.path, yet the emit
+        # paths do `from scripts.lib.profiles.compose_registry import …`.  Without
+        # this the ② Serve route-G/route-C emit dies with "No module named
+        # 'scripts'" (and fit-check's topology detection silently degrades).
+        # 2026-07-09 dogfood — previously only one call site guarded this.
+        import sys as _sys
+        if str(self.repo_root) not in _sys.path:
+            _sys.path.insert(0, str(self.repo_root))
         self.card = card
         # FIX 2 — the registry's top-level ``defaults`` array (curated
         # per-(model,engine,topology) recommendations) from registry-emit --json.
@@ -1056,6 +1065,7 @@ class CockpitData:
         *,
         apply_swap: bool = False,
         emit_only: bool = False,
+        gguf_includes: Optional[list[str]] = None,
         on_line: Optional[Callable[[str], None]] = None,
     ) -> Any:
         """§2b-6 — the lane's weights download: the REAL ``pull.sh`` run
@@ -1080,16 +1090,38 @@ class CockpitData:
 
         if apply_swap or on_line is not None:
             self._download_runner.set_callbacks(on_line=_capture)
-        cmd = ["bash", "scripts/pull.sh", repo, "--profile-like", profile_like]
-        if apply_swap:
-            # The BYO weight-swap ACTION: download the brought weights AND emit a
-            # serve-locally clone of the sibling compose (--model at the weights).
-            cmd.append("--apply-swap")
-        if emit_only:
-            # Weights already on disk — skip the download, JUST emit the serve
-            # compose (do_download=False).  ② Serve uses this so a present-weights
-            # serve needs no [D] step.  Only meaningful alongside --apply-swap.
-            cmd.append("--emit-only")
+        if gguf_includes:
+            # GGUF bring (route-G): pull.sh is the SAFETENSORS evaluate/download
+            # path — it ABORTS `unsupported-format (no config.json)` on a GGUF repo.
+            # So fetch the picked quant's files DIRECTLY into the pull dir with the
+            # same guards as hf-download.sh (classic LFS = resumable; token survives
+            # a non-login shell).  One `--include` per pattern.  (2026-07-09 dogfood.)
+            pull = self.bring_pull_dir(repo)
+            env.setdefault("HF_HUB_DISABLE_XET", "1")
+            env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+            if not env.get("HF_TOKEN"):
+                try:
+                    tok = (Path.home() / ".cache" / "huggingface" / "token").read_text(
+                        encoding="utf-8").strip()
+                    if tok:
+                        env["HF_TOKEN"] = tok
+                except OSError:
+                    pass
+            hf_bin = shutil.which("hf") or str(Path.home() / ".local" / "bin" / "hf")
+            cmd = [hf_bin, "download", repo, "--local-dir", str(pull)]
+            for pat in gguf_includes:
+                cmd += ["--include", pat]
+        else:
+            cmd = ["bash", "scripts/pull.sh", repo, "--profile-like", profile_like]
+            if apply_swap:
+                # The BYO weight-swap ACTION: download the brought weights AND emit a
+                # serve-locally clone of the sibling compose (--model at the weights).
+                cmd.append("--apply-swap")
+            if emit_only:
+                # Weights already on disk — skip the download, JUST emit the serve
+                # compose (do_download=False).  ② Serve uses this so a present-weights
+                # serve needs no [D] step.  Only meaningful alongside --apply-swap.
+                cmd.append("--emit-only")
         return await self._download_runner.start_raw(
             cmd,
             env=env,
@@ -1140,6 +1172,406 @@ class CockpitData:
         if data is None:
             return ByoResult(repo=repo, profile_like=profile_like, error=err or "no output")
         return ByoResult.from_dict(repo, profile_like, data)
+
+    # Topology → card count (same tokens as funnel_slug_options / compose paths).
+    _GGUF_TOPO_CARDS = {
+        "single": 1, "dual": 2, "multi3": 3, "multi4": 4, "multi8": 8,
+    }
+    # Sibling drafter / MTP / DFlash flags to strip for a foreign brought model
+    # (their values point at Qwen/Anbeeld draft paths that won't match the bring).
+    _GGUF_STRIP_SPEC_FLAGS = frozenset({
+        "--spec-type",
+        "--spec-draft-model",
+        "--spec-draft-n-max",
+        "--spec-draft-ngl",
+        "--spec-dflash-cross-ctx",
+        "--spec-dflash-n-max",
+    })
+
+    def topology_cards_for_profile(self, profile_like: str) -> int:
+        """Card count for a registry slug from its compose path topology segment."""
+        path = ""
+        try:
+            from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+            entry = COMPOSE_REGISTRY.get(profile_like) or {}
+            path = str(entry.get("compose_path") or "")
+        except Exception:
+            path = ""
+        for part in path.replace("\\", "/").split("/"):
+            if part in self._GGUF_TOPO_CARDS:
+                return self._GGUF_TOPO_CARDS[part]
+        # Fallback: token in the profile-like string itself.
+        for tok, n in self._GGUF_TOPO_CARDS.items():
+            if tok in (profile_like or "").replace("\\", "/").split("/"):
+                return n
+        return 1
+
+    def byo_check_gguf(
+        self,
+        repo: str,
+        profile_like: str,
+        *,
+        quant: str,
+        size_gb: float,
+        card_vram_gb: Optional[float] = None,
+        companion_gb: float = 0.0,
+        per_card_gb: float = 24.0,
+    ) -> ByoResult:
+        """Phase 4 route-G: GGUF fit without the vLLM/safetensors deriver.
+
+        Weights = selected ``.gguf`` size (+ optional companion_gb for mmproj /
+        mtp draft).  Budget = ``card_vram_gb`` if given, else
+        ``per_card_gb × topology_cards(profile_like)`` so dual/multi siblings
+        are judged against combined VRAM (not always one 24 GB card).
+        """
+        if not quant:
+            return ByoResult(
+                repo=repo, profile_like=profile_like,
+                error="pick a GGUF quant first",
+            )
+        cards = self.topology_cards_for_profile(profile_like)
+        budget = float(card_vram_gb) if card_vram_gb is not None else (
+            float(per_card_gb) * max(1, cards)
+        )
+        topo = next(
+            (t for t, n in self._GGUF_TOPO_CARDS.items() if n == cards),
+            f"{cards}×card",
+        )
+        # Conservative: weights + companions + 2 GiB KV/runtime headroom.
+        need = float(size_gb or 0) + float(companion_gb or 0) + 2.0
+        size_bit = f"{size_gb:.1f} GiB" if size_gb > 0 else "size unknown"
+        comp_bit = f" + {companion_gb:.1f} GiB companions" if companion_gb > 0 else ""
+        budget_bit = f"{budget:.0f} GiB ({topo})"
+        if size_gb <= 0:
+            verdict = "fits-constrained"
+            note = f"GGUF {quant} · {size_bit}{comp_bit} — assume constrained on {budget_bit}"
+        elif need <= budget * 0.85:
+            verdict = "fits-clean"
+            note = (
+                f"GGUF {quant} · {size_bit}{comp_bit} + ~2 GiB headroom ≤ {budget_bit}"
+            )
+        elif need <= budget:
+            verdict = "fits-constrained"
+            note = f"GGUF {quant} · {size_bit}{comp_bit} tight on {budget_bit}"
+        else:
+            verdict = "wont-fit"
+            note = (
+                f"GGUF {quant} · {size_bit}{comp_bit} + overhead exceeds {budget_bit}"
+            )
+        eligible = verdict != "wont-fit"
+        return ByoResult(
+            repo=repo,
+            profile_like=profile_like,
+            arch="gguf",
+            eligible=eligible,
+            fit_verdict=verdict,
+            note=note,
+            # Route G = GGUF serve-locally via a GGUF-engine sibling compose.
+            route="G" if eligible else None,
+            sibling_slug=profile_like if eligible else None,
+            quant_match=quant,
+            drop_spec_config=False,
+            error="",
+        )
+
+    @staticmethod
+    def _normalize_compose_command(raw) -> list:
+        """Ship GGUF siblings use ``command: >-`` (folded scalar → str).  List-
+        form is only for tests.  Never ``list(str)`` (one arg per character)."""
+        import shlex
+
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return shlex.split(raw)
+        if isinstance(raw, (list, tuple)):
+            return [str(x) for x in raw]
+        return shlex.split(str(raw))
+
+    @staticmethod
+    def _gguf_nextn_predict_layers(path: str) -> int:
+        """The GGUF ``<arch>.nextn_predict_layers`` value = the model's EMBEDDED MTP
+        (self-speculation) layer count; 0 when absent.  Minimal stdlib GGUF-metadata
+        parser — the ``gguf`` package isn't in the c3 venv.  Early-returns on the key
+        (it sits with the arch hyper-params, before the big tokenizer arrays)."""
+        import struct
+        _S = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+        try:
+            with open(path, "rb") as f:
+                if f.read(4) != b"GGUF":
+                    return 0
+                (ver,) = struct.unpack("<I", f.read(4))
+                if ver < 2:
+                    return 0
+                f.read(8)                                    # tensor_count
+                (kvc,) = struct.unpack("<Q", f.read(8))      # metadata_kv_count
+
+                def _skip(vt: int) -> None:
+                    if vt in _S:
+                        f.seek(_S[vt], 1)
+                    elif vt == 8:                            # string
+                        (n,) = struct.unpack("<Q", f.read(8)); f.seek(n, 1)
+                    elif vt == 9:                            # array
+                        (et,) = struct.unpack("<I", f.read(4))
+                        (cnt,) = struct.unpack("<Q", f.read(8))
+                        if et in _S:
+                            f.seek(_S[et] * cnt, 1)
+                        elif et == 8:
+                            for _ in range(cnt):
+                                (m,) = struct.unpack("<Q", f.read(8)); f.seek(m, 1)
+                        else:
+                            raise ValueError(f"nested array type {et}")
+                    else:
+                        raise ValueError(f"value type {vt}")
+
+                for _ in range(kvc):
+                    (kl,) = struct.unpack("<Q", f.read(8))
+                    key = f.read(kl)
+                    (vt,) = struct.unpack("<I", f.read(4))
+                    if key.endswith(b".nextn_predict_layers"):
+                        if vt in (0, 2, 4, 10):              # uint 8/16/32/64
+                            return int.from_bytes(f.read(_S[vt]), "little")
+                        if vt in (1, 3, 5, 11):              # int 8/16/32/64
+                            return int.from_bytes(f.read(_S[vt]), "little", signed=True)
+                        return 1                             # present, odd type
+                    _skip(vt)
+        except Exception:
+            return 0
+        return 0
+
+    def gguf_has_embedded_mtp(self, path: str) -> bool:
+        """True iff the GGUF carries an EMBEDDED MTP head (``nextn_predict_layers``
+        ≥ 1) — activated by ``--spec-type draft-mtp`` with NO separate draft model,
+        distinct from an EXTERNAL ``mtp-*.gguf`` drafter (which uses
+        ``--spec-draft-model`` too)."""
+        return self._gguf_nextn_predict_layers(path) >= 1
+
+    def _rewrite_gguf_command(
+        self,
+        cmd: list,
+        *,
+        model_mount: str,
+        mmproj_mount: str = "",
+        mtp_draft_mount: str = "",
+        embedded_mtp: bool = False,
+    ) -> list:
+        """Rewrite sibling argv for a brought GGUF:
+
+        * ``--model`` / ``-m`` → brought weights mount
+        * ``--mmproj`` rewritten (not only append-if-missing) when projector set
+        * strip sibling ``--spec-*`` drafter flags (wrong vocab / missing paths)
+        * if brought ``mtp-*.gguf`` present, wire as ``--spec-draft-model`` +
+          ``--spec-type draft-mtp``
+        """
+        out: list = []
+        i = 0
+        n = len(cmd)
+        while i < n:
+            tok = str(cmd[i])
+            # Strip ALL sibling --spec-* drafter / MTP / DFlash flags (+ value).
+            if tok.startswith("--spec-"):
+                if "=" in tok:
+                    i += 1
+                    continue
+                i += 1
+                if i < n and not str(cmd[i]).startswith("-"):
+                    i += 1
+                continue
+            # --model= / -m= form
+            if tok.startswith("--model=") or tok.startswith("-m="):
+                out.append(f"--model={model_mount}")
+                i += 1
+                continue
+            if tok in ("--model", "-m") and i + 1 < n:
+                # Keep -m if sibling used it; otherwise --model.
+                out += [tok, model_mount]
+                i += 2
+                continue
+            # --mmproj: rewrite value when we have a brought projector; drop sibling
+            # projector when we don't (foreign vision projector would be wrong).
+            if tok.startswith("--mmproj="):
+                if mmproj_mount:
+                    out.append(f"--mmproj={mmproj_mount}")
+                i += 1
+                continue
+            if tok == "--mmproj":
+                if mmproj_mount:
+                    out += ["--mmproj", mmproj_mount]
+                # skip sibling value either way
+                i += 1
+                if i < n and not str(cmd[i]).startswith("-"):
+                    i += 1
+                continue
+            out.append(cmd[i])
+            i += 1
+        # Ensure --model present.
+        has_model = any(
+            str(x) in ("--model", "-m") or str(x).startswith("--model=")
+            or str(x).startswith("-m=")
+            for x in out
+        )
+        if not has_model:
+            out += ["--model", model_mount]
+        # mmproj: if sibling had none and we have a projector, append.
+        if mmproj_mount and not any(
+            str(x) == "--mmproj" or str(x).startswith("--mmproj=") for x in out
+        ):
+            out += ["--mmproj", mmproj_mount]
+        # Spec-decode, after stripping the sibling's own drafter flags:
+        #   • EXTERNAL drafter (a brought mtp-*.gguf, e.g. migtissera Tess) →
+        #     --spec-draft-model + --spec-type draft-mtp
+        #   • else EMBEDDED MTP head (nextn baked into the main gguf, e.g. bartowski
+        #     / unsloth builds) → --spec-type draft-mtp WITH NO draft model
+        # External wins if somehow both are present (the preferred path on this rig).
+        if mtp_draft_mount:
+            out += [
+                "--spec-draft-model", mtp_draft_mount,
+                "--spec-type", "draft-mtp",
+            ]
+        elif embedded_mtp:
+            out += ["--spec-type", "draft-mtp"]   # activate the embedded nextn head
+        return out
+
+    def emit_gguf_compose(
+        self,
+        profile_like: str,
+        weights_host_file: str,
+        *,
+        served_name: str = "",
+        mmproj_host_file: str = "",
+        mtp_draft_host_file: str = "",
+        embedded_mtp: bool = False,
+    ) -> dict:
+        """Clone a GGUF-engine sibling compose with --model → the downloaded .gguf.
+
+        Handles ``command: >-`` (str) via shlex; strips sibling drafter flags;
+        rewrites ``--mmproj`` when a projector is provided.  Returns
+        ``{compose_path, compose_yaml, error}``.
+        """
+        import yaml
+        from pathlib import Path as _P
+
+        try:
+            from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+        except Exception as exc:
+            return {"compose_path": "", "compose_yaml": "", "error": f"registry: {exc}"}
+        entry = COMPOSE_REGISTRY.get(profile_like)
+        if entry is None:
+            return {
+                "compose_path": "", "compose_yaml": "",
+                "error": f"unknown profile-like {profile_like!r}",
+            }
+        compose_rel = entry.get("compose_path") or ""
+        compose_file = self.repo_root / compose_rel
+        if not compose_file.is_file():
+            return {
+                "compose_path": "", "compose_yaml": "",
+                "error": f"sibling compose missing: {compose_rel}",
+            }
+        try:
+            doc = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"compose_path": "", "compose_yaml": "", "error": f"yaml: {exc}"}
+        services = (doc or {}).get("services") or {}
+        if not services:
+            return {"compose_path": "", "compose_yaml": "", "error": "no services"}
+        _svc_name, svc = next(iter(services.items()))
+        cmd = self._normalize_compose_command(svc.get("command"))
+        # Brought GGUFs live UNDER MODEL_DIR (the pull dir), and the sibling
+        # already mounts MODEL_DIR → /models (its `-m /models/<rel>`).  So address
+        # each file at /models/<realpath-relative-to-MODEL_DIR> and mount MODEL_DIR
+        # ONCE — never per-file INTO /models: that races the sibling's own /models
+        # mount and dies at boot with "read-only file system" (OCI can't create the
+        # /models/brought-* mountpoints inside an already-mounted /models — the
+        # 2026-07-09 live-boot ExitCode 128).  ``realpath`` also follows the pull-dir
+        # symlink into the curated store.
+        model_dir = os.path.realpath(self.weights_model_dir())
+        extra_vols: list[str] = []
+
+        def _container_path(host_file: str, tag: str) -> str:
+            rp = os.path.realpath(host_file)
+            rel = os.path.relpath(rp, model_dir)
+            if not rel.startswith(".."):
+                return "/models/" + rel            # covered by the MODEL_DIR mount
+            cp = f"/brought/{tag}-{_P(rp).name}"    # outside MODEL_DIR → its own mount
+            extra_vols.append(f"{rp}:{cp}:ro")
+            return cp
+
+        mount = _container_path(weights_host_file, "model")
+        mmproj_mount = (
+            _container_path(mmproj_host_file, "mmproj") if mmproj_host_file else ""
+        )
+        mtp_mount = (
+            _container_path(mtp_draft_host_file, "mtp") if mtp_draft_host_file else ""
+        )
+        svc["command"] = self._rewrite_gguf_command(
+            cmd,
+            model_mount=mount,
+            mmproj_mount=mmproj_mount,
+            mtp_draft_mount=mtp_mount,
+            embedded_mtp=embedded_mtp,
+        )
+
+        def _abs_vol(v: str) -> str:
+            """Relocatable volume.  The /models mount source may be
+            ``${MODEL_DIR:-../relative}`` — whose ``:-`` defeats a naive ``split(':')``
+            — so key off the ``:/models`` TARGET and replace everything before it with
+            the absolute MODEL_DIR (drops the relative fallback so the compose works
+            from any dir).  Other simple relative bind srcs → absolute vs the sibling
+            dir; ``${..}`` / absolute / named-volume srcs pass through."""
+            i = v.find(":/models")
+            if i != -1 and v[i + 8:i + 9] in ("", ":"):   # ':/models' or ':/models:mode'
+                return f"{model_dir}{v[i:]}"
+            if "${" not in v:
+                parts = v.split(":")
+                if len(parts) >= 2 and parts[0].startswith(("./", "../")):
+                    abs_src = os.path.abspath(
+                        os.path.join(compose_file.parent, parts[0])
+                    )
+                    return f"{abs_src}:{':'.join(parts[1:])}"
+            return v
+
+        vols = [_abs_vol(v) for v in (svc.get("volumes") or [])] + extra_vols
+        # The /models/<rel> command paths depend on MODEL_DIR being mounted at
+        # /models.  Real llama.cpp/ik siblings ship that mount; guarantee it in case
+        # one doesn't (never leave the model path dangling).
+        if not any(":/models:" in v or v.endswith(":/models") for v in vols):
+            vols.insert(0, f"{model_dir}:/models:ro")
+        svc["volumes"] = vols
+        san = (served_name or _P(weights_host_file).stem)[:40]
+        san = "".join(c if c.isalnum() or c in "-_" else "-" for c in san)
+        svc["container_name"] = f"llama-brought-{san or 'gguf'}"
+        # Write to a RUNTIME dir on the model disk — NOT the project tree (a
+        # throwaway BYO serve shouldn't drop files beside catalog composes;
+        # 2026-07-09 dogfood).  The compose is now self-contained (absolute /models
+        # mount + /models/<rel> command paths), so its location is free.
+        run_dir = _P(model_dir) / ".cache" / "huggingface" / "club3090" / "composes"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            run_dir = compose_file.parent          # fallback: beside the sibling
+        out_path = run_dir / f"_brought-gguf-{san or 'x'}.yml"
+        header = (
+            "# GENERATED GGUF serve-locally compose (route-G) — clone of\n"
+            f"#   {compose_rel}\n"
+            f"# with --model → {weights_host_file}\n"
+        )
+        if mmproj_host_file:
+            header += f"#      --mmproj → {mmproj_host_file}\n"
+        if mtp_draft_host_file:
+            header += f"#      --spec-draft-model → {mtp_draft_host_file}\n"
+        yaml_text = header + yaml.safe_dump(
+            doc, default_flow_style=False, sort_keys=False
+        )
+        try:
+            out_path.write_text(yaml_text, encoding="utf-8")
+        except OSError as exc:
+            return {"compose_path": "", "compose_yaml": "", "error": str(exc)}
+        return {
+            "compose_path": str(out_path),
+            "compose_yaml": yaml_text,
+            "error": "",
+        }
 
     # ── READ: containers ────────────────────────────────────────────────────────────
 

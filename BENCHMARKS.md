@@ -195,6 +195,24 @@ Not TPS, but load-bearing. Every shipped variant is validated against:
 
 The single-card vLLM Cliff 2b status is canonicalized in [#41](https://github.com/noonghunna/club-3090/issues/41) — fix is gated on upstream [Sandermage genesis-vllm-patches#19](https://github.com/Sandermage/genesis-vllm-patches/issues/19). See [docs/CLIFFS.md](docs/CLIFFS.md) for the byte-level explanation.
 
+### Concurrency sweep — dense 27B vs 35B-A3B MoE aggregate throughput (`concurrency-probe.sh`)
+
+First first-party aggregate matrix (2026-07-10, @noonghunna 2× 3090 PCIe, vLLM v0.24.0, `SWEEP` mode — fresh boot per N, 5 rounds, steady-state last round). **Aggregate = summed completion tokens / wall**; per-stream = median decode tok/s. All arms clean (0 errors, 0 silent-empty, 0 VRAM growth, retention ≥99%).
+
+**Agent shape (16K-token prompt / 256 gen):**
+
+| N | 27B `dual-fast` (MTP n=3) per-stream | ×N decode-agg | 35B-A3B `dual` (MTP off) per-stream | ×N decode-agg |
+|--:|--:|--:|--:|--:|
+| 1 | 87.3 | 87 | — | — |
+| 2 | 51.8 | **104** ⭐ | 133.0 | 266 |
+| 4 | 22.1 | 88 | 68.0 | **272** ⭐ |
+| 8 | 6.8 | 54 ⚠ | 32.6 | 261 |
+| 16 | — | — | 15.4 | 246 |
+
+**Generation shape (512-token prompt / 800 gen):** 27B @ N=8 → **211 tok/s aggregate** (58.4/stream) · 35B-A3B @ N=16 → **1,037 tok/s aggregate** (92.8/stream, retention 99.4%).
+
+Takeaways: (1) the **dense 27B's batching knee is N=2** at agent contexts — decode-aggregate *halves* by N=8 (MTP-under-batching + chunked-prefill interleave; per-stream falls faster than N grows); (2) the **A3B MoE holds ~250–270 decode-agg flat to N=16** (3B active params + tiny hybrid-attention KV) — the multi-agent serving pick; (3) at 16K contexts *end-to-end generated* tok/s is prefill-bound (~20 for 27B, ~93–121 for MoE, nearly flat in N) — batching at deep context buys utilization, not generated tokens; the >1K aggregate lives at generation-heavy shapes. See FAQ "How do I serve multiple coding agents concurrently".
+
 ### Cross-engine — Luce DFlash (lucebox-hub) on Qwen3.5-27B
 
 Not directly comparable to vLLM rows above (different engine, different bench script, different model — Qwen3.5-27B not 3.6 because the 3.6 DFlash draft is still under training as of 2026-05-04). Bench harness: `lucebox-hub/dflash/scripts/bench_he.py`, HumanEval 10 prompts, n_gen=128.
@@ -274,6 +292,18 @@ Dense 40B uncensored community merge of Qwen3.6 (DavidAU Opus-Deckard). Q6_K GGU
 | Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `mtp.yml` (MTP n=2) | @noonghunna (2× 3090, PCIe) | q8_0/q8_0 | 131072 | 36 / 46 (MTP on) | — | ~16.4+17.8 GB @16K | 2026-06-09 | ✅ Production. MTP n=2 sweet spot (41.60 tok/s aggregate, 0.81 accept). MTP off: 22.7 narr (+59%/+104% with MTP). 128K ceiling @q8_0 KV (192K OOMs). 8-pack (think-off): **105/150** — MTP-off == MTP-on (spec-dec lossless); det 62/75 (toolcall 15·instructfollow 14·structoutput 13·dataextract 10·reasonmath 10) + sandbox 43/75 (bugfind 13·hermesagent 15/20·cli-40 15/40). **verify-full 8/8**, **verify-stress 8/8**, **soak-continuous PASS** (0 MiB growth, 0/25 silent-empty, 25 turns). ≈ Qwen3.6-27B band. Arch confirmed `qwen35-dense` from GGUF header. |
+
+---
+
+## Tess-4-27B
+
+Migtissera's Qwen3.5-based dense 27B instruct/agentic fine-tune (`migtissera/Tess-4-27B-GGUF`). Q4_K_M GGUF with a **separate (external) MTP draft head** — the catalog's first external-MTP compose (engaged via `--spec-draft-model … --spec-type draft-mtp`, vs Deckard's *embedded* head). Arch is `qwen35-dense` (standard GQA, 64 layers) per the GGUF header. Vision-capable base (F16 mmproj on disk) but shipped **text-only**. llama.cpp mainline, pin `server-cuda-b9246`.
+
+### Dual-card (2× RTX 3090) — llama.cpp
+
+| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `mtp.yml` (ext MTP n=2) | @noonghunna (2× 3090, PCIe) | q4_0/q4_0 | 262144 | 52 / 68 | ~1325 (short) / ~1017 (90K) | 12.6+17.2 GB | 2026-07-09 | ⚠️ Production w/ caveats. External MTP (separate `mtp-*.gguf` draft). **n=2 = n-sweep sweet spot** (2026-07-09: server-side decode 57.9 tok/s / 0.62 accept peak; falls to 34.9 / 0.27 @ n=6). decode CV 2.4%, TTFT 233 ms. **verify-stress 8/8** (NIAH ladder clean to 240,634 tok = 91% of 262K, ~5.9 GB free at deepest fill). **soak-continuous PASS** (0 err, 0/100 silent-empty, p50 66.4, 96.3% retention). 8-pack (benchlocal `--full`): **115/150 think-off · 118/150 think-on** — ties/edges qwen3.6-27b **dual-max (109)** and LEADS agentic (hermesagent **15/20 vs 9** · cli-40 **25/40 vs 20**); per-pack OFF: toolcall 14·instructfollow 13·structoutput 14·dataextract 12·reasonmath 11·bugfind 11. **vs dual-max:** ~½ the throughput (52 vs ~114 TPS) for a quality tie/edge + vision base + smaller footprint (12.6+17.2 vs ~22 GB/card). ⚠️ Caveat: streaming tool-calls + thinking-ON → `finish=length` (use thinking-off for tool/agent). Arch confirmed `qwen35-dense` from GGUF header. |
 
 ---
 

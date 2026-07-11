@@ -5034,7 +5034,9 @@ class TestLaneHelpSurfaceThreadedR3b1:
             assert isinstance(app.screen, HelpScreen)
             text = app.screen.help_text
             assert "Bring & Validate" in text
-            assert "Promote" in text
+            # Phase-1 honesty: Promote is labelled "Promotion Preview" while
+            # the catalog write is mock-only; Evaluate carries a preview badge.
+            assert "Promotion Preview" in text or "Promote" in text
             assert "Evaluate" in text
             # The full-surface mode line carries the real rendered mode-2 lane token.
             assert "2[/cyan]  Bring & Validate" in text
@@ -10426,7 +10428,8 @@ class TestProducerLaneHandoff:
             body = str(app.query_one("#lane-serve-pane", LaneServePane).query_one(
                 "#lane-serve-body", Static
             ).render())
-            assert "armed from ① Bring" in body
+            # Phase-1 route-aware card: "Serving <brought> · 👤 untested" (+ recipe).
+            assert "Serving" in body or "armed from ① Bring" in body
             assert "vllm/dual" in body                       # resolved catalog target
             assert "unsloth/Qwen3-27B-abliterated" in body   # the brought repo
 
@@ -10541,7 +10544,7 @@ class TestProducerLaneHandoff:
             app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
             await _settle(pilot)
             pane = app.query_one("#lane-serve-pane", LaneServePane)
-            ov = pane.query_one("#lane-serve-overrides")
+            ov = pane.query_one("#lane-serve-ov-wrap")
             assert not ov.has_class("funnel-hidden")            # revealed for Route-C
             assert pane.query_one("#ov-served-name", _I).value  # pre-filled served-name
             assert pane.query_one("#ov-kv", _S).value == "fp8_e5m2"
@@ -10564,7 +10567,7 @@ class TestProducerLaneHandoff:
             await pilot.press("2")
             await _settle(pilot)
             pane = app.query_one("#lane-serve-pane", LaneServePane)
-            assert pane.query_one("#lane-serve-overrides").has_class("funnel-hidden")
+            assert pane.query_one("#lane-serve-ov-wrap").has_class("funnel-hidden")
             assert pane.collect_overrides() == {}
 
     @pytest.mark.asyncio
@@ -10634,9 +10637,16 @@ class TestProducerLaneHandoff:
             body = str(app.query_one("#lane-serve-pane", LaneServePane).query_one(
                 "#lane-serve-body", Static
             ).render())
-            assert "your brought weights" in body
-            assert "to serve" in body                          # a clear action, no dead end
-            assert "NOT your brought model" not in body        # stale contradiction is gone
+            # Route-C honesty: applied to your weights / recipe — never "NOT your".
+            assert (
+                "your weights" in body
+                or "applied to your weights" in body
+                or "your brought weights" in body
+            )
+            # Phase 2: primary Serve is a visible button row (not only body prose).
+            pane = app.query_one("#lane-serve-pane", LaneServePane)
+            assert not pane.query_one("#lane-serve-actions").has_class("funnel-hidden")
+            assert "NOT your brought model" not in body
 
     @pytest.mark.asyncio
     async def test_serve_tab_rearms_from_cached_byo(self):
@@ -10654,7 +10664,7 @@ class TestProducerLaneHandoff:
             body = str(app.query_one("#lane-serve-pane", LaneServePane).query_one(
                 "#lane-serve-body", Static
             ).render())
-            assert "armed from ① Bring" in body
+            assert "Serving" in body or "armed from ① Bring" in body
             assert "vllm/dual" in body
 
     @pytest.mark.asyncio
@@ -10672,13 +10682,14 @@ class TestProducerLaneHandoff:
             body = str(app.query_one("#lane-serve-pane", LaneServePane).query_one(
                 "#lane-serve-body", Static
             ).render())
-            assert "armed from ① Bring" in body  # armed by the valid Bring
+            assert "Serving" in body or "armed from ① Bring" in body  # armed by valid Bring
             # Re-Bring with a typo'd / unknown profile → early-return error path.
             app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/typo-gone")
             await _settle(pilot)
             body = str(app.query_one("#lane-serve-pane", LaneServePane).query_one(
                 "#lane-serve-body", Static
             ).render())
+            assert "Serving  " not in body or "Run ① Bring first" in body
             assert "armed from ① Bring" not in body   # stale arm cleared
             assert "Run ① Bring first" in body        # placeholder restored
 
