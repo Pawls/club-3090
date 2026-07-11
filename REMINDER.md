@@ -393,7 +393,7 @@ instead of "seeing" it. For plain multimodal chat you want a THIN OpenAI-compati
 | **hauhau-35b** (+vision swap) · 8073 | llama.cpp | ✅ | ✅ | `REASONING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
 | **carnice-v2** · 8070 | beellama | ✅ | ✅ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **on** / preserve true |
 | **qwen3.6-27b** · 8010/8021 | vLLM | ✅ | ✅ | `ENABLE_THINKING` + `PRESERVE_THINKING` | thinking **off** / preserve true |
-| **qwen3.6-35b-a3b** · 8051 | vLLM | ✅ | ⚠️ only `enable` wired³ | `ENABLE_THINKING` | thinking off |
+| **qwen3.6-35b-a3b** · 8051 | vLLM | ✅ | ⚠️ set-but-DEAD³ | `ENABLE_THINKING` (+ `PRESERVE_THINKING`, dead) | thinking **ON**³ |
 | **agents-a1** · 8072 | vLLM + LiteLLM hook | ✅ | ✅ | `AGENTS_A1_THINKING` in `custom_hooks.py` | **on** (forced by hook) |
 | **omni-30b** · 8042 | vLLM-omni | ❌ not a thinking model | — | — | — |
 | gemma-4-* (not run by you) | varies | some variants ✅ | varies | — | — |
@@ -405,8 +405,11 @@ recalled an injected codeword). Wired into all four apex ik composes (mtp/long/f
 ² apex default flipped to thinking-ON + preserve 2026-07-10 (Paul's choice): the thinking on/off A/B was a
 quality wash on apex (8/8 both ways, quick probe), so thinking costs latency + tokens, not correctness.
 Set `REASONING=off` in the apex `.env` to go back to max-snappy.
-³ the 35b-a3b vLLM `--default-chat-template-kwargs` sets `enable_thinking` only, not `preserve_thinking`.
-Trivially addable — ask to wire it.
+³ 35b-a3b vLLM is thinking-**ON**: its `.env` sets `ENABLE_THINKING=true` (comment: "testing whether
+reasoning improves agentic comprehension vs the 27b") — the compose *fallback* is false, the `.env`
+overrides it. BUT `PRESERVE_THINKING=true` in that `.env` is a **dead no-op**: the compose's
+`--default-chat-template-kwargs` wires only `enable_thinking`, not `preserve_thinking` (same dead-code
+carnice had pre-fix). To make preserve actually work, wire it into fp8.yml — ask.
 
 **The lever is the compose/.env default, NOT the Hermes setting.** Hermes' `agent.reasoning_effort` is
 **dropped by LiteLLM** (`drop_params`, see §9) — it does nothing to these backends. To change thinking, edit
