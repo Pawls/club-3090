@@ -56,6 +56,11 @@ services:
       - "${ESTATE_PORT:-${APEX_VISION_PORT:-8057}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # WSL2: Docker device_ids does NOT isolate GPUs (both stay visible to CUDA →
+    # --fit would split across both over the x4 link). Pin via CUDA_VISIBLE_DEVICES
+    # inside the container. =1 → GPU1 only, freeing GPU0 for the desktop. Matches long.yml.
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
     command: >-
       --host 0.0.0.0
       --port 8080

@@ -35,9 +35,15 @@ declare -A SHORTCUTS=(
   [deckard-vision]="models/qwen3.6-40b-deckard/llama-cpp/compose/dual/piehsoft-q6k/vision.yml"
   [hauhau]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/mtp.yml"
   [hauhau-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/vision.yml"
-  [apex]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/mtp.yml"
+  # apex daily driver = long.yml (:8056, GPU1-pinned, 262K, q8_0 KV) — the SAME compose
+  # the cockpit's `ik-llama/apex-mtp-compact-long` slug and Hermes (:8056) use. (mtp.yml
+  # is the :8054 eval/bring-up lane and has NO WSL2 GPU-pin — do not use it as the driver.)
+  [apex]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/long.yml"
+  # apex-vision defaults to the PREFERRED ik-llama variant (keeps ik's MoE speed).
+  [apex-vision]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/vision.yml"
   [apex-vision-ik]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/vision.yml"
-  [apex-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/single/mudler-apex-compact/vision.yml"
+  # mainline llama.cpp apex-vision — kept "just in case"; slower (no ik MoE kernels).
+  [apex-vision-mainline]="models/qwen3.6-35b-a3b/llama-cpp/compose/single/mudler-apex-compact/vision.yml"
   [carnice]="models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml"
   [27b-single]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/fp8-mtp.yml"
 )
