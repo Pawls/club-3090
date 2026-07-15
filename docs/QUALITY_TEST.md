@@ -154,6 +154,106 @@ Quality: line for compose schema field (paste into compose YAML header):
 Quality:   ToolCall-15 14/15 (93%) · InstructFollow-15 13/15 (87%) · StructOutput-15 15/15 (100%) · DataExtract-15 12/15 (80%) · ReasonMath-15 11/15 (73%) (--medium, packs v1.0.x, 2026-05-09)
 ```
 
+## Scenario-level probes (selection, incremental, resume)
+
+Since benchlocal-cli [#84](https://github.com/noonghunna/benchlocal-cli/pull/84)/[#85](https://github.com/noonghunna/benchlocal-cli/pull/85) the wrapper passes through scenario-granular runs:
+
+```bash
+# one or more specific scenarios (pack-qualified, repeatable)
+bash scripts/quality-test.sh --scenario cli-40/CLI-31 --scenario reasonmath-15/RM-04 --no-thinking
+
+# a curated probe set from a file (newline PACK_ID/SCENARIO_ID, # comments),
+# BOTH reasoning modes — same pairing as a full eval:
+bash scripts/quality-test.sh --scenarios-file scripts/scenario-sets/tess4-model-floor.txt --no-thinking
+# ⚠ ON leg: boot the compose with reasoning parsing on FIRST (REASONING=on for
+#   llama.cpp composes, --reasoning-parser for vLLM) so <think> lands in
+#   reasoning_content, not the graded answer — then:
+bash scripts/quality-test.sh --scenarios-file scripts/scenario-sets/tess4-model-floor.txt \
+    --enable-thinking --repeat 3
+
+# journal each scored scenario (fsynced sidecar) so an interrupt is resumable
+bash scripts/quality-test.sh --full --no-thinking --incremental
+
+# resume an interrupted (or inspect-then-continue) run — restores the original
+# pack-set/selection/thinking/sampling/timeout config; only missing arms run
+bash scripts/quality-test.sh --resume results/quality/quality-<ts>.json.partial.jsonl
+```
+
+**Probe discipline (the tool enforces most of this):**
+
+- A selection result is **PARTIAL** — the JSON carries top-level `selection` + per-pack `catalog_scenario_count`, human output says `PARTIAL SELECTION`, and history ingestion / `rescore` refuse it without `--allow-partial`. **It is never a `/150` claim** — full 8-pack both modes remains the bar for BENCHMARKS rows, `Quality:` lines, and promotions.
+- Thinking-ON probes sample at temp 1.0 by pack contract → single ON probes are draws; pass `--repeat 3` (cheap at scenario granularity) when a number gates a decision.
+- `--resume` is mutually exclusive with mode/pack/selection/thinking/sampling/timeout flags — it restores those from the saved run; the wrapper refuses the combination rather than fork the config.
+
+**Curated probe sets** live in `scripts/scenario-sets/` with provenance headers:
+
+| file | what | when to run |
+|---|---|---|
+| `tess4-model-floor.txt` | 14 fails-everywhere (+2 thinking-only) across 2 rigs / 2 drafters / 2 engine builds — the Tess retrain-target list (#665 intersection) | before/after a Tess fine-tune or retrained drafter head; quantifying a "did the model move" claim. **Measured (Tess dual, b9967, 2026-07-12): OFF ~3.5 min · ON ~11 min single draw** (ON ×3 ≈ 30 min — still ⅓ of one full 8-pack leg) |
+| `tess4-engine-window.txt` | CLI-25/31/32 — the b9932→b9967 engine-window flips | first probe on any new engine build/pin arm, before paying for a full 8-pack. **Measured: ~40 s OFF** |
+
+**`scripts/rerun-failed-packs.sh`** now re-runs a prior run's failures as ONE selection run (was: whole-pack loops) — 6 failures over 5 packs = 6 scenarios, with `--incremental` durability and a REPRODUCED/FIXED verdict per original failure. `RERUN_DRY=1` previews the plan.
+
+## Which probe for which question — cheap comparison before a full eval
+
+A full 8-pack (both modes) is ~1–2 h and the bar for any *published* number. But most day-to-day questions — "is this quant better?", "did the retrain move?", "did the engine bump help?" — don't need it. They need the *right* cheap probe, because **the discriminating scenarios depend on what you're comparing**, and a targeted probe runs in minutes.
+
+The principle that makes this work: **same-family checkpoints tie on the deterministic packs and diverge only on specific fragile ones.** So you don't re-measure what won't move — you probe where the difference lives, and only "earn" the full eval when the probe moves.
+
+| You're asking… | Probe | "Better" means | Why it discriminates |
+|---|---|---|---|
+| Is this a better **quant / recipe** of the *same* model? | **cli-40** (`--pack cli-40`, ~15 min) | higher cli-40 (precision preserved) | Quant differences concentrate in agentic behavior; deterministic packs (TC/IF/SO/DE/RM) tie across recipes, so cli-40 is where 4-bit-vs-8-bit-vs-GGUF actually separates. Proven 2026-07-12 (recipe arms below). |
+| Did a **retrain / new fine-tune** of *this model line* crack its known-hard scenarios? | the model's **floor set** (e.g. `scenario-sets/tess4-model-floor.txt`, ~15 min) | more floor scenarios pass (capability added) | The floor is the model's hardest scenarios; quant can't move them (it preserves/degrades, doesn't add capability) — only real *training* does. |
+| Did an **engine build / pin bump** help? | the **engine-window set** (e.g. `tess4-engine-window.txt`, ~40 s) | the flip scenarios pass | Isolates the handful of scenarios a build version is known to move; the rest are engine-invariant. |
+| Is a **new / different** model worth a full eval at all? | `--medium` (5 deterministic packs, ~15–25 min) | overall lift | A different model has its *own* floor — the Tess floor won't gauge a Qwen. A broad slice is the right first screen. |
+| Are last run's failures **real or flaky**? | `scripts/rerun-failed-packs.sh <result.json>` | REPRODUCED vs FIXED | Re-runs only the failed scenarios as one selection. |
+
+**The gate rule (this is the whole method):** a probe is a **cheap positive trigger**, not a verdict. Probe *moves* → run the full 8-pack for the real number. Probe *doesn't* move → you've saved ~2.5 h, *and that's the call for quant/engine comparison* (they either move the fragile pack or they don't). It is the exact rule the recipe arms used: cli-40-OFF ≥ 21 earned a full run; huginnfork's 18 didn't, FP8's 22 did.
+
+**Two rules to not over-apply it:**
+- **The floor is model-line-specific and a *one-way* trigger.** A retrain that lifts the *mid-tier* churny scenarios (the ones that pass 1-in-4) can leave the floor flat — so a flat floor is ambiguous, not a "skip." Floor-moved is a strong yes; floor-flat means fall back to `--medium` or the full run, don't conclude "no gain."
+- **OFF is the clean discriminator; ON is churny.** Gate on the greedy OFF leg (deterministic, reproducible). ON legs sample at temp 1.0 — a single ON probe is a draw; use `--repeat 3` if an ON number is load-bearing.
+
+**Free pre-screen where you have it: KLD.** If the checkpoints ship KL-divergence self-reports (many quant exports do), they predict the quant ranking at *zero* GPU cost — 2026-07-12 the reports (fp8 0.013 < NVFP4A16 0.042 < NVFP4-W4A4) called the cli-40 order exactly. Sort by KLD, then cli-40-probe only the top candidate.
+
+**Worked example (2026-07-12 recipe arms).** Comparing four Tess checkpoints (migtissera NVFP4 / huginnfork NVFP4A16 / FP8 / GGUF) the naive way = four full 8-packs ≈ 10 h. Instead: KLD pre-screened the order, a cli-40 probe (~15 min each) ranked all four and gated the full runs, and only the two that cleared the gate got a full 8-pack. Total ≈ 2 h, same conclusion (precision is the lever, FP8 111/117 ties the GGUF-ON) — see `learnings/tess-4-27b.md` 2026-07-12 and [#662](https://github.com/noonghunna/club-3090/discussions/662).
+
+## pass@1 vs pass@N — the churn-harvest ceiling (and why we don't report it)
+
+Every `/150` total in this repo is **pass@1 at pack-contract sampling**: think-OFF legs are greedy (deterministic), think-ON legs are a *single draw* at temp 1.0 / top-p 0.95 / top-k 20. That contract is what makes totals comparable across rigs, engines, and dates.
+
+**The observation** (from the #665 cross-rig work, 2026-07-12): at temp 1.0, many "failing" scenarios aren't failures — they're **churners** with a per-draw pass probability. Measured examples on Tess-4-27B: scenarios that read as hard-0 on any single run pass 1-in-7 to ~2-in-5 across repeated draws (`tess4-model-floor.txt` Tier 2 documents six of them with evidence). Take the union of passes across enough draws and the effective ceiling rises sharply: a 7-draw window on a single 4090 reached ~139/150-equivalent coverage, and across every stack we've measured only **10 scenarios sit at p≈0** (Tier 1). The gap between a model's pass@1 total (~116–118) and its churn-harvest ceiling (~139) is ~20 points of *probability*, not capability.
+
+**Two consequences, deliberately kept apart:**
+
+### 1. As a serving technique, harvesting is legitimate — and now cheap to size
+
+If the **caller owns a verifier** — tests pass, JSON validates against a schema, an archive hash matches, a migration applies cleanly — then verifier-guided best-of-N (rejection sampling) converts probability gaps into successes at predictable cost:
+
+| per-draw p | N for ≥90% | N for ≥99% |
+|---:|---:|---:|
+| 0.15 | 15 | 29 |
+| 0.30 | 7 | 13 |
+| 0.40 | 5 | 10 |
+
+(`P = 1 − (1−p)^N`; cost ≈ N× tokens plus the verifier, and draws parallelize — see the concurrency numbers in FAQ.) Agent harnesses already do a degenerate version of this via retry-on-error; doing it *deliberately*, with the validator run before accepting, is strictly better. Measuring a scenario's p is now a minutes-scale task: `--scenarios-file <set> --repeat N` returns per-scenario pass rates directly.
+
+**When it applies:** only where verification is cheaper than generation and mechanical (schema/tests/hashes). It does nothing for open-ended prose, and nothing for Tier-1 capability gaps — no N rescues p≈0.
+
+**What it is not (yet):** a stack feature. It's a client-side pattern; if it graduates, it would be a retry-with-validator wrapper in front of the endpoint, never an engine or compose change. Structured-output constrained decoding remains the first choice where the check is expressible as a grammar — best-of-N is the fallback for checks that only a verifier can run.
+
+### 2. As a benchmark number, harvesting is laundering — and the tooling refuses it
+
+pass@N and pass@1 are different metrics, and mixing them inflates a model's number with the *verifier's* work. This is why the guardrails are shaped the way they are:
+
+- Selection results are labeled `PARTIAL SELECTION` and refuse history/`rescore` ingestion without `--allow-partial`.
+- `--repeat N` aggregates at ≥50% per scenario — a *majority* vote, not a best-of harvest.
+- Canonical sampling is pinned per pack; overrides mark the run non-canonical.
+
+**Reporting rules:** BENCHMARKS `/150` columns are pass@1-at-contract, always. If you publish a harvested number, label it `pass@k` with k and the verifier stated (e.g. "pass@7, pack verifiers as oracle") — and never in the same column as pass@1 totals. Scenario-level claims ("X now passes") follow the same discipline: a churner observed once is `1/N draws`, not "passes".
+
+*Credit: the ceiling observation and the "probability lifted vs capability trained in" framing come from @seanyourhighness's 7-draw b9967 window in #665.*
+
 ## Diagnosing failures
 
 Failure reasons are surfaced in three places, cheapest first:

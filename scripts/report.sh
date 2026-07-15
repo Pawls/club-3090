@@ -150,6 +150,30 @@ section "System"
   echo "- **OS:** $os_name"
   echo "- **Kernel:** $(uname -r)"
 
+  # Motherboard / BIOS — from sysfs DMI (readable WITHOUT root; serials/UUIDs
+  # are root-only in sysfs so they are never exposed here). #690.
+  _dmi() {
+    local v; v="$(cat "/sys/class/dmi/id/$1" 2>/dev/null)"
+    v="${v//$'\n'/ }"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    # drop common OEM placeholder junk so it degrades to "(not exposed)"
+    case "$v" in
+      "To Be Filled By O.E.M."|"To be filled by O.E.M."|"Default string"|      "System manufacturer"|"System Product Name"|"System Version"|      "Not Applicable"|"None"|"N/A"|"Unknown"|"0.0.0"|"") v="" ;;
+    esac
+    printf '%s' "$v"
+  }
+  _mb_vendor="$(_dmi board_vendor)"; _mb_name="$(_dmi board_name)"
+  _mb_product="$(_dmi product_name)"; _mb_bios="$(_dmi bios_version)"; _mb_biosdate="$(_dmi bios_date)"
+  _mb="$_mb_vendor${_mb_vendor:+${_mb_name:+ }}$_mb_name"
+  if [[ -n "$_mb" ]]; then
+    [[ -n "$_mb_product" && "$_mb_product" != "$_mb" ]] && _mb="$_mb  (system: $_mb_product)"
+    echo "- **Motherboard:** $_mb"
+  elif [[ -n "$_mb_product" ]]; then
+    echo "- **Motherboard:** (board DMI not exposed; system: $_mb_product)"
+  else
+    echo "- **Motherboard:** (not exposed)"
+  fi
+  [[ -n "$_mb_bios" ]] && echo "- **BIOS:** ${_mb_bios}${_mb_biosdate:+ ($_mb_biosdate)}"
+
   # Environment detection
   env_kind="bare metal"
   if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
@@ -801,6 +825,17 @@ else
     _p2p_verdict_line="$(p2p_verdict "$(p2p_gpu_count)" "$(p2p_host_capability)" \
       "$(printf '%s\n%s' "$nvlink_boot" "$p2p_env" | p2p_classify_engagement)")"
     [[ -n "$_p2p_verdict_line" ]] && { echo; echo "**Interconnect verdict:** ${_p2p_verdict_line}"; }
+    # Kernel-module flavor — the WHY behind a P2P result on GeForce cards. A
+    # proprietary (closed) module refuses P2P; the open modules can grant it, with
+    # `topo -p2p rw` above the functional proof. Only meaningful multi-GPU.
+    # We report open-vs-proprietary (detectable); we do NOT claim to fingerprint
+    # the aikitoria patch — it's metadata-identical to stock nvidia-open.
+    if [[ "$(p2p_gpu_count)" -ge 2 ]]; then
+      case "$(p2p_driver_flavor)" in
+        proprietary) echo; echo "**NVIDIA kernel module:** proprietary (closed) — refuses P2P on GeForce; the open kernel modules (\`nvidia-open\`, or a patched fork) are what enable it. A \`CNS\` in \`topo -p2p rw\` above is this. See docs/PCIE_P2P.md." ;;
+        open)        echo; echo "**NVIDIA kernel module:** open (\`Dual MIT/GPL\`) — P2P-capable on GeForce; whether it's granted is the \`topo -p2p rw\` result above (\`OK\` = engaged, \`CNS\` = board/layout still refusing). Metadata can't tell stock \`nvidia-open\` from a patched fork — the topo result is the proof." ;;
+      esac
+    fi
     echo
 
     genesis_results=$(docker logs "$CONTAINER" 2>&1 | grep -E '\[INFO:genesis\.apply_all\] (Genesis|✅) Results' | tail -1)
