@@ -38,6 +38,11 @@
 #                                 compose's ctx var (VISION_CTX_SIZE / CTX_SIZE / MAX_MODEL_LEN).
 #                                 e.g. ./serve.sh apex-vision-ik --ctx 262144
 #
+# GPU pin (which card the model loads on — beats the compose's CUDA_VISIBLE_DEVICES .env):
+#   --gpu <N>                     pin to GPU N (e.g. --gpu 1 = GPU1 only, leaving GPU0 for the
+#                                 desktop / ComfyUI). Accepts a list (--gpu 0,1) for dual-card
+#                                 composes. e.g. ./serve.sh apex --gpu 1
+#
 # Env:
 #   MODEL_DIR    passed through to the compose (default /home/pawl/models on this rig)
 #   NO_LITELLM=1 skip the LiteLLM-proxy readiness step on serve
@@ -256,9 +261,15 @@ list_models() {
   echo
   echo "⬇ = ./serve.sh --pull <name> downloads it (hf CLI); any compose path also works as a target."
   echo
-  echo "{think:X preserve:Y} = current default (no VRAM cost; override at launch, no .env edit):"
+  echo "Launch-time flags (override the compose default; no .env edit — shell env wins):"
   echo "  --think / --no-think        reasoning on/off   (vLLM enable_thinking · llama.cpp --reasoning)"
   echo "  --preserve / --no-preserve  keep vs strip prior-turn <think> from context (preserve_thinking)"
+  echo "    ^ {think:X preserve:Y} above = each model's current default; neither costs VRAM."
+  echo "  --ctx <N>                   context window for this boot (auto-targets the compose's"
+  echo "                              VISION_CTX_SIZE/CTX_SIZE/MAX_MODEL_LEN). Boot-time KV alloc —"
+  echo "                              too big can OOM at load, e.g. ./serve.sh apex-vision-ik --ctx 262144"
+  echo "  --gpu <N>                   pin the model to a card (--gpu 1 = GPU1 only, freeing GPU0 for"
+  echo "                              the desktop/ComfyUI; --gpu 0,1 for dual-card composes)."
   echo "  A/B through Hermes:  ./serve.sh 27b --think   then   ./serve.sh 27b --no-think"
   echo "  ·fixed = hardcoded in the compose (agents-a1, 27b-minimal)   n/a = not a thinking model."
 }
@@ -334,7 +345,7 @@ status() {
 }
 
 # --- Extract thinking/preserve toggles (order-independent; leave the rest) -----
-THINK_FLAG="" PRESERVE_FLAG="" CTX_FLAG="" _pos=()
+THINK_FLAG="" PRESERVE_FLAG="" CTX_FLAG="" GPU_FLAG="" _pos=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --think)       THINK_FLAG=on ;;
@@ -343,6 +354,8 @@ while [[ $# -gt 0 ]]; do
     --no-preserve) PRESERVE_FLAG=strip ;;
     --ctx)         shift; CTX_FLAG="${1:-}" ;;
     --ctx=*)       CTX_FLAG="${1#--ctx=}" ;;
+    --gpu)         shift; GPU_FLAG="${1:-}" ;;
+    --gpu=*)       GPU_FLAG="${1#--gpu=}" ;;
     *)             _pos+=("$1") ;;
   esac
   shift
@@ -350,10 +363,13 @@ done
 if [[ -n "$CTX_FLAG" && ! "$CTX_FLAG" =~ ^[0-9]+$ ]]; then
   echo "ERROR: --ctx needs an integer token count (e.g. --ctx 262144)." >&2; exit 1
 fi
+if [[ -n "$GPU_FLAG" && ! "$GPU_FLAG" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+  echo "ERROR: --gpu needs a GPU index or comma-list (e.g. --gpu 1  or  --gpu 0,1)." >&2; exit 1
+fi
 set -- "${_pos[@]+"${_pos[@]}"}"
 
 case "${1:-}" in
-  ""|--help|-h) sed -n '2,43p' "$0"; exit 0 ;;
+  ""|--help|-h) sed -n '2,48p' "$0"; exit 0 ;;
   --list) list_models; exit 0 ;;
   --status) status; exit 0 ;;
   --down) echo "Evicting current GPU model:"; evict; echo "done."; exit 0 ;;
@@ -425,6 +441,14 @@ if [[ -n "$CTX_FLAG" ]]; then
   fi
   export "$ctx_var=$CTX_FLAG"
   echo "Override: $ctx_var=$CTX_FLAG (context window — boot-time KV alloc; if load OOMs, retry lower)"
+fi
+# --gpu: pin the model to a card. Every compose interpolates ${CUDA_VISIBLE_DEVICES:-…} into
+# BOTH its `environment:` and `deploy.device_ids`, and an exported shell var beats the
+# compose-dir .env — so this one export is all it takes. (On WSL2 the environment CVD is the
+# real isolator; device_ids alone doesn't hide the other card. See vision.yml note.)
+if [[ -n "$GPU_FLAG" ]]; then
+  export CUDA_VISIBLE_DEVICES="$GPU_FLAG"
+  echo "Override: CUDA_VISIBLE_DEVICES=$GPU_FLAG (GPU pin)"
 fi
 
 echo "Target: $compose"
