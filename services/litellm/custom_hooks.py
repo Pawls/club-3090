@@ -15,12 +15,88 @@ OFF mode. We inject enable_thinking/preserve_thinking here — request-level kwa
 server default. (Caveat: the hermes-20 pack REGRESSES with thinking ON, 12→9 — right for
 CLI/agentic, mixed for hermes-style. Flip AGENTS_A1_THINKING below if that bites.)
 
-Only these two models are touched; the big-context text models keep their full output budget.
+(C) Qwen3.6 preserve_thinking replay fix (2026-07-13): the Qwen3.6 vLLM composes wire
+`preserve_thinking` correctly (server default + reasoning-parser + template), BUT vLLM v0.24.0
+SILENTLY DROPS the top-level `reasoning_content`/`reasoning` field on incoming assistant
+messages (vllm#38488). Proven on :8051 /tokenize: replaying prior reasoning as a FIELD → gone
+from the rendered prompt (+4 tok empty <think> scaffold); replaying it INLINE as <think>…</think>
+in `content` → preserved (+63 tok, recalled). So the ONLY replay form that survives is inline.
+This hook re-inlines any assistant reasoning field back into content as <think>…</think> before
+forwarding, so whatever the harness echoes (Hermes' reasoning_content, or a raw field) actually
+reaches the template's fallback extractor and preserve_thinking keeps it. We do NOT touch the
+enable/preserve chat_template_kwargs here — the co-located .env server default already carries
+them, and forcing them risks flipping 27b's intended thinking-OFF. See memory
+preserve-thinking-vllm-field-drop + NousResearch/hermes-agent#56004 (Hermes must also STOP
+stripping reasoning on replay — the primary, harness-side half of this fix).
+
+Only these models are touched; the big-context text models keep their full output budget.
 """
+import os
+import sys
 from litellm.integrations.custom_logger import CustomLogger
 
 OMNI_MAX_TOKENS = 8192
+
+# Set CLUB3090_REASONING_DEBUG=1 in the litellm container env to log, per matched request,
+# what reasoning shape the harness actually replayed (field vs inline vs none). This is the
+# probe for hermes-agent#56004 — it tells us whether the harness is stripping reasoning
+# before it ever reaches us. One compact line to stdout (docker logs litellm).
+_REASON_DEBUG = os.environ.get("CLUB3090_REASONING_DEBUG", "") not in ("", "0", "false")
+
+
+def _debug_reasoning_shape(model, messages):
+    if not _REASON_DEBUG or not isinstance(messages, list):
+        return
+    field = inline = plain = 0
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        if (m.get("reasoning_content") or m.get("reasoning")):
+            field += 1
+        elif isinstance(m.get("content"), str) and "<think>" in m["content"]:
+            inline += 1
+        else:
+            plain += 1
+    print(f"[club3090/reasoning] model={model} assistant_turns: "
+          f"field={field} inline={inline} plain={plain}", file=sys.stdout, flush=True)
 AGENTS_A1_THINKING = True   # set False to let Agents-A1 use its compose default (thinking off)
+
+# Qwen3.6 vLLM endpoints whose embedded chat_template implements preserve_thinking by
+# reading reasoning inline-from-content (the field is dropped by vLLM). Substring match
+# against the litellm model_name (e.g. "qwen3.6-35b-a3b-autoround", "qwen3.6-27b").
+QWEN_PRESERVE_MODELS = ("qwen3.6-27b", "qwen3.6-35b-a3b")
+
+
+def _reinline_reasoning(messages):
+    """Move any assistant `reasoning_content`/`reasoning` field into content as an inline
+    <think>…</think> block, then drop the field (vLLM discards it anyway). Idempotent:
+    skips messages whose content already contains a <think> block."""
+    if not isinstance(messages, list):
+        return
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        rc = m.get("reasoning_content") or m.get("reasoning")
+        # Always strip the (about-to-be-dropped) field so it can't linger ambiguously.
+        m.pop("reasoning_content", None)
+        m.pop("reasoning", None)
+        if not isinstance(rc, str) or not rc.strip():
+            continue
+        block = "<think>\n" + rc.strip() + "\n</think>\n\n"
+        content = m.get("content")
+        if content is None or content == "":
+            m["content"] = block.rstrip()
+        elif isinstance(content, str):
+            if "<think>" not in content:      # don't double-wrap an already-inline turn
+                m["content"] = block + content
+        elif isinstance(content, list):
+            # Multimodal assistant content: prepend a text part unless one already has <think>.
+            has_think = any(
+                isinstance(p, dict) and "<think>" in str(p.get("text", "")) for p in content
+            )
+            if not has_think:
+                m["content"] = [{"type": "text", "text": block}] + content
+        # any other content type: leave untouched (defensive)
 
 
 class MaxTokensCap(CustomLogger):
@@ -40,6 +116,10 @@ class MaxTokensCap(CustomLogger):
             ck.setdefault("enable_thinking", True)
             ck.setdefault("preserve_thinking", True)
             data["chat_template_kwargs"] = ck
+        if any(tag in model for tag in QWEN_PRESERVE_MODELS):
+            # (C) Re-inline replayed reasoning so vLLM's field-drop doesn't defeat preserve_thinking.
+            _debug_reasoning_shape(model, data.get("messages"))   # probe: what did the harness send?
+            _reinline_reasoning(data.get("messages"))
         return data
 
 
