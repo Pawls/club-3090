@@ -6,11 +6,16 @@
 #   Topology:  Single 3090 (GPU1 headless)
 #   Drafter:   none (MTP off — net-negative on this a3b MoE per the ik .env A/B;
 #              NOT a vision limit — ik runs --mmproj + --spec-type mtp together)
-#   KV:        q4_0 K + q4_0 V (per-head -khad/-vhad)
+#   KV:        q8_0 K + q5_0 V asymmetric (per-head -khad/-vhad) — community
+#              sweet spot: K is quant-sensitive so kept at q8; V compressed to q5
+#              for headroom. ~near-lossless vs symmetric q8, ~0.5 GB cheaper.
+#              Override via KV_TYPE_K / KV_TYPE_V in the co-located .env.
 #   Vision:    YES — mmproj-BF16 (~862 MB) + --image-{min,max}-tokens
 #   Template:  GGUF-embedded (--jinja) — native, so image markers are handled
-#   Max ctx:   131072 default (vision + image-encode buffer share the 24 GB with
-#              KV; the ik 27b vision sibling caps ~160K on one card — start lower)
+#   Max ctx:   262144 (full native) via VISION_CTX_SIZE in the .env. VERIFIED 2026-07-18
+#              on GPU1 (dedicated): 20.8 GB used / ~3.7 GB free at 262K + vision + asym
+#              q8/q5 KV after dropping --spec-type (see command below). Vision confirmed
+#              (image described correctly, finish=stop). GPU0 untouched — clean isolation.
 #   Genesis:   N/A
 #   Status:    🧪 Experimental
 #   Caveats:
@@ -22,10 +27,10 @@
 #     - -b 1024 is MANDATORY for vision on this ik build: the image-encode compute
 #       buffer scales hard with -b (-b 4096 → ~4 GB, OOMs at boot with a projector;
 #       -b 1024 → ~1 GB). -ub is cosmetic here (engine forces n_ubatch=n_batch).
-#     - VISION UNVERIFIED on apex until first boot (engine capability is proven on
-#       the 27b; apex is a different — MoE — model). Confirm: mmproj/clip loads,
-#       an image is described, per-card VRAM has margin. If tight, lower CTX further
-#       or IMAGE_MAX_TOKENS.
+#     - VISION VERIFIED 2026-07-18: mmproj/clip loads (qwen3vl_merger projector), an
+#       image was described correctly at 262K, finish=stop, ~3.7 GB VRAM margin on GPU1.
+#       Still 🧪 pending the full gate (verify-full 8/8 / stress / soak / quality-test).
+#       If a future change makes it tight: drop V to q4_0 or lower IMAGE_MAX_TOKENS.
 #     - Shares the co-located .env (MODEL_DIR, CUDA_VISIBLE_DEVICES=1, MTP off).
 #       Distinct identity via own vars so the .env's PORT=8056 / CTX_SIZE=262144
 #       (tuned for the text mtp.yml) don't collide:
@@ -61,6 +66,12 @@ services:
     # inside the container. =1 → GPU1 only, freeing GPU0 for the desktop. Matches long.yml.
     environment:
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
+    # NOTE: no --spec-type below (unlike the text long.yml/fit-mtp.yml). MTP is net-negative
+    # on this MoE so it's off anyway, but passing --spec-type mtp:n_max=0 STILL allocates a
+    # draft context (~224 MiB KV + ~1 GB compute). Dropping it reclaims ~2.3 GB — measured
+    # 2026-07-18: GPU1 23.1 GB → 20.8 GB at full 262K + vision + asym q8/q5 KV (~3.7 GB free
+    # vs ~1.1 GB). The APEX-MTP GGUF loads fine without it (MTP head tensors go unused).
+    # (Comments must stay OUT of the `command: >-` folded block — # is literal inside it.)
     command: >-
       --host 0.0.0.0
       --port 8080
@@ -76,11 +87,10 @@ services:
       -b ${BATCH_SIZE:-1024}
       -ub ${UBATCH_SIZE:-1024}
       -np ${NP:-1}
-      -ctk ${KV_TYPE:-q4_0}
-      -ctv ${KV_TYPE:-q4_0}
+      -ctk ${KV_TYPE_K:-q8_0}
+      -ctv ${KV_TYPE_V:-q5_0}
       -khad
       -vhad
-      --spec-type mtp:n_max=${MTP_DRAFT_N_MAX:-0},p_min=${DRAFT_P_MIN:-0.0}
       --recurrent-ckpt-mode auto
       --merge-qkv
       -fa on
