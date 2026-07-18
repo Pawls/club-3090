@@ -67,6 +67,13 @@ VARIANT_KEYS = {
     # c3 catalog Weights/KV columns (#600): registry kv_format + the model
     # profile's weights format / explicit quant_label joins.
     "kv_format", "weights_format", "weights_quant_label",
+    # c3 catalog act column (#723): registry act_format facet — "16bit"
+    # default / "int8" / "fp8" (the A in W4A16/W4A8/W8A8).
+    "act_format",
+    # template-regime facet (2026-07-18): froggeric | gemma-canonical | native
+    "chat_template",
+    # c3 serve-confirm W4A8 checkbox capability (#609).
+    "act8_capable",
 }
 v0 = d["variants"][0]
 need(set(v0.keys()) == VARIANT_KEYS,

@@ -21,6 +21,7 @@ fi
 # the same invocation switch.sh uses (project dir = compose-file dir).
 DUAL_27B_DIR="$CLUB3090_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4"
 GEMMA_DUAL_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/autoround-int4"
+GEMMA_31B_DUAL_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/qat-awq-int4"   # current dual default (vllm/gemma-31b-dual); autoround-int4/int8.yml deprecated 07-02
 # Gemma 4 12B (gemma4_unified arch) — AutoRound INT8 weights + bf16 KV, single-card vLLM on
 # the EPHEMERAL vllm/vllm-openai:gemma4-unified arch-preview image (:8038, served gemma-4-12b-int8).
 GEMMA_12B_DIR="$CLUB3090_DIR/models/gemma-4-12b/vllm/compose/single/autoround-int8"
@@ -57,7 +58,7 @@ LANIP="${LANIP:-localhost}"
 # Standard supporting services living under $CLUB3090_DIR/services.
 # Ollama removed 2026-06-22 (dropped from serving 2026-05-10 — Qwen/Gemma route
 # through LiteLLM directly; the unused services/ollama/ compose dir was deleted).
-SERVICES=(openwebui litellm qdrant searxng)
+SERVICES=(openwebui litellm qdrant searxng spark-dashboard)
 
 # Run a docker compose command in any directory, with optional -f override.
 # Args: <dir> <action> [compose_file]
@@ -81,6 +82,15 @@ compose_at() {
         (cd "$dir" && sudo docker compose "${env_args[@]}" -f "$file" $action)
     fi
 }
+
+# #715 gap 4 — start-failure tracking. start_* helpers used to swallow a failed
+# `compose up` ('… || echo "failed"' returns 0), so every mode printed "failed"
+# per-service yet exited 0 and the caller declared the scene ready (#686). Each
+# start site now RECORDS its failure; the dispatch tail prints a summary and
+# exits 1 when any service failed. Failures don't abort mid-scene (a partial
+# scene beats an aborted one) — they just can't masquerade as success anymore.
+FAILED_SERVICES=()
+c3_mark_start_failure() { FAILED_SERVICES+=("$1"); }
 
 # Like compose_at, but injects per-invocation env assignments that survive `sudo`.
 # `sudo docker compose` sanitizes the caller's environment, so vars set in the shell
@@ -106,7 +116,7 @@ compose_cmd() {
 
 start_service() {
     printf "  ${GREEN}▲${NC} Starting %-12s" "$1..."
-    compose_cmd "$1" "up -d" && echo "done" || echo "failed"
+    compose_cmd "$1" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "$1"; }
 }
 
 stop_service() {
@@ -117,7 +127,7 @@ stop_service() {
 # Project-specific helpers
 start_27b_dual_mtp() {
     printf "  ${GREEN}▲${NC} Starting 27b-dual-mtp..."
-    compose_at "$DUAL_27B_DIR" "up -d" fp8-mtp.yml && echo "done" || echo "failed"
+    compose_at "$DUAL_27B_DIR" "up -d" fp8-mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "27b-dual-mtp"; }
 }
 stop_27b_dual_mtp() {
     printf "  ${RED}▼${NC} Stopping 27b-dual-mtp..."
@@ -126,7 +136,7 @@ stop_27b_dual_mtp() {
 
 start_27b_dual_dflash() {
     printf "  ${GREEN}▲${NC} Starting 27b-dual-dflash..."
-    compose_at "$DUAL_27B_DIR" "up -d" dflash.yml && echo "done" || echo "failed"
+    compose_at "$DUAL_27B_DIR" "up -d" dflash.yml && echo "done" || { echo "failed"; c3_mark_start_failure "27b-dual-dflash"; }
 }
 stop_27b_dual_dflash() {
     printf "  ${RED}▼${NC} Stopping 27b-dual-dflash..."
@@ -135,7 +145,7 @@ stop_27b_dual_dflash() {
 
 start_27b_dual_dflash_noviz() {
     printf "  ${GREEN}▲${NC} Starting 27b-dflash-noviz..."
-    compose_at "$DUAL_27B_DIR" "up -d" dflash-noviz.yml && echo "done" || echo "failed"
+    compose_at "$DUAL_27B_DIR" "up -d" dflash-noviz.yml && echo "done" || { echo "failed"; c3_mark_start_failure "27b-dual-dflash-noviz"; }
 }
 stop_27b_dual_dflash_noviz() {
     printf "  ${RED}▼${NC} Stopping 27b-dflash-noviz..."
@@ -144,7 +154,7 @@ stop_27b_dual_dflash_noviz() {
 
 start_27b_dual_turbo() {
     printf "  ${GREEN}▲${NC} Starting 27b-dual-turbo..."
-    compose_at "$DUAL_27B_DIR" "up -d" turbo.yml && echo "done" || echo "failed"
+    compose_at "$DUAL_27B_DIR" "up -d" turbo.yml && echo "done" || { echo "failed"; c3_mark_start_failure "27b-dual-turbo"; }
 }
 stop_27b_dual_turbo() {
     printf "  ${RED}▼${NC} Stopping 27b-dual-turbo..."
@@ -163,7 +173,7 @@ stop_all_27b() {
 # vllm/qwen-35b-a3b-dual (AutoRound INT4 + fp8 KV + 262K + vision, :8051).
 start_35b_a3b_dual() {
     printf "  ${GREEN}▲${NC} Starting 35b-a3b-dual..."
-    compose_at "$A3B_DUAL_DIR" "up -d" fp8.yml && echo "done" || echo "failed"
+    compose_at "$A3B_DUAL_DIR" "up -d" fp8.yml && echo "done" || { echo "failed"; c3_mark_start_failure "35b-a3b-dual"; }
 }
 stop_35b_a3b_dual() {
     printf "  ${RED}▼${NC} Stopping 35b-a3b-dual..."
@@ -173,7 +183,7 @@ stop_35b_a3b_dual() {
 # Gemma 4 12B single-card vLLM (gemma4_unified arch-preview image, AutoRound INT8 + MTP n=2).
 start_gemma_12b() {
     printf "  ${GREEN}▲${NC} Starting gemma-12b..."
-    compose_at "$GEMMA_12B_DIR" "up -d" mtp.yml && echo "done" || echo "failed"
+    compose_at "$GEMMA_12B_DIR" "up -d" mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "gemma-12b"; }
 }
 stop_gemma_12b() {
     printf "  ${RED}▼${NC} Stopping gemma-12b..."
@@ -187,7 +197,12 @@ start_comfyui() {
     # Pin COMFYUI_ROOT into repo-root .env so the compose's `--env-file` mounts the SAME tree the
     # downloads went into (not the /mnt default) on any rig whose MODEL_DIR isn't /mnt — #510/#530.
     type c3_persist_comfy_root >/dev/null 2>&1 && c3_persist_comfy_root || true
-    compose_at "$COMPOSE_BASE/comfyui" "up -d" && echo "done" || echo "failed"
+    # Pre-create the bind-mount sources USER-OWNED before sudo docker can root-own
+    # them (#715 gap 1); a damaged (root-owned) tree fails loud with the chown fix.
+    if type c3_precreate_comfy_mounts >/dev/null 2>&1 && ! c3_precreate_comfy_mounts; then
+        echo "failed"; c3_mark_start_failure "comfyui"; return 0
+    fi
+    compose_at "$COMPOSE_BASE/comfyui" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "comfyui"; }
 }
 stop_comfyui() {
     printf "  ${RED}▼${NC} Stopping comfyui..."
@@ -198,7 +213,7 @@ stop_comfyui() {
 # "director" LLM (:8090, GPU0). See services/studio/ + docs/ai-studio/video.md.
 start_studio_gallery() {
     printf "  ${GREEN}▲${NC} Starting studio-gallery (:8189)..."
-    compose_at "$COMPOSE_BASE/studio/gallery" "up -d" && echo "done" || echo "failed"
+    compose_at "$COMPOSE_BASE/studio/gallery" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "studio-gallery"; }
 }
 # Director placement lever — STUDIO_DIRECTOR_DEVICE (gpu0|gpu1|cpu) from the rig .env, set by
 # c3's Settings "Director placement" field (default gpu0). gpu0 = ~4.6 GB on GPU0 (fast craft,
@@ -230,7 +245,7 @@ start_studio_director() {
     printf "  ${GREEN}▲${NC} Starting studio-director ($label)..."
     compose_at_env "$COMPOSE_BASE/studio/enhancer" "up -d" docker-compose.yml \
         "DIRECTOR_NGL=$ngl" "STUDIO_DIRECTOR_CUDA=$cvd" "STUDIO_DIRECTOR_GPU=$gpu" "DIRECTOR_THINK_ARGS=$think_args" \
-        && echo "done" || echo "failed"
+        && echo "done" || { echo "failed"; c3_mark_start_failure "studio-director"; }
 }
 stop_studio_director() {
     printf "  ${RED}▼${NC} Stopping studio-director..."
@@ -264,20 +279,20 @@ wait_gpu_vram_settle() {
 }
 start_studio_orchestrator() {
     printf "  ${GREEN}▲${NC} Starting studio-orchestrator (:8190, long-clip chaining)..."
-    compose_at "$COMPOSE_BASE/studio/orchestrator" "up -d --build" && echo "done" || echo "failed"
+    compose_at "$COMPOSE_BASE/studio/orchestrator" "up -d --build" && echo "done" || { echo "failed"; c3_mark_start_failure "studio-orchestrator"; }
 }
 # Native-button image shim (:8191): ComfyUI reverse-proxy that crafts Ideogram-4 JSON
 # captions (via the director) so OWUI's native 🖼️ image button renders instead of hitting
 # the "blocked by safety filter" placeholder. Needs the director (:8090) up.
 start_studio_image_shim() {
     printf "  ${GREEN}▲${NC} Starting studio-image-shim (:8191, native-button Ideogram captions)..."
-    compose_at "$COMPOSE_BASE/studio/image-shim" "up -d --build" && echo "done" || echo "failed"
+    compose_at "$COMPOSE_BASE/studio/image-shim" "up -d --build" && echo "done" || { echo "failed"; c3_mark_start_failure "studio-image-shim"; }
 }
 # Integrated-voices TTS + audio mixdown (:8192, Kokoro on CPU). The pipe POSTs /narrate after a
 # video render to mix a voiceover over the clip's native audio (ducked + normalized). No GPU.
 start_studio_tts() {
     printf "  ${GREEN}▲${NC} Starting studio-tts (:8192, Kokoro voices + mixdown, CPU)..."
-    compose_at "$COMPOSE_BASE/studio/tts" "up -d --build" && echo "done" || echo "failed"
+    compose_at "$COMPOSE_BASE/studio/tts" "up -d --build" && echo "done" || { echo "failed"; c3_mark_start_failure "studio-tts"; }
 }
 # Premium voice (:8193, Step-Audio-EditX, GPU1, isolated transformers 4.53.3). LAZY: the container
 # comes up cheap (~0 GB) so the OWUI voice lane appears as soon as ai-studio starts it; the ~14 GB
@@ -286,7 +301,7 @@ start_studio_tts() {
 # `--build` picks up server.py edits (layer-cached → fast when unchanged).
 start_step_voice() {
     printf "  ${GREEN}▲${NC} Starting step-voice (:8193, lazy — model loads on first use, GPU1)..."
-    compose_at "$COMPOSE_BASE/studio/step-voice" "up -d --build" && echo "done" || echo "failed"
+    compose_at "$COMPOSE_BASE/studio/step-voice" "up -d --build" && echo "done" || { echo "failed"; c3_mark_start_failure "step-voice"; }
 }
 stop_step_voice() {
     printf "  ${RED}▼${NC} Stopping step-voice..."
@@ -306,12 +321,19 @@ stop_gemma_mtp() {
 }
 
 start_gemma_int8() {
-    printf "  ${GREEN}▲${NC} Starting gemma-int8..."
-    compose_at "$GEMMA_DUAL_DIR" "up -d" int8.yml && echo "done" || echo "failed"
+    # REPOINTED 2026-07-18: boots the CURRENT dual default vllm/gemma-31b-dual
+    # (qat-awq-int4 bf16 @224K, stock v0.24.0+, MTP-off). The old target
+    # autoround-int4/int8.yml = the slug DEPRECATED 2026-07-02 (int8-PTH
+    # silently craters recall past ~32K without #40391) — this direct
+    # compose_at path bypassed switch.sh's status gate. Function name kept
+    # (every mode's stop-list references it).
+    printf "  ${GREEN}▲${NC} Starting gemma-31b..."
+    compose_at "$GEMMA_31B_DUAL_DIR" "up -d" base.yml && echo "done" || { echo "failed"; c3_mark_start_failure "gemma-31b"; }
 }
 stop_gemma_int8() {
-    printf "  ${RED}▼${NC} Stopping gemma-int8..."
-    compose_at "$GEMMA_DUAL_DIR" "down" int8.yml && echo "done" || echo "skipped"
+    printf "  ${RED}▼${NC} Stopping gemma-31b..."
+    compose_at "$GEMMA_31B_DUAL_DIR" "down" base.yml >/dev/null 2>&1 || true
+    compose_at "$GEMMA_DUAL_DIR" "down" int8.yml && echo "done" || echo "skipped"   # legacy int8 residue too
 }
 
 # Stop every Gemma serving variant before starting a new one
@@ -323,7 +345,7 @@ stop_all_gemma() {
 
 start_deckard() {
     printf "  ${GREEN}▲${NC} Starting deckard-40b..."
-    compose_at "$DECKARD_DIR" "up -d" mtp.yml && echo "done" || echo "failed"
+    compose_at "$DECKARD_DIR" "up -d" mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "deckard"; }
 }
 stop_deckard() {
     printf "  ${RED}▼${NC} Stopping deckard-40b..."
@@ -507,6 +529,7 @@ mode_chat() {
     stop_step_voice
     start_service openwebui
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service searxng
     start_studio_director
@@ -534,6 +557,7 @@ mode_27b() {
     wait_gpu_vram_settle     # let the torn-down scene's VRAM release before TP=2 boots (#535 follow-up)
     start_27b_dual_mtp
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service openwebui
     start_service searxng
@@ -561,6 +585,7 @@ mode_35b_a3b() {
     wait_gpu_vram_settle     # let the torn-down scene's VRAM release before TP=2 boots (#535 follow-up)
     start_35b_a3b_dual
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service openwebui
     start_service searxng
@@ -587,6 +612,7 @@ mode_gemma_12b() {
     wait_gpu_vram_settle     # single-card boot can still land in another scene's residue (#535 follow-up)
     start_gemma_12b
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service openwebui
     start_service searxng
@@ -601,8 +627,8 @@ mode_gemma_12b() {
 #  via its catalog slug if needed.)
 
 mode_gemma_int8() {
-    echo -e "${CYAN}═══ Switching to Gemma 4 31B INT8-PTH mode (dual default, long ctx) ═══${NC}"
-    echo "Starting: Gemma 4 31B + INT8 PTH KV + 262K ctx (TP=2, :8032)"
+    echo -e "${CYAN}═══ Switching to Gemma 4 31B mode (dual default) ═══${NC}"
+    echo "Starting: Gemma 4 31B QAT-AWQ-INT4 + bf16 KV + 224K ctx (TP=2, :8032, MTP-off; canonical template)"
     echo ""
     stop_all_27b
     stop_deckard
@@ -616,6 +642,7 @@ mode_gemma_int8() {
     wait_gpu_vram_settle     # let the torn-down scene's VRAM release before TP=2 gemma boots (#535)
     start_gemma_int8
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service openwebui
     start_service searxng
@@ -637,6 +664,7 @@ mode_deckard() {
     wait_gpu_vram_settle     # 31 GB GGUF layer-splits both cards — don't boot into residue (#535 follow-up)
     start_deckard
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service openwebui
     start_service searxng
@@ -727,11 +755,12 @@ mode_ai_studio() {
     start_step_voice
     start_service openwebui
     start_service litellm
+    start_service spark-dashboard
     start_service qdrant
     start_service searxng
     echo ""
     echo -e "${GREEN}AI-studio mode active.${NC} — one scene; pick the lane in Open WebUI."
-    echo -e "  Open WebUI:  http://$LANIP:8080   (image · video · music · SFX · voice lanes)"
+    echo -e "  Open WebUI:  http://$LANIP:${OWUI_PORT:-8080}   (image · video · music · SFX · voice lanes)"
     echo -e "  Gallery:     http://$LANIP:8189   (all generated media; survives ComfyUI down)"
     echo -e "  ComfyUI:     http://$LANIP:8188   (full node graph / control)"
     echo -e "${YELLOW}First ComfyUI boot can take a few min (clones + node deps). Video DiT splits across both 3090s (DisTorch); image/audio lanes run on GPU0 beside the director.${NC}"
@@ -956,13 +985,13 @@ mode_off() {
 list_modes_data() {
     # name<TAB>group<TAB>description<TAB>services<TAB>ports<TAB>gpus
     cat <<'TSV'
-chat	ops	Open WebUI + LiteLLM + Qdrant + SearXNG + uncensored director — supporting-infra home for catalog models	openwebui,litellm,qdrant,searxng,studio-director	8080,4000,8090	none
-qwen27b	models	Qwen3.6-27B MTP n=3 + fp8 KV + 262K + vision (TP=2) — default	vllm-qwen36-27b-dual,litellm,qdrant,openwebui,searxng	8010,8080,4000	both
-qwen35b-a3b	models	Qwen3.6-35B-A3B MoE (3B active / 35B total) AutoRound INT4 + fp8 KV + 262K + vision (TP=2)	vllm-qwen36-35b-a3b-dual,litellm,qdrant,openwebui,searxng	8051,8080,4000	both
-gemma-31b	models	Gemma 4 31B INT8 PTH KV + 262K + vision (TP=2) — dual default	vllm-gemma-4-31b-mtp-int8,litellm,qdrant,openwebui,searxng	8032,8080,4000	both
-gemma12b	models	Gemma 4 12B AutoRound INT8 + bf16 KV + MTP n=2 (gemma4_unified arch-preview, single-card)	vllm-gemma-4-12b-int8-mtp,litellm,qdrant,openwebui,searxng	8038,8080,4000	1
-deckard	models	Qwen3.6-40B-Deckard Q6_K + MTP n=2 + q8_0 KV + 128K (llama.cpp, dual)	llama-cpp-deckard-40b,litellm,qdrant,openwebui,searxng	8199,8080,4000	both
-ai-studio	studio	image · video · audio · voice — ComfyUI both GPUs + qwen director + sidecars + Open WebUI (pick the lane in OWUI)	comfyui,studio-director,studio-gallery,studio-orchestrator,studio-image-shim,studio-tts,studio-step-voice,openwebui,litellm,qdrant,searxng	8188,8090,8189,8190,8191,8192,8193,8080,4000,6333	both
+chat	ops	Open WebUI + LiteLLM + Qdrant + SearXNG + uncensored director — supporting-infra home for catalog models	openwebui,litellm,qdrant,searxng,studio-director,spark-dashboard	8080,4000,8090,3010	none
+qwen27b	models	Qwen3.6-27B MTP n=3 + fp8 KV + 262K + vision (TP=2) — default	vllm-qwen36-27b-dual,litellm,qdrant,openwebui,searxng,spark-dashboard	8010,8080,4000,3010	both
+qwen35b-a3b	models	Qwen3.6-35B-A3B MoE (3B active / 35B total) AutoRound INT4 + fp8 KV + 262K + vision (TP=2)	vllm-qwen36-35b-a3b-dual,litellm,qdrant,openwebui,searxng,spark-dashboard	8051,8080,4000,3010	both
+gemma-31b	models	Gemma 4 31B QAT-AWQ-INT4 bf16 KV @224K (TP=2, MTP-off, canonical template) — dual default	vllm-gemma-4-31b-qat-awq-int4,litellm,qdrant,openwebui,searxng,spark-dashboard	8032,8080,4000,3010	both
+gemma12b	models	Gemma 4 12B AutoRound INT8 + bf16 KV + MTP n=2 (gemma4_unified arch-preview, single-card)	vllm-gemma-4-12b-int8-mtp,litellm,qdrant,openwebui,searxng,spark-dashboard	8038,8080,4000,3010	1
+deckard	models	Qwen3.6-40B-Deckard Q6_K + MTP n=2 + q8_0 KV + 128K (llama.cpp, dual)	llama-cpp-deckard-40b,litellm,qdrant,openwebui,searxng,spark-dashboard	8199,8080,4000,3010	both
+ai-studio	studio	image · video · audio · voice — ComfyUI both GPUs + qwen director + sidecars + Open WebUI (pick the lane in OWUI)	comfyui,studio-director,studio-gallery,studio-orchestrator,studio-image-shim,studio-tts,studio-step-voice,openwebui,litellm,qdrant,searxng,spark-dashboard	8188,8090,8189,8190,8191,8192,8193,8080,4000,6333,3010	both
 off	ops	Stop all services	all-stopped		none
 power-cap	ops	GPU power-cap controls (on/off/status; both 3090s, 250W default cap)			both
 prune	ops	docker image prune -a (safe — only unreferenced images)			none
@@ -1076,3 +1105,12 @@ case "${1:-}" in
     --list-modes)       list_modes "${2:-}" ;;
     *)                  usage ;;
 esac
+
+# #715 gap 4 — propagate start failures to the exit code (see FAILED_SERVICES).
+if [ "${#FAILED_SERVICES[@]}" -gt 0 ]; then
+    echo "" >&2
+    echo -e "${RED}✗ ${#FAILED_SERVICES[@]} service(s) FAILED to start: ${FAILED_SERVICES[*]}${NC}" >&2
+    echo "  Inspect: sudo docker compose logs <service>   (in its compose dir)" >&2
+    echo "  Then re-run this mode — starts are idempotent." >&2
+    exit 1
+fi

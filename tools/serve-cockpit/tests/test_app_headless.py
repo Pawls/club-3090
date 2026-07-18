@@ -922,6 +922,120 @@ class TestNavNodesExist:
             await _enter_operate(pilot, tab="tab-doctor")
             assert operate.active == "tab-doctor"
 
+    def test_sanitize_catalog_columns(self):
+        """#724: the picker-state sanitizer — canonical defaults, unknown keys
+        dropped, newly-shipped canonical keys inserted at their canonical
+        neighbour, pinned keys forced visible, dedup."""
+        from club3090_cockpit.app import _sanitize_catalog_columns, _CATALOG_COLUMNS
+
+        default = [k for k, _ in _CATALOG_COLUMNS]
+        # None / malformed → canonical, nothing hidden
+        assert _sanitize_catalog_columns(None) == (default, set())
+        assert _sanitize_catalog_columns("nonsense") == (default, set())
+        # unknown keys dropped from both order + hidden
+        order, hidden = _sanitize_catalog_columns(
+            {"order": ["slug", "bogus", "model"], "hidden": ["bogus", "topo"]}
+        )
+        assert "bogus" not in order and "bogus" not in hidden
+        assert hidden == {"topo"}
+        # saved partial order respected; missing canonical keys re-inserted
+        # after their canonical predecessor (all 14 keys present exactly once)
+        assert sorted(order) == sorted(default)
+        # user-relative order preserved (slug stays before model) and every
+        # canonical key is present exactly once, even from a degenerate
+        # hand-edited 2-key saved order
+        assert order[0] == "slug"
+        assert order.index("slug") < order.index("model")
+        # the REALISTIC missing-key case — a saved full layout from before a
+        # new column shipped: the new key slots at its canonical position
+        # (act's canonical left neighbour is kv) without disturbing the rest
+        order13 = [k for k in default if k != "act"]
+        merged, _ = _sanitize_catalog_columns({"order": order13, "hidden": []})
+        assert merged.index("act") == merged.index("kv") + 1
+        assert [k for k in merged if k != "act"] == order13
+        # pinned slug can never be hidden
+        _, hidden2 = _sanitize_catalog_columns({"order": default, "hidden": ["slug"]})
+        assert "slug" not in hidden2
+        # dedup — first occurrence wins
+        order3, _ = _sanitize_catalog_columns({"order": ["kv", "kv", "slug"], "hidden": []})
+        assert order3.count("kv") == 1
+
+    @pytest.mark.asyncio
+    async def test_catalog_columns_pref_applies_and_persists(self, monkeypatch, tmp_path):
+        """#724 end-to-end: a persisted catalog_columns pref (applied the way
+        __main__.apply_persisted_settings does) drives the header set — hidden
+        columns gone, custom order kept — and set_columns() writes the pref to
+        c3-settings.json for the next launch."""
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        from club3090_cockpit.app import _CATALOG_COLUMNS, CatalogPane
+        from club3090_cockpit import __main__ as M
+
+        default = [k for k, _ in _CATALOG_COLUMNS]
+        # act moved right after slug; topo/engine hidden
+        order = ["model", "slug", "act"] + [
+            k for k in default if k not in ("model", "slug", "act")
+        ]
+        app, _, _ = make_app()
+        app.catalog_columns_pref = {"order": order, "hidden": ["topo", "engine"]}
+        async with app.run_test(size=(120, 40)) as pilot:
+            table = app.query_one("#catalog-table", DataTable)
+            col_labels = [str(c.label) for c in table.columns.values()]
+            assert "topo" not in col_labels and "engine" not in col_labels
+            assert col_labels[:3] == ["model", "slug", "act"]
+            # the picker apply path: unhide everything, restore canonical —
+            # persisted for the next launch
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.set_columns(default, [])
+            col_labels = [
+                str(c.label)
+                for c in app.query_one("#catalog-table", DataTable).columns.values()
+            ]
+            assert col_labels[0] == "model" and col_labels[-1] == "status"
+            assert "topo" in col_labels and "engine" in col_labels
+        saved = M.load_settings().get("catalog_columns")
+        assert saved == {"order": default, "hidden": []}
+
+    def test_act8_serve_toggle(self):
+        """#609: the W4A8 int8-activation opt-in on the serve-confirm modal —
+        shown + wired only for act8-capable START slugs, injects the env, hidden
+        elsewhere. Tests the modal's logic directly (no app mount needed)."""
+        from club3090_cockpit.app import ConfirmActionScreen, ServeContext
+        from club3090_cockpit.data import ActionPlan, CatalogEntry
+        from club3090_cockpit.services import _variant_row_from_dict
+
+        def modal(act8, mode="start"):
+            row = _variant_row_from_dict({"slug": "vllm/dual", "port": 8010, "act8_capable": act8})
+            ctx = ServeContext(mode=mode, entry=CatalogEntry(row=row))
+            m = ConfirmActionScreen.__new__(ConfirmActionScreen)
+            m._plan = ActionPlan(kind="serve", cmd=["bash", "scripts/switch.sh", "vllm/dual"])
+            m._serve_ctx = ctx
+            m._act8_on = False
+            m._reconcile = None
+            return m
+
+        # capable START slug → toggle available + gated ON
+        cap = modal(True)
+        assert cap._act8_capable() is True
+        assert cap.check_action("toggle_act8", ()) is True
+        # env attaches (idempotent, prepended before switch.sh)
+        cap._act8_on = True
+        inj = cap._with_act8_env(cap._plan.cmd)
+        assert inj[:2] == ["env", "VLLM_MARLIN_INPUT_DTYPE=int8"]
+        assert cap._with_act8_env(inj) == inj  # idempotent
+
+        # NON-capable slug → toggle hidden, capability False
+        nocap = modal(False)
+        assert nocap._act8_capable() is False
+        assert nocap.check_action("toggle_act8", ()) is False
+
+        # capable but STOP mode (not a launch) → not offered
+        stop = modal(True, mode="stop")
+        assert stop._act8_capable() is False
+
+        # row facet plumbs through from the emit contract
+        assert getattr(_variant_row_from_dict({"slug": "x", "port": 1, "act8_capable": True}), "act8_capable") is True
+        assert getattr(_variant_row_from_dict({"slug": "x", "port": 1}), "act8_capable") is False
+
     @pytest.mark.asyncio
     async def test_benchmarks_tab_is_gone(self):
         """Fold 3 removed the standalone Validate · Benchmarks tab + its pane."""
@@ -945,11 +1059,17 @@ class TestNavNodesExist:
             # · spec) → money (ctx · TPS · 8pk) → topology/engine (slug-redundant,
             # fold first) → status LAST (its emoji glyph is the one variable-width
             # cell, so nothing follows it to misalign — see _STATUS_GLYPH note).
+            # #723: provider (before weights) · GB (before kv) · act (before spec).
             for expected in (
-                "model", "slug", "weights", "kv", "spec", "ctx", "TPS (rig)",
-                "8pk (rig)", "topo", "engine", "status",
+                "model", "slug", "provider", "weights", "GB", "kv", "act",
+                "spec", "ctx", "TPS (rig)", "8pk (rig)", "topo", "engine",
+                "status",
             ):
                 assert expected in col_labels, f"missing {expected!r}: {col_labels}"
+            # #723 ordering: provider < weights < GB < kv < act < spec.
+            for a, b in (("provider", "weights"), ("weights", "GB"),
+                         ("GB", "kv"), ("kv", "act"), ("act", "spec")):
+                assert col_labels.index(a) < col_labels.index(b), col_labels
             # "source" is gone.
             assert "source" not in col_labels, col_labels
             # "fit" is gone — it lives in the serve confirm pop-up now.
@@ -1123,6 +1243,25 @@ class TestCatalogWired:
             # term order is irrelevant for AND.
             pane.set_filter("dual gemma")
             assert [e.slug for e in pane._filtered_entries()] == ["vllm/gemma-dual"]
+
+            # Full-field coverage (2026-07-18): search must reach EVERY column
+            # the table can display, not just slug/topo/engine/model/status/source.
+            # kv_format, drafter (spec column) and the chat_template facet are
+            # row-driven — set them on one row and assert the filter finds it.
+            object.__setattr__(gemma_dual.row, "kv_format", "fp8_e4m3")
+            object.__setattr__(gemma_dual.row, "drafter", "gemma-mtp")
+            object.__setattr__(gemma_dual.row, "chat_template", "gemma-canonical")
+            pane.set_filter("fp8_e4m3")
+            assert [e.slug for e in pane._filtered_entries()] == ["vllm/gemma-dual"]
+            pane.set_filter("mtp")          # spec column token
+            assert [e.slug for e in pane._filtered_entries()] == ["vllm/gemma-dual"]
+            pane.set_filter("gemma-canonical")   # template-regime facet
+            assert [e.slug for e in pane._filtered_entries()] == ["vllm/gemma-dual"]
+            pane.set_filter("production")   # raw status WORD (not just the glyph)
+            assert {e.slug for e in pane._filtered_entries()} == {
+                "vllm/gemma-dual", "vllm/gemma-single",
+            }
+            pane.set_filter("")
             # a term that matches nothing → no rows.
             pane.set_filter("gemma qwen")
             assert pane._filtered_entries() == []

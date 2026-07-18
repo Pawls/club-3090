@@ -65,7 +65,7 @@ services:
     # means no patch overlays are anchored here, so we ride stable releases.
     # Bump the tag to a newer stable after a verify-stress + soak gate.
     # Override with VLLM_IMAGE=... if you need a specific build.
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.24.0}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.25.1}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
@@ -88,8 +88,14 @@ services:
       # See docs/UPSTREAM.md "Community templates / model assets" + the row at
       # https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
       - ../../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      # W4A8 int8-activation enablement (#609) — NO-OP until VLLM_MARLIN_INPUT_DTYPE=int8
+      # is set (see the patch README). Applied by the entrypoint before vllm serve.
+      - ../../../patches/w4a8-int8-act:/etc/club3090/w4a8:ro
       # NVLink auto-detection — runs inside container at boot.
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+      # Vendored vllm#48375 (MambaManager drop_eagle_block) — inert under the
+      # prefix-off default; protects PREFIX_CACHE_ARG users. See patches.yml.
+      - ../../../patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
@@ -98,6 +104,10 @@ services:
       # actually pins cards there; on the classic runtime the UUID form is
       # renumbering-proof. Unset → absent (no masking).
       - CUDA_VISIBLE_DEVICES
+      # W4A8 knob (#609): VLLM_MARLIN_INPUT_DTYPE=int8 → int8 activations on the
+      # int4 weights (+52% prefill / +8% decode, 8-pack-tied; needs the w4a8 patch
+      # mount above). Bare passthrough — unset → absent → stock W4A16 behavior.
+      - VLLM_MARLIN_INPUT_DTYPE
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
@@ -129,8 +139,11 @@ services:
         # hardware where Cliff 2 GDN activation spikes occur at runtime
         # (~50-65K active context tokens). Costs ~20-30% TPS in exchange for
         # stability. See docs/HARDWARE.md "Note for WSL2 / Windows users".
+        # W4A8 patches (#609) — no-op unless VLLM_MARLIN_INPUT_DTYPE=int8 (see mount).
+        bash /etc/club3090/w4a8/install.sh || exit 1
         # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
         source /etc/club3090/detect_nvlink.sh
+        bash /etc/club3090/pr48375/install.sh || exit 1
         if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
           exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
         else
@@ -172,7 +185,11 @@ services:
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder
-      - --enable-prefix-caching
+      # Prefix-caching ON by default (flipped 2026-07-17, #710/#736): the
+      # vllm#43559 fix (vllm#48375) is VENDORED on this compose and applied at
+      # boot, plus 7-day production + 6-arm probe evidence of the pair clean on
+      # v0.25.x. Opt out: PREFIX_CACHE_ARG=--no-enable-prefix-caching
+      - "${PREFIX_CACHE_ARG:---enable-prefix-caching}"
       - --enable-chunked-prefill
       # Head-of-line fix (Zylone's vLLM tip; validated on-rig 2026-07-14). Caps a long
       # prefill's per-step tokens so a concurrent short/agentic request isn't starved.

@@ -111,7 +111,7 @@ Each tier maximizes one axis and accepts the cost on the others:
 | **fast** ⭐ | decode + context | TPS, KV-pool size | weight fidelity (lowest KLD rank) | W4A16 (AutoRound) |
 | **max** | weight fidelity | KLD vs bf16 | decode, pool, prefill | FP8 / INT8 (W8A16) |
 | **prefill** | TTFT | TTFT bench | some activation fidelity | INT8 **W8A8** |
-| **balanced** | *(see note)* | *(under review)* | *(see note)* | — |
+| ~~**balanced**~~ 🗑️ | *(retired 2026-07-16)* | none — that was the problem | — | was: W4A16 (AWQ) + int8-PTH KV |
 
 > The §4a *single-card vs dual-card* split is the **topology projection** of this map: a single 24 GB card is forced into the **fast** corner (VRAM picks the smallest quant), and the **second card is what *buys*** the **max** and **prefill** corners as real options. "Add a card" = "unlock the other corners." (See [`DUAL_CARD.md`](DUAL_CARD.md) for the per-model dual-card pick-table this maps onto.)
 
@@ -127,6 +127,37 @@ Each tier maximizes one axis and accepts the cost on the others:
 **A claimed differentiator no instrument can measure is not a tier — it's a guess.** This is the test that decides whether a candidate quant ships as its own tier or folds into an existing one.
 
 > **Worked example — why "balanced" is provisional.** "balanced" has historically meant *an INT4 weight + a higher-fidelity KV* (int8-per-token-head instead of fp8), betting the KV fidelity is worth a tier. On the measurements we have, it's **dominated by fast**: same-or-slower decode, a *smaller* KV pool (heavier weights leave less room), and a *tie* on the 8-pack. Its only claimed edge is a KV cache that is the **same byte size** as fast's and that the short-context 8-pack can't see. Until an instrument that *can* see it (long-context recall / NIAH) separates them, "balanced" isn't a real corner — it's fast with a more expensive KV. The honest options are three: prove it with the right instrument, redefine it onto a real axis, or retire it.
+>
+> **Resolution (2026-07-16): retired.** The instrument arrived — [#594](https://github.com/noonghunna/club-3090/pull/594) measured int8-PTH KV at depth and it **craters decode** (130.8→50.7 TPS @35K, TRITON-only path) at *equal* NIAH recall vs fp8/e4m3→FlashInfer. The claimed edge wasn't just unmeasurable, it was negative. `vllm/qwen-27b-dual-balanced` is 🗑️ deprecated; the shipped map is two tiers + the prefill corner: **fast** (W4A16, speed + headroom) · **max** (FP8 W8A16, weight fidelity — its KV also flipped to fp8/e4m3 per #594) · **W8A8** (prefill/TTFT). This example stays as the canonical application of the legitimacy rule.
+
+### W4A8 — int8 activations ON the fast tier (shipped as a serve-time knob, 2026-07-16)
+
+The fast tier's int4 weights can now run **int8 activations** — the "W4A8" combination — via a
+one-env knob on the shipped composes (`vllm/dual` + `vllm/minimal`):
+
+```bash
+VLLM_MARLIN_INPUT_DTYPE=int8 bash scripts/switch.sh vllm/dual
+```
+
+**Measured (reference 2×3090, dual, MTP n=3, 262K — single-variable A/B through the shipped
+compose, env-only delta):** prefill **+50%** (1,674→2,513 tok/s) · decode **neutral-to-slightly-up**
+(+~3%, within run noise) · MTP acceptance unchanged · 8-pack **110/150 off / 111/150 on** —
+a statistical tie with the W4A16 baseline on both reasoning legs. Single-card (no spec-decode):
+prefill +110%, decode −3%. Why it works: the int8 GEMM computes the int4 weights **exactly**
+(lossless widening), so only the activations are quantized — per-token, dynamically.
+
+The toggle itself is **stock vLLM** (≤v0.22); two upstream bugs blocked it on auto-round
+checkpoints, fixed by the vendored `w4a8-int8-act` patches the composes now carry (inert until
+the env is set — zero default-path change; see the patch README + [#609](https://github.com/noonghunna/club-3090/discussions/609)
+for the full forensics). Requirements: **positive-symmetric int4** (the shipped autoround
+checkpoint qualifies via the sign-fold; asym AWQ refuses loudly with an actionable error). The
+shipped composes' fp16 dtype is validated with the knob on Qwen; prefer **bf16** for other model
+families (Gemma's large activations overflow fp16 under int8 dequant). Compressed-tensors positive-sym W4A16 checkpoints (e.g. AWQ-smoothed
+community quants) need **no patches at all** — stock image + the env suffices.
+
+In the trade-space above: this doesn't add a tier — it makes **fast strictly better on the
+prefill axis when enabled**, shrinking (not eliminating) W8A8's prefill-corner lead while
+keeping fast's decode + KV-pool advantages.
 
 ### The prefill corner, filled — **INT8 W8A8** (measured 2026-06-30, vLLM v0.24.0)
 

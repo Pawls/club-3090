@@ -4540,6 +4540,12 @@ def _variant_row_from_dict(d: dict[str, Any]) -> VariantRow:
         # KV-cache format from the registry (catalog KV column) — attached same
         # as the facets above; "" when the contract didn't carry it.
         object.__setattr__(row, "kv_format", str(d.get("kv_format") or ""))
+        # Activation compute format (catalog act column, #723) — same pattern;
+        # "" when the contract didn't carry it (older emit) → the column shows "—".
+        object.__setattr__(row, "act_format", str(d.get("act_format") or ""))
+        object.__setattr__(row, "chat_template", str(d.get("chat_template") or "native"))
+        # W4A8-int8-activation capability (c3 serve-confirm checkbox, #609).
+        object.__setattr__(row, "act8_capable", bool(d.get("act8_capable")))
         # Weights quant_label + FORMAT from the model profile (emit join) —
         # the catalog Weights column's fallbacks for weights_variant tokens that
         # carry no recognisable quant segment: quant_label is the explicit

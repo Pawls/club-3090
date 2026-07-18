@@ -208,6 +208,95 @@ def _kv_label(e: "CatalogEntry") -> str:
     return _KV_LABELS.get(kv, kv or "—")
 
 
+def _provider_label(e: "CatalogEntry") -> str:
+    """Weights author/org for the catalog provider column (#723) — the org
+    segment of the joined ``WeightsMeta.hf_repo`` (``weights.py list --json``,
+    set by ``enrich_weights``).  "—" when the slug has no joined meta (e.g. a
+    self-grabbed GGUF compose) or the entry hasn't been enriched yet."""
+    meta = getattr(e, "weights", None)
+    repo = (getattr(meta, "hf_repo", "") or "").strip()
+    if "/" in repo:
+        return repo.split("/", 1)[0]
+    return repo or "—"
+
+
+def _size_label(e: "CatalogEntry") -> str:
+    """Weights artifact size for the catalog GB column (#723) — the joined
+    ``WeightsMeta.size_gb``; "—" when unknown/unjoined."""
+    meta = getattr(e, "weights", None)
+    gb = getattr(meta, "size_gb", None)
+    if gb is None:
+        return "—"
+    return f"{gb:g}G"
+
+
+def _act_label(e: "CatalogEntry") -> str:
+    """Activation compute format for the catalog act column (#723) — the
+    registry ``act_format`` facet (emitted like ``kv_format``): "16bit"
+    (fp16/bf16 engine-native) / "int8" (W4A8/W8A8 class) / "fp8"; "—" when the
+    contract didn't carry it (older emit)."""
+    return (getattr(e.row, "act_format", "") or "") or "—"
+
+
+# ── Catalog column picker (#724) ─────────────────────────────────────────────
+# The CANONICAL catalog column set — the ONE source for the header build, the
+# row-cell build and the [|] columns picker.  (key, header) pairs in DEFAULT
+# order; the picker persists a {"order": [...], "hidden": [...]} dict under
+# the "catalog_columns" settings key (c3-settings.json), applied at launch by
+# __main__.apply_persisted_settings (same hermetic hook as [S] settings — an
+# app constructed directly, e.g. in tests, always starts canonical).
+_CATALOG_COLUMNS: "list[tuple[str, str]]" = [
+    ("model", "model"),
+    ("slug", "slug"),
+    ("provider", "provider"),
+    ("weights", "weights"),
+    ("gb", "GB"),
+    ("kv", "kv"),
+    ("act", "act"),
+    ("spec", "spec"),
+    ("ctx", "ctx"),
+    ("tps", "TPS (rig)"),
+    ("8pk", "8pk (rig)"),
+    ("topo", "topo"),
+    ("engine", "engine"),
+    ("status", "status"),
+]
+_CATALOG_HEADERS = dict(_CATALOG_COLUMNS)
+_CATALOG_PINNED = {"slug"}  # identity — never hideable
+
+
+def _sanitize_catalog_columns(saved: Any) -> tuple[list[str], set[str]]:
+    """Normalise a persisted ``{"order": [...], "hidden": [...]}`` into a safe
+    ``(order, hidden)`` pair: unknown keys dropped, canonical keys missing from
+    a saved order inserted next to their canonical neighbour (a NEWLY-shipped
+    column appears, visible, without wiping the user's layout), pinned keys
+    forced visible.  Tolerant of any malformed shape → canonical defaults."""
+    default_order = [k for k, _ in _CATALOG_COLUMNS]
+    try:
+        raw_order = [str(k) for k in (saved or {}).get("order", [])]
+        raw_hidden = [str(k) for k in (saved or {}).get("hidden", [])]
+    except (AttributeError, TypeError):
+        return list(default_order), set()
+    order = [k for k in raw_order if k in _CATALOG_HEADERS]
+    # de-dup, first occurrence wins
+    seen: set[str] = set()
+    order = [k for k in order if not (k in seen or seen.add(k))]
+    hidden = {k for k in raw_hidden if k in _CATALOG_HEADERS}
+    if not order:
+        return list(default_order), hidden - _CATALOG_PINNED
+    for i, k in enumerate(default_order):
+        if k in seen:
+            continue
+        pos = 0
+        for prev in reversed(default_order[:i]):
+            if prev in order:
+                pos = order.index(prev) + 1
+                break
+        order.insert(pos, k)
+        seen.add(k)
+    return order, hidden - _CATALOG_PINNED
+
+
 # Spec Dec column — DERIVED from the registry `drafter` id (already in-app as
 # row.drafter; emitted at registry-emit.sh, threaded in services.py) → a compact
 # method[·mechanism] token, by PATTERN on the id (zero emit/guard change; the id
@@ -883,7 +972,7 @@ class CatalogPane(Container):
         )
         yield Label(
             "[dim]\\[\\\\] model   \\[/] filter   \\[⏎] serve   \\[e] explain   "
-            "\\[d] set-default   \\[D] clear-default[/dim]",
+            "\\[d] set-default   \\[D] clear-default   \\[|] columns[/dim]",
             id="catalog-hint",
         )
 
@@ -897,15 +986,27 @@ class CatalogPane(Container):
         # Fit is STILL computed (it feeds the pop-up + the serving-row exemption);
         # it just no longer occupies a Catalog column.
         # Column budget, left→right: identity (model · slug) → config the user
-        # picks by (weights · kv · spec) → money (ctx · TPS · 8pk) → topology/engine
-        # (largely slug-redundant, fold first on a narrow terminal) → status.
+        # picks by (provider · weights · GB · kv · act · spec) → money (ctx ·
+        # TPS · 8pk) → topology/engine (largely slug-redundant, fold first on a
+        # narrow terminal) → status.
+        # #723 additions: `provider` (weights author/org, before weights), `GB`
+        # (artifact size, before kv), `act` (activation compute format, before
+        # spec) — provider/GB join from the enriched WeightsMeta, act from the
+        # registry act_format facet (same plumbing as kv_format).
         # `spec` groups with weights/kv (the serving-config facets): which drafter
         # (MTP / MTP·gguf / MTP·asst / DFlash / — none) the slug enables by default.
         # Status is deliberately LAST: its glyph is the one emoji-width column, so
         # putting it at the tail means nothing follows it to misalign (belt +
         # braces with the VS16-free glyphs in _STATUS_GLYPH).
         # "(rig)" keeps the our-rig provenance at 4 chars ("our rig" cost 8 more).
-        table.add_columns("model", "slug", "weights", "kv", "spec", "ctx", "TPS (rig)", "8pk (rig)", "topo", "engine", "status")
+        # #724: the header set is DYNAMIC — _CATALOG_COLUMNS order filtered by
+        # the user's picker state ([|]), applied at launch from the persisted
+        # "catalog_columns" settings key via apply_persisted_settings (an app
+        # constructed directly — tests — starts canonical).
+        self._col_order, self._col_hidden = _sanitize_catalog_columns(
+            getattr(self.app, "catalog_columns_pref", None)
+        )
+        self._apply_columns_to_table(table)
         # Full enriched catalog, and the current filter substring.
         self._entries: list[CatalogEntry] = []
         self._filter: str = ""
@@ -930,6 +1031,58 @@ class CatalogPane(Container):
         # prompted to set it ([S]).
         self._model_dir_note: str = ""
 
+    # ── Column picker (#724) ─────────────────────────────────────────────────
+
+    def _visible_columns(self) -> list[str]:
+        return [k for k in self._col_order if k not in self._col_hidden]
+
+    def _apply_columns_to_table(self, table: DataTable) -> None:
+        table.clear(columns=True)
+        table.add_columns(*[_CATALOG_HEADERS[k] for k in self._visible_columns()])
+
+    def set_columns(self, order: list[str], hidden: list[str]) -> None:
+        """Apply a new column order/visibility (the [|] picker result), persist
+        it to c3-settings.json ("catalog_columns"), and re-render."""
+        self._col_order, self._col_hidden = _sanitize_catalog_columns(
+            {"order": list(order or []), "hidden": list(hidden or [])}
+        )
+        pref = {"order": list(self._col_order), "hidden": sorted(self._col_hidden)}
+        try:
+            setattr(self.app, "catalog_columns_pref", pref)  # in-session remounts
+        except Exception:
+            pass
+        try:
+            from .__main__ import load_settings, save_settings
+
+            s = load_settings()
+            s["catalog_columns"] = pref
+            save_settings(s)
+        except Exception:
+            pass
+        try:
+            self._apply_columns_to_table(self.query_one("#catalog-table", DataTable))
+            self._render_rows()
+        except Exception:
+            pass
+
+    def open_columns_picker(self) -> None:
+        """Open the [|] columns picker; applies via set_columns on ⏎."""
+        def _done(res: Optional[dict]) -> None:
+            if res:
+                self.set_columns(res.get("order", []), res.get("hidden", []))
+
+        try:
+            self.app.push_screen(
+                CatalogColumnsScreen(self._col_order, self._col_hidden), _done
+            )
+        except Exception:
+            pass
+
+    def on_data_table_header_selected(self, event) -> None:
+        """Clicking the catalog table header opens the columns picker (#724)."""
+        if getattr(getattr(event, "data_table", None), "id", "") == "catalog-table":
+            self.open_columns_picker()
+
     def set_model_dir_note(self, note: str) -> None:
         """Set/clear the model-dir banner (e.g. '⚠ model dir not found — [S]')."""
         new = (note or "").strip()
@@ -951,7 +1104,7 @@ class CatalogPane(Container):
             self._entries = []
             table.clear()
             status_label.update(f"[red]Catalog error:[/red] {error}")
-            table.add_row("—", "—", "—", "—", "—", "—", "—", "—", "—", "—")
+            table.add_row(*(["—"] * len(self._visible_columns())))
             return
 
         self._entries = list(entries)
@@ -1024,19 +1177,25 @@ class CatalogPane(Container):
             # confirm pop-up — see ConfirmActionScreen._render_serve_card).  Fit is
             # STILL computed here for the serving-row exemption + the pop-up; we
             # just don't emit a fit cell.
-            table.add_row(
-                model_cell,
-                slug_cell,
-                _weights_label(e),
-                _kv_label(e),
-                _spec_label(e),
-                e.ctx_label or "—",
-                tps,
-                e.measurement.quality_label,
-                e.topology,
-                e.engine,
-                Text.from_markup(_status_glyph(e.status)),
-            )
+            # #724: build the FULL cell set once, emit in the user's column
+            # order/visibility (keys = _CATALOG_COLUMNS keys).
+            cells = {
+                "model": model_cell,
+                "slug": slug_cell,
+                "provider": _provider_label(e),
+                "weights": _weights_label(e),
+                "gb": _size_label(e),
+                "kv": _kv_label(e),
+                "act": _act_label(e),
+                "spec": _spec_label(e),
+                "ctx": e.ctx_label or "—",
+                "tps": tps,
+                "8pk": e.measurement.quality_label,
+                "topo": e.topology,
+                "engine": e.engine,
+                "status": Text.from_markup(_status_glyph(e.status)),
+            }
+            table.add_row(*(cells[k] for k in self._visible_columns()))
 
         banner = f"[yellow]{self._model_dir_note}[/yellow]  ·  " if self._model_dir_note else ""
         # Surface an active model scope (dropdown) the same way the text filter is shown.
@@ -1179,9 +1338,27 @@ class CatalogPane(Container):
             return self._grouped_by_model(base)
         out: list[CatalogEntry] = []
         for e in base:
-            hay = (
-                f"{e.slug} {e.topology} {e.engine} {e.model} {e.status} {e.source}"
-            ).lower()
+            # Search across EVERYTHING the table can display (#724 cell set +
+            # the chat_template facet) — built from the SAME label helpers the
+            # renderer uses, so search coverage can never drift from the
+            # visible columns again. Raw status word (not the glyph) so
+            # "production"/"caveats"/"experimental" match; measurement labels
+            # degrade to em-dashes pre-enrichment (harmless in the haystack).
+            hay = " ".join([
+                e.slug, e.topology, e.engine, e.model,
+                str(e.status or ""), str(e.source or ""),
+                _provider_label(e), _weights_label(e), _size_label(e),
+                # display label AND raw registry value for the facet columns —
+                # the table shows "fp8/e4m3" but docs/registry say "fp8_e4m3";
+                # both must match.
+                _kv_label(e), str(getattr(e.row, "kv_format", "") or ""),
+                _act_label(e), str(getattr(e.row, "act_format", "") or ""),
+                _spec_label(e), str(getattr(e.row, "drafter", "") or ""),
+                str(e.ctx_label or ""),
+                str(e.measurement.tps_label or ""),
+                str(e.measurement.quality_label or ""),
+                str(getattr(e.row, "chat_template", "") or ""),
+            ]).lower()
             if all(t in hay for t in terms):
                 out.append(e)
         return self._grouped_by_model(out)
@@ -1703,6 +1880,8 @@ class ConfirmActionScreen(ModalScreen):
         Binding("k", "stop", "Stop", show=True, priority=True),
         Binding("k", "cancel_download", "Cancel download", show=True, priority=True),
         Binding("f", "force", "Force", show=True, priority=True),
+        # W4A8 int8-activation opt-in (#609) — shown only for act8-capable serve slugs.
+        Binding("a", "toggle_act8", "int8 acts", show=True),
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
@@ -1718,8 +1897,30 @@ class ConfirmActionScreen(ModalScreen):
         self._on_confirm = on_confirm
         # The state-aware SERVE context (None → the legacy Confirm/Force modal).
         self._serve_ctx: Optional[ServeContext] = serve_ctx
+        # W4A8 int8-activation opt-in (#609) — a per-launch toggle ([a]) shown only
+        # for act8-capable slugs. Default from the "prefer_int8_activations" Settings
+        # pref (else OFF). When ON, the serve cmd gets VLLM_MARLIN_INPUT_DTYPE=int8.
+        self._act8_on: bool = self._act8_capable() and self._act8_pref_default()
 
     # ── presentation predicates ───────────────────────────────────────────────────
+
+    def _act8_capable(self) -> bool:
+        """True iff this serve targets a slug wired for the W4A8 int8-activation
+        knob (registry act8_capable). START mode only — the knob is a launch flag."""
+        ctx = self._serve_ctx
+        if ctx is None or ctx.mode != "start" or ctx.entry is None:
+            return False
+        return bool(getattr(getattr(ctx.entry, "row", None), "act8_capable", False))
+
+    @staticmethod
+    def _act8_pref_default() -> bool:
+        """The 'prefer int8 activations where capable' Settings default (else OFF)."""
+        try:
+            from .__main__ import load_settings
+
+            return bool(load_settings().get("prefer_int8_activations"))
+        except Exception:
+            return False
 
     @property
     def _is_serve(self) -> bool:
@@ -1923,6 +2124,19 @@ class ConfirmActionScreen(ModalScreen):
                     f"{req_s} (Hopper/Blackwell class){got_s}. "
                     "[yellow]Serving here will NOT boot.[/yellow]"
                 )
+            # W4A8 int8-activation opt-in (#609) — only for act8-capable slugs.
+            if self._act8_capable():
+                if self._act8_on:
+                    lines.append(
+                        "  [bold]int8 acts[/bold] [green]ON[/green] "
+                        "([green]VLLM_MARLIN_INPUT_DTYPE=int8[/green] — ~+50% prefill, "
+                        "quality-tied ⚑) · [a] toggle"
+                    )
+                else:
+                    lines.append(
+                        "  [bold]int8 acts[/bold] [dim]off[/dim] "
+                        "(W4A8 int8 activations — ~+50% prefill ⚑ experimental) · [a] enable"
+                    )
             note = (entry.status_note or "").strip()
             if note:
                 lines.append(f"  [bold]caveat[/bold] [yellow]{note}[/yellow]")
@@ -2164,10 +2378,15 @@ class ConfirmActionScreen(ModalScreen):
                 return bool(resolved and mode == "stop")
             if action == "start":
                 return bool(resolved and mode == "start")
+            # W4A8 int8-activation toggle — only for act8-capable START slugs.
+            if action == "toggle_act8":
+                return self._act8_capable()
             # confirm/force never apply in serve mode.
             if action in ("confirm", "force"):
                 return False
             return True
+        if action == "toggle_act8":
+            return False
         if action == "confirm":
             return bool(resolved and rec.safe)
         if action == "force":
@@ -2231,8 +2450,36 @@ class ConfirmActionScreen(ModalScreen):
         self.app.pop_screen()
         self.app.cancel_download(ctx.entry.slug)  # type: ignore[attr-defined]
 
+    def action_toggle_act8(self) -> None:
+        """[a] → flip the W4A8 int8-activation opt-in (#609). No-op for slugs that
+        aren't act8-capable (check_action hides the key there)."""
+        if not self._act8_capable():
+            return
+        self._act8_on = not self._act8_on
+        self._render_serve_card()   # reflect ON/OFF in the card
+
+    @staticmethod
+    def _with_act8_env(cmd: list[str]) -> list[str]:
+        """Prepend `env VLLM_MARLIN_INPUT_DTYPE=int8` to a serve cmd (#609). switch.sh
+        runs `docker compose`, which reads the env for the compose's bare
+        `- VLLM_MARLIN_INPUT_DTYPE` passthrough → int8 activations in the container.
+        Idempotent."""
+        if "VLLM_MARLIN_INPUT_DTYPE=int8" in cmd:
+            return cmd
+        return ["env", "VLLM_MARLIN_INPUT_DTYPE=int8", *cmd]
+
     def _commit(self, *, force: bool) -> None:
         plan = self._plan
+        # W4A8 (#609): when the int8-activation opt-in is ON for an act8-capable
+        # slug, inject the env into the serve cmd BEFORE the force re-issue (so
+        # _with_force still finds the switch.sh positional last).
+        if self._act8_on and self._act8_capable() and plan.kind == "serve":
+            plan = ActionPlan(
+                kind=plan.kind, cmd=self._with_act8_env(plan.cmd),
+                description=plan.description + " +int8-acts",
+                is_write=plan.is_write, requires_reconcile=plan.requires_reconcile,
+                force=plan.force, force_reason=plan.force_reason,
+            )
         if force and not plan.force:
             # Re-issue the plan as a forced one (with a surfaced reason) so the
             # executor's force path is taken explicitly — never silently.  In serve
@@ -4131,6 +4378,126 @@ class SettingsScreen(ModalScreen):
 
     def action_cancel(self) -> None:
         self.app.pop_screen()
+
+
+class CatalogColumnsScreen(ModalScreen):
+    """[|] Catalog columns picker (#724) — show/hide + reorder the catalog
+    table's columns.  Per the modal rule, this screen never touches the pane:
+    it ``dismiss``es ``{"order": [...], "hidden": [...]}`` (or ``None`` on
+    cancel) and the caller applies + persists via ``CatalogPane.set_columns``."""
+
+    DEFAULT_CSS = """
+    CatalogColumnsScreen {
+        align: center middle;
+    }
+    CatalogColumnsScreen > Vertical {
+        width: 56;
+        height: auto;
+        max-height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    CatalogColumnsScreen .settings-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    CatalogColumnsScreen #columns-table {
+        height: auto;
+        max-height: 18;
+    }
+    """
+
+    BINDINGS = [
+        Binding("space", "toggle", "Show/Hide", show=True),
+        Binding("shift+up", "move_up", "Move ↑", show=True),
+        Binding("shift+down", "move_down", "Move ↓", show=True),
+        Binding("r", "reset", "Reset", show=True),
+        Binding("enter", "apply", "Apply", show=True, priority=True),
+        Binding("escape", "cancel", "Cancel", show=True),
+    ]
+
+    def __init__(self, order: list[str], hidden: set[str], **kwargs):
+        super().__init__(**kwargs)
+        # sanitize on the way IN so the picker always shows a coherent set
+        self._order, self._hidden = _sanitize_catalog_columns(
+            {"order": list(order or []), "hidden": list(hidden or [])}
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Catalog columns", classes="settings-title")
+            table: DataTable = DataTable(id="columns-table")
+            table.cursor_type = "row"
+            yield table
+            yield Label(
+                "[dim]space show/hide · shift+↑/↓ move · r reset · ⏎ apply · "
+                "esc cancel · slug is pinned[/dim]"
+            )
+            yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#columns-table", DataTable)
+        table.add_columns("shown", "column")
+        self._refill(cursor=0)
+
+    def _refill(self, cursor: int) -> None:
+        table = self.query_one("#columns-table", DataTable)
+        table.clear()
+        for k in self._order:
+            shown = "✓" if k not in self._hidden else "·"
+            pin = "  (pinned)" if k in _CATALOG_PINNED else ""
+            table.add_row(shown, f"{_CATALOG_HEADERS[k]}{pin}", key=k)
+        try:
+            table.move_cursor(row=max(0, min(cursor, len(self._order) - 1)))
+        except Exception:
+            pass
+
+    def _cursor(self) -> int:
+        try:
+            return int(self.query_one("#columns-table", DataTable).cursor_row or 0)
+        except Exception:
+            return 0
+
+    def action_toggle(self) -> None:
+        i = self._cursor()
+        if not (0 <= i < len(self._order)):
+            return
+        k = self._order[i]
+        if k in _CATALOG_PINNED:
+            self.app.bell()
+            return
+        if k in self._hidden:
+            self._hidden.discard(k)
+        else:
+            self._hidden.add(k)
+        self._refill(cursor=i)
+
+    def _move(self, delta: int) -> None:
+        i = self._cursor()
+        j = i + delta
+        if not (0 <= i < len(self._order) and 0 <= j < len(self._order)):
+            return
+        self._order[i], self._order[j] = self._order[j], self._order[i]
+        self._refill(cursor=j)
+
+    def action_move_up(self) -> None:
+        self._move(-1)
+
+    def action_move_down(self) -> None:
+        self._move(1)
+
+    def action_reset(self) -> None:
+        self._order = [k for k, _ in _CATALOG_COLUMNS]
+        self._hidden = set()
+        self._refill(cursor=0)
+
+    def action_apply(self) -> None:
+        self.dismiss({"order": list(self._order), "hidden": sorted(self._hidden)})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class PodCreateScreen(ModalScreen):
@@ -6337,6 +6704,8 @@ class CockpitApp(App):
         Binding("slash", "filter_catalog", "Filter", show=False),
         Binding("backslash", "toggle_catalog_model", "Model", show=False),
         Binding("h", "toggle_catalog_deprecated", "Deprecated", show=False),
+        # #724 — [|] catalog column picker (show/hide + reorder, persisted).
+        Binding("vertical_bar", "catalog_columns", "Columns", show=False),
         Binding("u", "copy_endpoint", "API URL", show=False),
         Binding("e", "explain", "Explain", show=False),
         # 2-mode merge: [1] = merged Run & Operate, [2] = Bring & Validate lane.
@@ -9444,6 +9813,14 @@ class CockpitApp(App):
         if self._active_mode == 0 and self._current_subtab() == "tab-catalog":
             try:
                 self.query_one("#catalog-pane", CatalogPane).toggle_deprecated()
+            except Exception:
+                pass
+
+    def action_catalog_columns(self) -> None:
+        """[|] catalog column picker (#724) — merged mode 0 · Catalog tab."""
+        if self._active_mode == 0 and self._current_subtab() == "tab-catalog":
+            try:
+                self.query_one("#catalog-pane", CatalogPane).open_columns_picker()
             except Exception:
                 pass
 
