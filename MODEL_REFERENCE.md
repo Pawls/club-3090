@@ -31,10 +31,12 @@ Single card (GPU1 → desktop stays snappy on GPU0):
 
 | serve.sh name | Port | Engine | Ctx | TPS narr/code | Conc. | MTP | Vision | Thinking | Alignment | Status |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **apex** ⭐ daily text | 8056 | ik-llama | **262K** | ~84–90 (L) | 1 | off¹ | — | ON + preserve | stock | ✅ |
-| **apex-vision-ik** ⭐ screenshots | 8057 | ik-llama | 131K | ≈apex (est.) | 1 | off¹ | ✅ image | ON + preserve | stock | 🧪 |
+| **apex** ⭐ daily text | 8056 | ik-llama | **262K** | ~84–90 (L) | 1 | off¹ | — | ON, strip¹⁰ | stock | ✅ |
+| **apex-vision-ik** ⭐ screenshots | 8057 | ik-llama | 131K | ≈apex (est.) | 1 | off¹ | ✅ image | ON, strip¹⁰ · windowable¹¹ | stock | 🧪 |
 | apex-vision-mainline (backup) | 8058 | llama.cpp | 200K | unmeasured² | 1 | none | ✅ image | OFF | stock | 🧪 |
-| apex-fit (alt lane) | 8057 | ik-llama | 262K³ | 103/149 (R, w/ MTP)³ | 1 | off¹ | — | ON + preserve | stock | ✅ |
+| **byteshape-vision** (stock A/B) | 8059 | ik-llama | 131K | ≈apex (est.) | 1 | off (dropped) | ✅ image | OFF, windowable¹¹ | **stock** (not apex) | 🧪 |
+| apex-fit (alt lane) | 8057 | ik-llama | 262K³ | 103/149 (R, w/ MTP)³ | 1 | off¹ | — | ON, strip¹⁰ | stock | ✅ |
+| **27b-vision** ⭐ BoxelBuilder | 8020 | ik-llama | **160K** | ~51 (est.) | 1 | n=2 | ✅ image | OFF | stock | ✅ |
 | 27b-single | 8021 | vLLM | **28K** | 57.8/80.0 (L) | 1 (hard) | n=3 (hard) | ✅ image | OFF + preserve | stock | 🧪 |
 | 27b-minimal (fallback) | 8021 | vLLM | 65K | ~32/33 (R) | 1 | none | — | OFF | stock | ✅ |
 
@@ -44,12 +46,12 @@ Dual card (both 3090s):
 |---|---|---|---|---|---|---|---|---|---|---|
 | **deckard** ⭐ hard reasoning | 8199 | llama.cpp | 131K | 36/46 (R)⁴ | 1 | n=2 (+59/104%) | — | ON + preserve | **uncensored** | ✅ |
 | deckard-vision | 8200 | llama.cpp | 131K | ≈deckard −ε | 1 | n=2 kept | ✅ image | ON + preserve | **uncensored** | 🧪 |
-| hauhau | 8073 | llama.cpp | **262K** | 113/~150 (R)⁴ | 1 | n=3 (code-max)⁵ | — | ON + preserve | **uncensored** | 🧪 |
-| hauhau-vision | 8073 | llama.cpp | 262K | ≈hauhau (est.) | 1 | n=3 kept | ✅ image | ON + preserve | **uncensored** | 🧪 |
+| hauhau | 8073 | llama.cpp | **262K** | 113/~150 (R)⁴ | 1 | n=3 (code-max)⁵ | — | ON, strip¹⁰ | **uncensored** | 🧪 |
+| hauhau-vision | 8073 | llama.cpp | 262K | ≈hauhau (est.) | 1 | n=3 kept | ✅ image | ON, strip¹⁰ | **uncensored** | 🧪 |
 | carnice (agent brain) | 8070 | beellama | **262K** | 40.7/44.0 (R)⁴ | 1 | n=1 (n=2 = +13%) | — | ON⁶ + preserve | stock (agentic SFT) | 🧪 |
 | **27b** ⭐ big-ctx images | 8010 | vLLM TP=2 | **262K** | 54.0/67.8 (L) | 2 | n=3 | ✅ image | ON + preserve | stock | ✅ |
-| **35b-a3b** ⭐ subagents | 8051 | vLLM TP=2 | **262K** | ~85 (L); **agg ~265 @N=4** | **4** | none⁷ | ✅ 2 images | ON + preserve | stock | ✅ |
-| agents-a1 | 8072 | vLLM TP=2 | **262K** | ~85 (L est.); 154 (R) | 1 | none (no head) | ✅ 2 images | OFF⁸ (hook forces ON) | stock | ⚠️ |
+| **35b-a3b** ⭐ subagents | 8051 | vLLM TP=2 | **262K** | ~85 (L); **agg ~265 @N=4** | **4** | none⁷ | ✅ 2 images | ON, strip¹⁰ | stock | ✅ |
+| agents-a1 | 8072 | vLLM TP=2 | **262K** | ~85 (L est.); 154 (R) | 1 | none (no head) | ✅ 2 images | OFF⁸ (hook: think ON, strip¹⁰) | stock | ⚠️ |
 | omni (media in) | 8042 | vLLM-Omni | **48K**⁹ | ~164 text (R) | 8/stage | none | ✅ image/audio/video | not a thinking model | stock | 🧪 |
 | apex-yarn-1m (park) | 8057 | ik-llama | 1M (YaRN 4×) | unmeasured | 1 | n=5 | — | OFF (no .env here) | stock | 🧪 deprecate? |
 
@@ -77,6 +79,21 @@ Hitting `:8072` directly = thinking OFF.
 ⁹ Omni's stages run 49152 in the deploy-config because GPU0 shares ~1.7 GB with the desktop;
 native max is 65536 (see §3). Also: requests MUST carry `"modalities":["text"]` and a sane
 `max_tokens` — the LiteLLM hook injects both; **use it via `:4000` or Open WebUI, not raw**.
+¹⁰ Preserve default flipped to **strip** on the a3b MoE lanes (2026-07-20): replaying every
+prior turn's `<think>` seeded thought-loops + cost quality on always-reasoning a3b (apex family,
+hauhau, 35b-a3b, agents-a1). Thinking itself stays ON — only the prior-turn carryover is dropped.
+`./serve.sh <name> --preserve` re-enables per-boot. For the vLLM `35b-a3b`/`agents-a1` routes the
+LiteLLM re-inline hook (`custom_hooks.py`) was also updated so it can't re-inject the reasoning.
+27b keeps preserve (real replay path, not a loop source).
+¹¹ byteshape-vision (2026-07-20): the **stock** Qwen3.6-35B-A3B single-card vision lane (byteshape
+IQ4_XS = stock base + MTP head, NOT the apex fine-tune), added as (a) the apex-vs-stock loop A/B —
+run it with `--preserve` and see if stock loops the way apex does, isolating fine-tune vs base — and
+(b) the `--preserve-window` test bed. It mounts the custom template (same standard Qwen3.6 template +
+the `preserve_window` branch), so the A/B controls for template. 🧪 pending the full gate.
+Same day, **apex-vision-ik** was converted from native `--jinja` to this same custom template
+(`--jinja` + `--chat-template-file`) so `--preserve-window` works on the screenshot driver too —
+the template's `render_content` handles image/video markers (Qwen3-VL), so vision is retained;
+re-verify an image round-trip at first boot since the template path changed.
 
 ### Refusals / alignment (asked for "refusal rates" — honest answer)
 
@@ -125,7 +142,8 @@ below only matter for the models NOT already there.
 | 27b-single | 28K | ~31–32K | util already 0.94 (max safe); nothing else left — MTP n=3 is hardcoded | dead end on one card |
 | ↳ via 27b-minimal | 65K | 65K | drop MTP **and** vision (that's what minimal.yml is) | ~32 TPS (−60%), no images; still not 262K |
 | ↳ real fix | — | **262K** | run the dual compose (`27b`) | costs both cards; that's the whole trade |
-| apex-vision-ik | 131K | **~160K** probe | raise `VISION_CTX_SIZE` stepwise (KV is already q4_0); the ik 27b-vision sibling tops out ~160K, expect similar | boot-OOM risk; test, don't assume. 262K+vision on ONE card: not realistic |
+| apex-vision-ik | 131K | **~160K** probe | raise `VISION_CTX_SIZE` stepwise (KV is already q4_0); the ik `27b-vision` sibling ships at ~160K, expect similar | boot-OOM risk; test, don't assume. 262K+vision on ONE card: not realistic |
+| 27b-vision | 160K | 160K (shipped default) | already at the verified [8/8] vision ceiling (KV q4_0 + fill overhead, not the image buffer); 180K OOMs at fill. Push higher only by dropping MTP + asym KV, then re-verify at fill | boot-OOM risk above 160K; the 262K text sibling is dual-card only |
 | apex-vision-mainline | 200K | **262K** maybe | raise `CTX_SIZE` toward 262144 (compose header: "if boot VRAM allows"); V-cache already q5_0 | unverified; mainline engine, thinking currently OFF here |
 | deckard | 131K | ~192K unverified | (a) `KV_TYPE=q4_0` (~halves KV; untested on this model) (b) `MTP_DRAFT_N_MAX=0` frees ~1.2 GB draft ctx (c) Q5_K_M weights (−4.6 GB) | (a) quality risk on a *deliberation* model — bad trade; (b) loses +59–104% speed; (c) quant-quality hit. **Recommendation: leave at 131K**; 40B dense KV is the expensive kind. 192K OOM'd at q8. |
 | deckard-vision | 131K | same as deckard −2.1 GB headroom (mmproj+draft) | same levers | same verdict |
@@ -170,6 +188,7 @@ because an exported shell var beats the compose-dir `.env` in docker-compose int
 |---|---|---|
 | `--think` / `--no-think` | reasoning on/off | vLLM `ENABLE_THINKING` true/false · llama.cpp/ik/beellama `REASONING` on/off |
 | `--preserve` / `--no-preserve` | keep vs strip prior-turn `<think>` from ctx | `PRESERVE_THINKING` true/false (all engines) |
+| `--preserve-window <N>` | **bounded** carryover: keep `<think>` from only the last N query blocks (0=off · 1=current only · 2=last two · ≥total=all). The anti-thought-loop middle ground between strip and preserve-all. | `PRESERVE_THINKING_WINDOW` → custom `apex-qwen-chat-template.jinja` `preserve_window` kwarg. **Custom-template lanes only** (`apex`, `apex-fit`, `apex-vision-ik`, `byteshape-vision`, + apex `mtp`/`long`); errors on native-template / vLLM lanes. Mutually exclusive with `--no-preserve`. |
 
 - **Neither costs VRAM.** KV pool, concurrency (`max_num_seqs`), MTP depth, ctx, and quant are all
   fixed at engine boot — these flags only shape the request. So they're flags, not separate composes;
@@ -183,14 +202,14 @@ because an exported shell var beats the compose-dir `.env` in docker-compose int
 
 | Compose dir (`models/…`) | Effective overrides |
 |---|---|
-| `qwen3.6-35b-a3b/ik-llama/…/single/mudler-apex-compact/` (apex, apex-fit, apex-vision-ik share it) | `CUDA_VISIBLE_DEVICES=1` · `MTP_DRAFT_N_MAX=0` · `NP=1` · `CTX_SIZE=262144` · `UBATCH_SIZE=1024` · `REASONING=on` · `PRESERVE_THINKING=true` |
+| `qwen3.6-35b-a3b/ik-llama/…/single/mudler-apex-compact/` (apex, apex-fit, apex-vision-ik share it) | `CUDA_VISIBLE_DEVICES=1` · `MTP_DRAFT_N_MAX=0` · `NP=1` · `CTX_SIZE=262144` · `UBATCH_SIZE=1024` · `REASONING=on` · `PRESERVE_THINKING=false`¹⁰ |
 | `qwen3.6-35b-a3b/llama-cpp/…/single/mudler-apex-compact/` (apex-vision-mainline) | `CUDA_VISIBLE_DEVICES=1` · `CTX_SIZE=200000` · `KV_TYPE_K=q8_0` · `KV_TYPE_V=q5_0` · `REASONING=off` · `PRESERVE_THINKING=false` · `SERVED_NAME=apex-35b-vision` · `PORT=8058` |
 | `qwen3.6-40b-deckard/llama-cpp/…/dual/piehsoft-q6k/` | `CUDA_VISIBLE_DEVICES=0,1` · `TENSOR_SPLIT=1.1,1.0` (mtp.yml only — vision.yml uses its own even-split var) · `CTX_SIZE=131072` · `KV_TYPE=q8_0` · `NP=1` · `MTP_DRAFT_N_MAX=2` · `REASONING=on` · `PRESERVE_THINKING=true` · `PORT=8199` |
-| `qwen3.6-35b-a3b/llama-cpp/…/dual/morikomorizz-q6kp/` | `CUDA_VISIBLE_DEVICES=0,1` · `TENSOR_SPLIT=0.5,0.5` (even — GPU0 carries the desktop) · `CTX_SIZE=262144` · `KV_TYPE=q8_0` · `NP=1` · `MTP_DRAFT_N_MAX=3` · `REASONING=on` · `PRESERVE_THINKING=true` · `SERVED_NAME=hauhau-35b` · `PORT=8073` |
+| `qwen3.6-35b-a3b/llama-cpp/…/dual/morikomorizz-q6kp/` | `CUDA_VISIBLE_DEVICES=0,1` · `TENSOR_SPLIT=0.5,0.5` (even — GPU0 carries the desktop) · `CTX_SIZE=262144` · `KV_TYPE=q8_0` · `NP=1` · `MTP_DRAFT_N_MAX=3` · `REASONING=on` · `PRESERVE_THINKING=false`¹⁰ · `SERVED_NAME=hauhau-35b` · `PORT=8073` |
 | `qwen3.6-27b/beellama/…/dual/carnice-v2-q8/` | `REASONING=on` (was `ENABLE_THINKING=true`, a no-op — fixed 2026-07-10, behavior unchanged) · `PRESERVE_THINKING=true` · `NO_MMAP=true` |
 | `qwen3.6-27b/vllm/…/single/autoround-int4/` | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512` · `GPU_MEMORY_UTILIZATION=0.94` · `ENABLE_THINKING=false` · `PRESERVE_THINKING=true` |
 | `qwen3.6-27b/vllm/…/dual/autoround-int4/` | `GPU_MEMORY_UTILIZATION=0.83` (desktop headroom) · `ENABLE_THINKING=true` · `PRESERVE_THINKING=true` (alloc-conf + `MTP_SPEC_TOKENS` commented out) |
-| `qwen3.6-35b-a3b/vllm/…/dual/autoround-int4/` | `GPU_MEMORY_UTILIZATION=0.83` · `ENABLE_THINKING=true` · `PRESERVE_THINKING=true` · `MAX_NUM_SEQS=4` |
+| `qwen3.6-35b-a3b/vllm/…/dual/autoround-int4/` | `GPU_MEMORY_UTILIZATION=0.83` · `ENABLE_THINKING=true` · `PRESERVE_THINKING=false`¹⁰ (+ LiteLLM re-inline hook drops `qwen3.6-35b-a3b`) · `MAX_NUM_SEQS=4` |
 | `qwen3-omni-30b-a3b/vllm-omni/…/dual/autoround-int4/` | `PORT=8042` only (ctx lives in `qwen3_omni_3090.yaml`, not `.env`) |
 | `agents-a1/vllm/…/dual/fp8-dynamic/` | `TEMP=0.85` `TOP_P=0.95` `TOP_K=20` `MIN_P=0.0` `REPEAT_PENALTY=1.0` · `PORT=8072` (util + max-len commented → 0.92 / 262144) |
 | `qwen3.6-35b-a3b/ik-llama/…/dual/mudler-apex-quality/` (yarn-1m) | **no `.env` exists** → pure compose defaults (incl. `REASONING=off`) |
