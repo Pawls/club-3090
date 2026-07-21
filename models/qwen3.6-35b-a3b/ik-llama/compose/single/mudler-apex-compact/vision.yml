@@ -11,7 +11,11 @@
 #              for headroom. ~near-lossless vs symmetric q8, ~0.5 GB cheaper.
 #              Override via KV_TYPE_K / KV_TYPE_V in the co-located .env.
 #   Vision:    YES — mmproj-BF16 (~862 MB) + --image-{min,max}-tokens
-#   Template:  GGUF-embedded (--jinja) — native, so image markers are handled
+#   Template:  CUSTOM apex-qwen-chat-template.jinja (--jinja + --chat-template-file), same
+#              as the apex text composes — its render_content handles image/video markers
+#              (Qwen3-VL multimodal), and it adds the preserve_window kwarg (--preserve-window).
+#              Swapped in from native --jinja on 2026-07-20 to enable windowing here. 🧪 re-verify
+#              vision at boot (image round-trip) since the template path changed.
 #   Max ctx:   262144 (full native) via VISION_CTX_SIZE in the .env. VERIFIED 2026-07-18
 #              on GPU1 (dedicated): 20.8 GB used / ~3.7 GB free at 262K + vision + asym
 #              q8/q5 KV after dropping --spec-type (see command below). Vision confirmed
@@ -61,6 +65,7 @@ services:
       - "${ESTATE_PORT:-${APEX_VISION_PORT:-8057}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+      - ../../../patches/apex-qwen-chat-template.jinja:/etc/apex-qwen-chat-template.jinja:ro
     # WSL2: Docker device_ids does NOT isolate GPUs (both stay visible to CUDA →
     # --fit would split across both over the x4 link). Pin via CUDA_VISIBLE_DEVICES
     # inside the container. =1 → GPU1 only, freeing GPU0 for the desktop. Matches long.yml.
@@ -92,18 +97,23 @@ services:
       -khad
       -vhad
       --recurrent-ckpt-mode auto
+      --cache-ram ${CACHE_RAM:-0}
       --merge-qkv
       -fa on
       --jinja
+      --chat-template-file /etc/apex-qwen-chat-template.jinja
       --parallel-tool-calls
       --reasoning ${REASONING:-off}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
-      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}}'
+      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}, "preserve_window":${PRESERVE_THINKING_WINDOW:-0}}'
       --temp ${TEMP:-${TEMPERATURE:-0.6}}
       --top-p ${TOP_P:-0.95}
       --top-k ${TOP_K:-20}
       --min-p ${MIN_P:-0.0}
       --repeat-penalty ${REPEAT_PENALTY:-1.0}
+      --repeat-last-n ${REPEAT_LAST_N:-64}
+      --presence-penalty ${PRESENCE_PENALTY:-0.0}
+      --frequency-penalty ${FREQUENCY_PENALTY:-0.0}
     deploy:
       resources:
         reservations:

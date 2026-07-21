@@ -48,14 +48,16 @@
 #   --no-mmap additionally avoids first-request prefill stalls on
 #   cold-cache boots regardless of offload mode.
 #
-# Why --cache-ram 4096:
-#   Partial-offload host-RAM headroom for the q8 weights (NOT I-Compact-
-#   specific) — lower than ik-llama's 8192 default leaves more host RAM for
-#   the partially-offloaded weights. Confirmed by @laurimyllari (#243).
-#   WARNING — RAM-constrained (<=32 GB) systems: MTP n=4's draft working set
-#   + this 4 GB prompt-cache reservation + the partial-offloaded q8 weights
-#   can OOM (reported by @laurimyllari on 32 GB, #243). On tight-RAM boxes,
-#   lower CACHE_RAM_MB to 2048 or 0 (env override below) to free host RAM.
+# Why --cache-ram 0 (default, was 4096):
+#   ik-llama's RAM prompt-cache does FUZZY cross-request reuse (--cache-ram-similarity
+#   0.50 default): it restores a PRIOR conversation's KV state whenever a new prompt is
+#   >=50% similar, bleeding stale context between independent chats. Proven 2026-07-21 —
+#   apex "remembered earlier sessions" / short-circuited its reasoning until --cache-ram 0
+#   (8/8 repeats clean after). 0 disables the cache entirely. For THIS partial-offload lane
+#   it's a double win: no cross-chat bleed AND MORE host RAM for the q8 weights (this was
+#   already trimmed 8192->4096 per @laurimyllari #243; 0 trims all of it). Standard knob is
+#   CACHE_RAM (all ik lanes); CACHE_RAM_MB kept as a legacy fallback. Re-enable ONLY if you
+#   accept the cross-chat bleed AND have host-RAM headroom: CACHE_RAM=4096.
 #
 # Override defaults via .env or shell:
 #   MODEL_DIR              host dir to mount as /models  (default: ../../../../../../models-cache)
@@ -68,7 +70,8 @@
 #   KV_TYPE_V              V quant type        (default: q5_0)
 #   MTP_DRAFT_N_MAX        MTP draft tokens    (default: 4)
 #   DRAFT_P_MIN            draft accept floor  (default: 0.0)
-#   CACHE_RAM_MB           --cache-ram         (default: 4096)
+#   CACHE_RAM              --cache-ram (MiB)   (default: 0 = disabled; prevents cross-chat bleed)
+#   CACHE_RAM_MB           legacy alias for CACHE_RAM (default: 0)
 #   REASONING              thinking gate       (default: off)
 #   REASONING_FORMAT       reasoning routing   (default: deepseek)
 #   PORT                   host port           (default: 8057)
@@ -105,13 +108,13 @@ services:
       --merge-qkv
       -fa on
       --no-mmap
-      --cache-ram ${CACHE_RAM_MB:-4096}
+      --cache-ram ${CACHE_RAM:-${CACHE_RAM_MB:-0}}
       --jinja
       --chat-template-file /etc/apex-qwen-chat-template.jinja
       --parallel-tool-calls
       --reasoning ${REASONING:-off}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
-      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}}'
+      --chat-template-kwargs '{"preserve_thinking":${PRESERVE_THINKING:-false}, "preserve_window":${PRESERVE_THINKING_WINDOW:-0}}'
       --temp ${TEMP:-${TEMPERATURE:-0.6}}
       --top-p ${TOP_P:-0.95}
       --top-k ${TOP_K:-20}
