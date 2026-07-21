@@ -75,6 +75,13 @@ services:
       - "${ESTATE_PORT:-${PORT:-8058}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # WSL2: Docker device_ids does NOT isolate GPUs (the image bakes
+    # NVIDIA_VISIBLE_DEVICES=all) — pin via CUDA_VISIBLE_DEVICES inside the
+    # container. =1 → GPU1 only. Without this the model SPLITS across both cards
+    # and decode/prefill bounces over the PCIe x4 link (no NVLink) → minutes-long
+    # prefill that looks like a hang. Matches the ik-llama vision lanes.
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
     command: >-
       --host 0.0.0.0
       --port 8080
@@ -89,6 +96,7 @@ services:
       --cache-type-k ${KV_TYPE_K:-q8_0}
       --cache-type-v ${KV_TYPE_V:-q5_0}
       -np ${NP:-1}
+      --cache-ram ${CACHE_RAM:-0}
       --jinja
       --reasoning ${REASONING:-off}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
