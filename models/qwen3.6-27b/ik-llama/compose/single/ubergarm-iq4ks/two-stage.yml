@@ -126,6 +126,7 @@ services:
       --spec-type ngram-mod:n_max=${NGRAM_N_MAX:-4},n_min=${NGRAM_N_MIN:-2},ngram_size_n=${NGRAM_SIZE_N:-16}
       --spec-type mtp:n_max=${MTP_N_MAX:-3},p_min=${MTP_P_MIN:-0.0}
       --recurrent-ckpt-mode auto
+      --cache-ram ${CACHE_RAM:-0}
       --merge-qkv
       -fa on
       --jinja

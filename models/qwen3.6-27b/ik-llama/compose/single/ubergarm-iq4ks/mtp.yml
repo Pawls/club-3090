@@ -138,6 +138,7 @@ services:
       -ngld 99
       --spec-type mtp:n_max=${MTP_DRAFT_N_MAX:-2},p_min=${DRAFT_P_MIN:-0.0}
       --recurrent-ckpt-mode auto
+      --cache-ram ${CACHE_RAM:-0}
       --merge-qkv
       -fa on
       --jinja
