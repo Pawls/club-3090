@@ -8,23 +8,35 @@ model_list:
   # primary `qwen3.6-27b` (+ its own quant-specific name as an alias), so this route
   # matches whichever scene is on :8010 regardless of quant (#482/#490). The quant
   # differs by compose path/port + the scene's alias, NOT by the primary name.
-  - model_name: qwen3.6-27b
+  - model_name: qwen3.6-27b-dual
     litellm_params:
       model: openai/qwen3.6-27b
       api_base: http://host.docker.internal:8010/v1
       api_key: EMPTY
 
   # Back-compat alias (pre-2026-07 clients that hardcode the old name); same upstream.
+  # Hidden from the Hermes picker (2026-07-20 rename) — kept only so old refs resolve.
   - model_name: qwen3.6-27b-autoround
     litellm_params:
       model: openai/qwen3.6-27b
       api_base: http://host.docker.internal:8010/v1
       api_key: EMPTY
 
+  # Qwen 3.6 27B VISION — SINGLE-card ik_llama IQ4_KS + mmproj, 160K ctx, MTP n=2.
+  # For BoxelBuilder game-gen / screenshot work on one 3090 (frees the other card).
+  # Launched via `serve.sh 27b-vision` → mtp-vision.yml at :8020 (--alias qwen3.6-27b-vision).
+  # Shares the :8020 lane with 27b-minimal (GPU-mutex, one at a time); only THIS name is
+  # routed here, so there's no ambiguity. Boot it before Hermes calls this model.
+  - model_name: qwen3.6-27b-single
+    litellm_params:
+      model: openai/qwen3.6-27b-vision
+      api_base: http://host.docker.internal:8020/v1
+      api_key: EMPTY
+
   # Agents-A1 — InternScience 35B agentic MoE (⚠️ caveats; the agentic thinking-ON
   # specialist). Launched via `switch.sh vllm/agents-a1-dual` → vllm-agents-a1-dual
   # at :8072 (own port — never share a sibling's; see the slug-masquerade note).
-  - model_name: agents-a1
+  - model_name: agents-a1-dual
     litellm_params:
       model: openai/agents-a1
       api_base: http://host.docker.internal:8072/v1
@@ -32,10 +44,26 @@ model_list:
 
   # Qwen 3.6 35B-A3B (Intel AutoRound INT4 MoE) — 262K + vision, no MTP.
   # Launched via `launch.sh vllm/qwen-35b-a3b-dual` → vllm-qwen36-35b-a3b-dual at :8051.
-  - model_name: qwen3.6-35b-a3b-autoround
+  - model_name: qwen3.6-35b-a3b-dual
     litellm_params:
       model: openai/qwen3.6-35b-a3b-autoround
       api_base: http://host.docker.internal:8051/v1
+      api_key: EMPTY
+
+  # Qwen 3.6 35B-A3B STOCK + VISION — SINGLE-card ik_llama, 131K ctx. Stock base (NOT the apex
+  # fine-tune), custom template with preserve_window. PRIMARY is now the unsloth UD-IQ4_XS
+  # DYNAMIC quant (same ~18 GB as byteshape, more bits on the MoE router/attention → better
+  # reasoning): `serve.sh ud-vision` → unsloth-ud-iq4xs/vision.yml at :8060 (--alias
+  # qwen3.6-35b-a3b-vision). The prior byteshape IQ4_XS lane was retired 2026-07-21 (its
+  # "shallow reasoning" turned out to be the ik cache-ram bleed, not the quant — see below).
+  # Matched by the custom_hooks re-inline set ("qwen3.6-35b-a3b" tag), so cross-turn <think>
+  # re-inline is active per preserve_state.json mode — PROVEN at this layer (recalled a secret
+  # stashed only in a prior turn's reasoning field). End-to-end in Hermes depends on Hermes
+  # replaying reasoning_content. Boot the model before Hermes calls it.
+  - model_name: qwen3.6-35b-a3b-single
+    litellm_params:
+      model: openai/qwen3.6-35b-a3b-vision
+      api_base: http://host.docker.internal:8060/v1
       api_key: EMPTY
 
   # Gemma 4 31B — dual-card @262K. Started by `gpu-mode gemma` at :8032.
@@ -44,13 +72,13 @@ model_list:
   # whichever scene is on :8032 regardless of quant. This also repairs the prior drift:
   # the default is now cyankiwi qat-AWQ-INT4 (bf16 KV) — it never served
   # `gemma-4-31b-autoround`, so the old route would 404; the shared primary fixes it (#482).
-  - model_name: gemma-4-31b
+  - model_name: gemma-4-31b-dual
     litellm_params:
       model: openai/gemma-4-31b
       api_base: http://host.docker.internal:8032/v1
       api_key: EMPTY
 
-  # Back-compat alias; same upstream.
+  # Back-compat alias; same upstream. Hidden from the Hermes picker (2026-07-20 rename).
   - model_name: gemma-4-31b-autoround
     litellm_params:
       model: openai/gemma-4-31b
@@ -63,7 +91,7 @@ model_list:
   # Gemma 4 12B (gemma4_unified arch, Intel AutoRound INT8) + bf16 KV + MTP n=2, single card.
   # Started by `gpu-mode gemma12b` → vllm-gemma-4-12b-int8-mtp at :8038 (served gemma-4-12b-int8).
   # Single-card scene: GPU-mutex with the dual models and ai-studio.
-  - model_name: gemma-4-12b-int8
+  - model_name: gemma-4-12b-single
     litellm_params:
       model: openai/gemma-4-12b-int8
       api_base: http://host.docker.internal:8038/v1
@@ -78,7 +106,7 @@ model_list:
   # Qwen3.6-40B-Deckard (dense 40B uncensored, llama.cpp dual 3090, MTP n=2).
   # Launched via `launch.sh llamacpp/deckard40B-dual-mtp` → llama-cpp-deckard-40b at :8199.
   # Both-cards mode (GPU-mutex with ai-studio and all single-card services).
-  - model_name: deckard-40b
+  - model_name: deckard-40b-dual
     litellm_params:
       model: openai/deckard-40b
       api_base: http://host.docker.internal:8199/v1
@@ -88,7 +116,7 @@ model_list:
   # mmproj (mradermacher, hidden 5120), so it accepts images. MTP traded away (mtmd ⊕
   # draft-mtp exclusive). Alternative to deckard-40b above; both selectable, one runs at
   # a time (GPU mutex). vision.yml @ :8200. llama-cpp/compose/dual/piehsoft-q6k/vision.yml.
-  - model_name: deckard-40b-vision
+  - model_name: deckard-40b-dual-vision
     litellm_params:
       model: openai/deckard-40b-vision
       api_base: http://host.docker.internal:8200/v1
@@ -97,7 +125,7 @@ model_list:
   # Qwen3.6-35B-A3B-Uncensored-HauhauCS ("hauhau" — MoE, llama.cpp dual 3090, MTP n=3,
   # reasoning ON, 262K). Launched via `launch.sh llamacpp/hauhaucs-35ba3b-dual` → :8073.
   # Both-cards mode (GPU-mutex). Served alias set to hauhau-35b via SERVED_NAME in its .env.
-  - model_name: hauhau-35b
+  - model_name: hauhau-35b-dual
     litellm_params:
       model: openai/hauhau-35b
       api_base: http://host.docker.internal:8073/v1
@@ -106,25 +134,21 @@ model_list:
   # === Local single-rig additions (Paul, 2026-07) — carnice / ik-single / omni ===
 
   # Carnice-V2-27B Q8 (beellama, dual) at :8070. Text-only agentic SFT.
-  - model_name: carnice-v2
+  - model_name: carnice-v2-dual
     litellm_params:
       model: openai/Carnice-V2-27B-Q8_0-mtp.gguf
       api_base: http://host.docker.internal:8070/v1
       api_key: EMPTY
 
-  # Qwen3.6-35B-A3B APEX compact (ik_llama, SINGLE card GPU1) at :8056. No served-name →
-  # upstream id IS the full mount path (note the // after openai/ is the prefix boundary).
-  - model_name: apex-35b-compact
-    litellm_params:
-      model: "openai//models/qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf"
-      api_base: http://host.docker.internal:8056/v1
-      api_key: EMPTY
+  # (apex-35b-compact / :8056 text-only ik_llama lane removed 2026-07-20 — Paul always
+  #  picks dual 35b-a3b over it. The apex vision lanes below stay. serve.sh `apex` still
+  #  boots the compose; it's just no longer routed through LiteLLM / shown in Hermes.)
 
   # apex-35b-vision — SAME APEX trunk on MAINLINE llama.cpp + Qwen3.6-35B-A3B mmproj,
   # so it accepts images (the ik-llama apex above cannot — no --mmproj). MTP off,
   # friendly --alias, single card @ :8058. GPU-mutex with every other GPU service.
   # llama-cpp/compose/single/mudler-apex-compact/vision.yml.
-  - model_name: apex-35b-vision
+  - model_name: apex-35b-single-vision-mainline
     litellm_params:
       model: openai/apex-35b-vision
       api_base: http://host.docker.internal:8058/v1
@@ -134,7 +158,7 @@ model_list:
   # (keeps its MoE speed) + --mmproj, vs apex-35b-vision above which is on mainline
   # llama.cpp. Boot-verified 2026-07-10 (image round-trips, 42/42 layers on GPU). @:8057.
   # ik-llama/compose/single/mudler-apex-compact/vision.yml.
-  - model_name: apex-35b-vision-ik
+  - model_name: apex-35b-single-vision
     litellm_params:
       model: openai/apex-35b-vision-ik
       api_base: http://host.docker.internal:8057/v1
@@ -143,7 +167,7 @@ model_list:
   # Qwen3-Omni-30B (vllm-omni, dual) at :8042 — vision/audio brain. Full-path upstream id.
   # max_tokens is FORCE-CAPPED to 8192 by the custom_hooks.py pre-call hook (Hermes requires
   # context_length>=64K, then uses it AS max_tokens → 0 input room without the cap). See that file.
-  - model_name: omni-30b
+  - model_name: omni-30b-dual
     litellm_params:
       model: "openai//models/qwen3-omni-30b-a3b-instruct-int4-autoround"
       api_base: http://host.docker.internal:8042/v1
