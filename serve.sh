@@ -32,6 +32,14 @@
 # Not all models can toggle: agents-a1 + 27b-minimal hardcode thinking off; omni isn't a
 # thinking model. --list shows each model's state; a bad toggle errors instead of no-op'ing.
 #
+# Thought-loop control (two DIFFERENT layers — see MODEL_REFERENCE):
+#   --preserve-window <N>         CROSS-turn: keep only the last N user-query blocks' <think>
+#                                 (0=off · 2=last two · big=all). Bounded carryover so stale
+#                                 reasoning can't seed loops across turns. Custom-template lanes.
+#   --anti-loop | --no-anti-loop  INTRA-generation: repeat + frequency penalty. Breaks runaway
+#                                 decode + repeated-preamble loops WITHIN one turn (which a turn's
+#                                 own kept <think> makes the window powerless against). Vision lanes.
+#
 # Context override (UNLIKE the toggles above, this IS a boot-time KV allocation — a bigger
 # window costs VRAM and can OOM at load; a smaller one frees it):
 #   --ctx <N>                     set the context window for this boot. Auto-targets the
@@ -81,6 +89,8 @@ declare -A COMPOSE=(
   [agents-a1]="models/agents-a1/vllm/compose/dual/fp8-dynamic/fp8.yml"
   # -- ours (pawl-custom only; not on repo master)
   [apex-vision-ik]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/vision.yml"
+  [ud-vision]="models/qwen3.6-35b-a3b/ik-llama/compose/single/unsloth-ud-iq4xs/vision.yml"
+  [27b-vision]="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp-vision.yml"
   [apex-vision-mainline]="models/qwen3.6-35b-a3b/llama-cpp/compose/single/mudler-apex-compact/vision.yml"
   [deckard-vision]="models/qwen3.6-40b-deckard/llama-cpp/compose/dual/piehsoft-q6k/vision.yml"
   [hauhau-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/vision.yml"
@@ -92,7 +102,8 @@ declare -A GROUP=(
   [apex]=repo [apex-fit]=repo [27b]=repo [27b-minimal]=repo [35b-a3b]=repo
   [carnice]=repo [deckard]=repo [hauhau]=repo [omni]=repo [agents-a1]=repo
   [apex-vision-ik]=ours [apex-vision-mainline]=ours [deckard-vision]=ours
-  [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours
+  [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours [27b-vision]=ours
+  [ud-vision]=ours
 )
 
 declare -A INFO=(
@@ -107,6 +118,8 @@ declare -A INFO=(
   [omni]=":8042  dual stage-parallel · 48K · image/audio/VIDEO in — use via :4000, not raw"
   [agents-a1]=":8072  dual vLLM · 262K · agentic (thinking ON only via LiteLLM hook)"
   [apex-vision-ik]=":8057  apex-35b-a3b (Q4_K_M) · single GPU1 · 262K · vision · asym q8/q5 KV · ~90 TPS — ⭐ screenshot driver"
+  [ud-vision]=":8060  STOCK 35b-a3b (unsloth UD-IQ4_XS) · single GPU1 · 131K · vision · DYNAMIC quant — ⭐ stock single-card vision"
+  [27b-vision]=":8020  single · 160K · vision · IQ4_KS + MTP · ~51 TPS — ⭐ BoxelBuilder gen (shares :8020 lane w/ 27b-minimal, GPU-mutex)"
   [apex-vision-mainline]=":8058  apex-35b-a3b (Q4_K_M) · single GPU1 · 200K · vision · mainline build — backup"
   [deckard-vision]=":8200  dual · 131K · uncensored · vision + MTP kept"
   [hauhau-vision]=":8073  dual · 262K · uncensored · vision + MTP kept"
@@ -121,6 +134,9 @@ DECKARD_GGUF="qwen3.6-40b-deckard-gguf/piehsoft-q6k/Qwen3.6-40B-Deckard-MTP-Q6_K
 DECKARD_MMPROJ="qwen3.6-40b-deckard-gguf/mmproj/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking.mmproj-Q8_0.gguf"
 HAUHAU_GGUF="qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP-Q6_K_P.gguf"
 CARNICE_GGUF="carnice-v2-27b-gguf/stuchapin-q8/Carnice-V2-27B-Q8_0-mtp.gguf"
+UBERGARM_27B_GGUF="qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf"
+QWEN_27B_MMPROJ="qwen3.6-27b-gguf/mmproj-F16.gguf"
+UD_GGUF="qwen3.6-35b-a3b-gguf/unsloth-ud-iq4xs/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
 
 declare -A WEIGHTS=(
   [apex]="$APEX_GGUF"
@@ -133,6 +149,8 @@ declare -A WEIGHTS=(
   [hauhau]="$HAUHAU_GGUF"
   [hauhau-vision]="$HAUHAU_GGUF $QWEN_MMPROJ"
   [carnice]="$CARNICE_GGUF"
+  [ud-vision]="$UD_GGUF $QWEN_MMPROJ"
+  [27b-vision]="$UBERGARM_27B_GGUF $QWEN_27B_MMPROJ"
   [27b]="qwen3.6-27b-autoround-int4"
   [27b-single]="qwen3.6-27b-autoround-int4"
   [27b-minimal]="qwen3.6-27b-autoround-int4"
@@ -149,6 +167,9 @@ declare -A HFREPO=(
   ["$DECKARD_MMPROJ"]="mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF"
   ["$HAUHAU_GGUF"]="morikomorizz/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP"
   ["$CARNICE_GGUF"]="stuchapin/Carnice-V2-27B-MTP-GGUF"
+  ["$UBERGARM_27B_GGUF"]="ubergarm/Qwen3.6-27B-GGUF"
+  ["$QWEN_27B_MMPROJ"]="unsloth/Qwen3.6-27B-GGUF"
+  ["$UD_GGUF"]="unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
   ["qwen3.6-27b-autoround-int4"]="Lorbus/Qwen3.6-27B-int4-AutoRound"
   ["qwen3.6-35b-a3b-autoround-int4"]="Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound"
   ["qwen3-omni-30b-a3b-instruct-int4-autoround"]="Intel/Qwen3-Omni-30B-A3B-Instruct-int4-AutoRound"
@@ -264,6 +285,15 @@ list_models() {
   echo "Launch-time flags (override the compose default; no .env edit — shell env wins):"
   echo "  --think / --no-think        reasoning on/off   (vLLM enable_thinking · llama.cpp --reasoning)"
   echo "  --preserve / --no-preserve  keep vs strip prior-turn <think> from context (preserve_thinking)"
+  echo "  --preserve-window <N>       BOUNDED carryover: keep <think> from only the last N query"
+  echo "                              blocks (0=off/none · 1=current only · 2=last two · big=all)."
+  echo "                              The anti-thought-loop middle ground. Custom-template lanes only"
+  echo "                              (apex, apex-fit, apex-vision-ik, ud-vision, 27b-vision); errors elsewhere. No VRAM cost."
+  echo "  --anti-loop / --no-anti-loop  INTRA-generation repetition guard (repeat + frequency"
+  echo "                              penalty). Breaks runaway decode + repeated-preamble loops that"
+  echo "                              --preserve-window CAN'T (a turn keeps its own <think>). Vision"
+  echo "                              lanes only (apex-vision-ik, ud-vision, 27b-vision). No VRAM cost."
+  echo "                              Deviates from Qwen's repeat-penalty=1.0 — on to break loops, off for fidelity."
   echo "    ^ {think:X preserve:Y} above = each model's current default; neither costs VRAM."
   echo "  --ctx <N>                   context window for this boot (auto-targets the compose's"
   echo "                              VISION_CTX_SIZE/CTX_SIZE/MAX_MODEL_LEN). Boot-time KV alloc —"
@@ -345,23 +375,34 @@ status() {
 }
 
 # --- Extract thinking/preserve toggles (order-independent; leave the rest) -----
-THINK_FLAG="" PRESERVE_FLAG="" CTX_FLAG="" GPU_FLAG="" _pos=()
+THINK_FLAG="" PRESERVE_FLAG="" WINDOW_FLAG="" CTX_FLAG="" GPU_FLAG="" ANTILOOP_FLAG="" _pos=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --think)       THINK_FLAG=on ;;
-    --no-think)    THINK_FLAG=off ;;
-    --preserve)    PRESERVE_FLAG=keep ;;
-    --no-preserve) PRESERVE_FLAG=strip ;;
-    --ctx)         shift; CTX_FLAG="${1:-}" ;;
-    --ctx=*)       CTX_FLAG="${1#--ctx=}" ;;
-    --gpu)         shift; GPU_FLAG="${1:-}" ;;
-    --gpu=*)       GPU_FLAG="${1#--gpu=}" ;;
-    *)             _pos+=("$1") ;;
+    --think)            THINK_FLAG=on ;;
+    --no-think)         THINK_FLAG=off ;;
+    --preserve)         PRESERVE_FLAG=keep ;;
+    --no-preserve)      PRESERVE_FLAG=strip ;;
+    --preserve-window)  shift; WINDOW_FLAG="${1:-}" ;;
+    --preserve-window=*) WINDOW_FLAG="${1#--preserve-window=}" ;;
+    --anti-loop)        ANTILOOP_FLAG=on ;;
+    --no-anti-loop)     ANTILOOP_FLAG=off ;;
+    --ctx)              shift; CTX_FLAG="${1:-}" ;;
+    --ctx=*)            CTX_FLAG="${1#--ctx=}" ;;
+    --gpu)              shift; GPU_FLAG="${1:-}" ;;
+    --gpu=*)            GPU_FLAG="${1#--gpu=}" ;;
+    *)                  _pos+=("$1") ;;
   esac
   shift
 done
 if [[ -n "$CTX_FLAG" && ! "$CTX_FLAG" =~ ^[0-9]+$ ]]; then
   echo "ERROR: --ctx needs an integer token count (e.g. --ctx 262144)." >&2; exit 1
+fi
+if [[ -n "$WINDOW_FLAG" && ! "$WINDOW_FLAG" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --preserve-window needs a non-negative integer (query blocks to keep; 0=off, 2=last two)." >&2; exit 1
+fi
+if [[ -n "$PRESERVE_FLAG" && "$PRESERVE_FLAG" == strip && -n "$WINDOW_FLAG" && "$WINDOW_FLAG" != 0 ]]; then
+  echo "ERROR: --no-preserve and --preserve-window N (N>0) conflict — strip drops ALL prior <think>, a window keeps some." >&2
+  echo "       Use ONE: --no-preserve (none) · --preserve-window N (last N blocks) · --preserve (all)." >&2; exit 1
 fi
 if [[ -n "$GPU_FLAG" && ! "$GPU_FLAG" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
   echo "ERROR: --gpu needs a GPU index or comma-list (e.g. --gpu 1  or  --gpu 0,1)." >&2; exit 1
@@ -369,7 +410,7 @@ fi
 set -- "${_pos[@]+"${_pos[@]}"}"
 
 case "${1:-}" in
-  ""|--help|-h) sed -n '2,48p' "$0"; exit 0 ;;
+  ""|--help|-h) sed -n '2,55p' "$0"; exit 0 ;;
   --list) list_models; exit 0 ;;
   --status) status; exit 0 ;;
   --down) echo "Evicting current GPU model:"; evict; echo "done."; exit 0 ;;
@@ -432,6 +473,43 @@ if [[ -n "$PRESERVE_FLAG" ]]; then
     echo "ERROR: '$target' doesn't thread preserve_thinking — nothing to override." >&2; exit 1
   fi
 fi
+# --preserve-window N: bounded thinking-carryover (keep the last N query blocks' <think>).
+# Only the custom apex/UD custom template reads preserve_window; native-template + vLLM lanes
+# don't. Like preserve, this is a template kwarg — no VRAM cost, exported var beats the .env.
+if [[ -n "$WINDOW_FLAG" ]]; then
+  if grep -qE '\$\{PRESERVE_THINKING_WINDOW' "$compose"; then
+    export PRESERVE_THINKING_WINDOW="$WINDOW_FLAG"
+    echo "Override: PRESERVE_THINKING_WINDOW=$WINDOW_FLAG (keep prior <think> from the last $WINDOW_FLAG query block(s); 0=off, ≥total=all)"
+  else
+    echo "ERROR: '$target' doesn't thread preserve_window — only the custom apex/UD custom template supports it." >&2
+    echo "       Windowing lanes today: apex, apex-fit, apex-vision-ik, ud-vision, 27b-vision (+ apex mtp/long composes)." >&2
+    exit 1
+  fi
+fi
+# --anti-loop: intra-generation repetition guard (kills runaway decode + repeated-preamble
+# loops WITHIN one turn — the class --preserve-window can't touch, since a turn keeps its own
+# <think> by design). This pinned ik-llama build has NO DRY tuning flags (only --dry-run,
+# unrelated), so we lean on the penalty family. frequency-penalty is the long-range lever
+# (scales with prior occurrence count → punishes re-emitting the same preamble); repeat-penalty
+# + a widened repeat-last-n catch nearer repeats. STARTING POINTS (🧪 unmeasured — A/B and
+# tune via the individual env vars). NOTE: this deliberately deviates from Qwen's recommended
+# repeat-penalty=1.0 — enable it to break loops, disable for max fidelity on repeat-heavy output
+# (code, tables). Sampler vars are pure request-shaping — no VRAM cost, exported var beats .env.
+if [[ -n "$ANTILOOP_FLAG" ]]; then
+  if grep -qE '\$\{FREQUENCY_PENALTY' "$compose"; then
+    if [[ "$ANTILOOP_FLAG" == on ]]; then
+      export REPEAT_PENALTY="${REPEAT_PENALTY:-1.1}" REPEAT_LAST_N="${REPEAT_LAST_N:-512}" FREQUENCY_PENALTY="${FREQUENCY_PENALTY:-0.4}"
+      echo "Override: anti-loop ON — repeat-penalty=$REPEAT_PENALTY repeat-last-n=$REPEAT_LAST_N frequency-penalty=$FREQUENCY_PENALTY (override any via env)"
+    else
+      export REPEAT_PENALTY=1.0 REPEAT_LAST_N=64 FREQUENCY_PENALTY=0.0 PRESENCE_PENALTY=0.0
+      echo "Override: anti-loop OFF — penalties reset to compose/Qwen defaults (repeat-penalty=1.0, frequency-penalty=0.0)"
+    fi
+  else
+    echo "ERROR: '$target' doesn't thread the penalty sampler vars — --anti-loop applies to the vision lanes only." >&2
+    echo "       Anti-loop lanes today: apex-vision-ik, ud-vision, 27b-vision." >&2
+    exit 1
+  fi
+fi
 # --ctx: boot-time context window. UNLIKE think/preserve this resizes the KV allocation,
 # so too large can OOM at load. Auto-targets the var the compose actually reads.
 if [[ -n "$CTX_FLAG" ]]; then
@@ -449,6 +527,30 @@ fi
 if [[ -n "$GPU_FLAG" ]]; then
   export CUDA_VISIBLE_DEVICES="$GPU_FLAG"
   echo "Override: CUDA_VISIBLE_DEVICES=$GPU_FLAG (GPU pin)"
+fi
+
+# Record the cross-turn preserve mode for the LiteLLM re-inline hook (custom_hooks.py §C).
+# That hook lives in a SEPARATE container and can't see this compose's env, so we hand it the
+# resolved mode via a state file it bind-mounts. GPU-mutex → one live model, so one global file
+# is exact. Mirrors what the template does: --preserve-window N → window · --preserve → full ·
+# --no-preserve → off · no flag → the compose's own effective PRESERVE_THINKING default.
+_ps_mode=off; _ps_window=0
+if [[ -n "$WINDOW_FLAG" && "$WINDOW_FLAG" -gt 0 ]]; then
+  _ps_mode=window; _ps_window="$WINDOW_FLAG"
+elif [[ "$PRESERVE_FLAG" == keep ]]; then
+  _ps_mode=full
+elif [[ "$PRESERVE_FLAG" == strip ]]; then
+  _ps_mode=off
+elif grep -qE '\$\{PRESERVE_THINKING' "$compose"; then
+  _w="$(_effective "$compose" PRESERVE_THINKING_WINDOW)"
+  if   [[ "$_w" =~ ^[0-9]+$ && "$_w" -gt 0 ]];               then _ps_mode=window; _ps_window="$_w"
+  elif [[ "$(_effective "$compose" PRESERVE_THINKING)" == true ]]; then _ps_mode=full
+  fi
+fi
+if [[ "${NO_LITELLM:-0}" != 1 && -d "$REPO/$LITELLM_DIR" ]]; then
+  # Truncate-in-place (same inode) so the bind mount reflects it live — no litellm restart.
+  printf '{"mode":"%s","window":%s}\n' "$_ps_mode" "$_ps_window" > "$REPO/$LITELLM_DIR/preserve_state.json"
+  echo "Preserve carryover: mode=$_ps_mode window=$_ps_window  (LiteLLM cross-turn <think> re-inline)"
 fi
 
 echo "Target: $compose"
