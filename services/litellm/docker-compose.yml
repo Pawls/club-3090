@@ -8,6 +8,10 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml
       - ./custom_hooks.py:/app/custom_hooks.py
+      # Cross-turn preserve mode serve.sh writes per launch (off/full/window). custom_hooks.py
+      # §C reads it to decide how much prior <think> to re-inline. Seeded file must PRE-EXIST
+      # (else Docker bind-mounts a directory). Restart litellm once to pick this mount up.
+      - ./preserve_state.json:/app/preserve_state.json:ro
     environment:
       - LITELLM_MASTER_KEY=sk-litellm-master-key
       # Temporary probe (2026-07-13): log what reasoning shape harnesses replay for the
