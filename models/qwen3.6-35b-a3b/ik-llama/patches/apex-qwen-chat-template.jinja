@@ -64,14 +64,26 @@
         {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
     {%- endif %}
 {%- endif %}
-{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{#- preserve_window (int, default 0): keep <think> from the last N *user-query* blocks.
+    0 → feature OFF (identical to upstream: only the in-flight query's thinking is kept via
+    last_query_index below). 1 → same as OFF. N≥2 → also keep thinking from the previous N-1
+    query blocks. Fewer than N queries → window_start_index lands on the first query (keep all).
+    Bounded carryover — the anti-thought-loop middle ground between strip and preserve-all. #}
+{%- set preserve_window = preserve_window if preserve_window is defined else 0 %}
+{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1, user_seen=0, window_start_index=messages|length - 1) %}
 {%- for message in messages[::-1] %}
     {%- set index = (messages|length - 1) - loop.index0 %}
-    {%- if ns.multi_step_tool and message.role == "user" %}
+    {%- if message.role == "user" %}
         {%- set content = render_content(message.content, false)|trim %}
         {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}
-            {%- set ns.multi_step_tool = false %}
-            {%- set ns.last_query_index = index %}
+            {%- if ns.multi_step_tool %}
+                {%- set ns.multi_step_tool = false %}
+                {%- set ns.last_query_index = index %}
+            {%- endif %}
+            {%- set ns.user_seen = ns.user_seen + 1 %}
+            {%- if preserve_window >= 1 and ns.user_seen <= preserve_window %}
+                {%- set ns.window_start_index = index %}
+            {%- endif %}
         {%- endif %}
     {%- endif %}
 {%- endfor %}
@@ -97,7 +109,7 @@
             {%- endif %}
         {%- endif %}
         {%- set reasoning_content = reasoning_content|trim %}
-        {%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index and reasoning_content) %}
+        {%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index and reasoning_content) or (preserve_window >= 1 and loop.index0 > ns.window_start_index and reasoning_content) %}
             {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content + '\n</think>\n\n' + content }}
         {%- else %}
             {{- '<|im_start|>' + message.role + '\n' + content }}
