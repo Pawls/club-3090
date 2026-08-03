@@ -61,7 +61,7 @@ services:
     container_name: "${ESTATE_CONTAINER:-llama-cpp-deckard-40b-vision}"
     restart: unless-stopped
     ports:
-      - "${ESTATE_PORT:-${DECKARD_VISION_PORT:-8200}}:8080"
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${DECKARD_VISION_PORT:-8200}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     # ⚠ -np 1 is intentional — one decode stream per dual-card config.
