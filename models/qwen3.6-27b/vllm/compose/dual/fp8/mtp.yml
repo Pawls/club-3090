@@ -9,7 +9,28 @@
 #   Max ctx:   262K — fp8 KV keeps the full ctx at TP=2. Validation proxy for
 #              the TP=4 multi-max (vllm/qwen-27b-multi-max, same config).
 #   Genesis:   none — intentionally Genesis-free
-#   Status:    ✅ Production
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   MTP drafter exposed to OPEN vllm#50021 (GDN spec-decode crash
+#              class, quant-independent). Mitigate: SPEC=off. v0.26.0 predates
+#              the fix. Detail: Upstream-risk below + docs/UPSTREAM.md row.
+#   Upstream-risk:  • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — delete the --speculative-config
+#                line below. Lower n cuts frequency, NOT exposure (#758 called
+#                n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
+#              ⤷ Status flip TAKEN 2026-08-01 (maintainer call): moved to ⚠️
+#                while vllm#50021 is open; the summary now lives on the
+#                required `Caveats:` line above. Reverts to the prior status
+#                when a fix-carrying pin bump lands (trigger on the
+#                docs/UPSTREAM.md row).
 #   Quality:   109/150 (--full, thinking-off, 2026-07-06, jesse #594) — TIES int8-PTH's 107/150
 #              (+2, within noise). Quality-neutral despite scale=1.0: `calculate_kv_scales` is
 #              disabled on Qwen3-Next hybrid (GDN recurrent state → unreliable warmup scales),
@@ -27,9 +48,10 @@
 #   - max_num_seqs=2 → 2 concurrent agents at full 262K context (KV pool 2.36×)
 #   - max_model_len=262144 → model's natural max, no rope_scaling needed
 #   - vision + tools + MTP n=3 + recall — everything on, no compromises
-#   - Measured (v0.24.0 stable, 2026-06-30, 2× 3090 caps 370/420 W — BENCHMARKS.md + disc #515):
-#     decode 83.1 narr / 108.2 code TPS single-stream, TTFT 158/167 ms, ~21.4 GB/card.
-#     (Older 2026-04-28 dev205/Genesis-v7.51 probe read ~56/69 — superseded.)
+#   - Measured (canonical 262K 2-boot mean, v0.25.1, 2026-07-20 #662 A/B): decode ~69 narr / ~90 code
+#     single-stream — DECODE-TIED with the fast tier (fast ~72/90). The prior 83/108 (v0.24.0 2026-06-30)
+#     was cross-session inflation; single boots swing ~5 TPS on code, so do not compare 1-draw figures.
+#     max degrades at full ctx (1.13× KV pool). TTFT 158/167 ms, ~21.4 GB/card.
 #     NOTE: the decode 83/108 above is the int8-PTH short-prompt bench. With fp8/e4m3 KV
 #     (#594): decode stays flat at depth (114→115 @35K, 2.3× int8-PTH), 8-pack 109/150. See BENCHMARKS.md.
 #
@@ -127,7 +149,13 @@ services:
       - NCCL_CUMEM_ENABLE=0
       - NCCL_P2P_DISABLE=1
       - VLLM_NO_USAGE_STATS=1
-      - VLLM_USE_FLASHINFER_SAMPLER=1
+      # FlashInfer sampler OFF: measured -3.0% narrative / -1.7% code decode on the
+      # 2x3090 flagship (bench.sh, 5 measured runs/arm, symmetric boots, single
+      # variable). With MTP spec-decode active, sampling routes through the
+      # rejection-sampler path where the FlashInfer kernel adds overhead without a
+      # win. Also trims sampler workspace, which is load-bearing on 24 GB (same
+      # reasoning as nemotron dual/w4a16/turbo.yml). Reported by @Aduer in #671.
+      - VLLM_USE_FLASHINFER_SAMPLER=0
       - OMP_NUM_THREADS=1
       # DeepGEMM (vLLM's fp8-GEMM path) is built for Hopper (sm_90) + datacenter
       # Blackwell (sm_100/103). Consumer Blackwell (5090 / PRO 6000 / GB10,

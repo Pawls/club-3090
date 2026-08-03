@@ -71,11 +71,38 @@ When adding the first vendored patch to a previously-rolling engine: pin in the 
 
 **Delivery model (vLLM):** patches reach the container by **volume-mounting into the pinned *stock* `vllm/vllm-openai` image** (python sidecars / site-package overlays / install scripts — see `delivery_mechanism` in `scripts/lib/profiles/patches.yml`), **not** by baking a custom image. The older baked-image path (`ghcr.io/noonghunna/vllm-club3090`, which shipped the release images through `club-v0.8.3`) is **retired** — no compose or engine-pin references it, and the `dockerfile_bake` `delivery:` block in `patches.yml` is legacy/test-only. The GHCR package is kept as historical release artifacts (users pinned to a `club-v0.8.x` tag can still pull); it is not deleted and not produced by anything in-repo.
 
-### File encoding in scripts — always `encoding="utf-8"`
-Any Python read of a repo source file (compose YAML, profile YAML, `baselines.yml`, …) — including python heredocs inside shell scripts — MUST pass `encoding="utf-8"`. `Path.read_text()` / `open()` default to the **locale** encoding, and community rigs run non-UTF-8 locales (minimal VMs / containers with `LC_ALL=C` → `ANSI_X3.4-1968`). Repo files are full of unicode (`— × → ⚠` in compose headers), so a bare read that works on the dev machine crashes `switch.sh`/`launch.sh` on those rigs (#599). Corollaries:
-- **Writes too:** a *piped* stdout under the C locale defaults to ASCII — printing a status note with unicode raises `UnicodeEncodeError`. Python emit blocks on launcher paths pin it with `sys.stdout.reconfigure(encoding="utf-8")`.
+### File encoding — UTF-8 mode is the guarantee; `encoding="utf-8"` is the backstop
+
+Repo sources are full of unicode (`— × → ⚠` in compose headers), and Python decodes file reads, stdout **and `sys.argv`** with the **locale** codec. On a rig whose locale is neither UTF-8 nor C that broke most of the script layer (#779: 46 pass / 38 fail on a real `en_US.ISO-8859-1`).
+
+**The systemic fix — every script that runs python3 carries this, above its first call:**
+
+```bash
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+```
+
+Python's UTF-8 mode (PEP 540) overrides the locale for reads, writes, stdout and argv in one move. Exported, so nested scripts and child processes inherit it. **Defaulted, not forced** (`:-1`, never `=1`) so a user who deliberately sets `PYTHONUTF8=0` keeps control. `test-locale-utf8.sh` enforces all of that — presence, placement above the first call, and default-not-force — plus a functional leg on a real single-byte locale built with `localedef`. **Add the line when you add a script that shells out to python3**; the gate is there because this invariant is what decays.
+
+**⚠️ `LC_ALL=C` is NOT the at-risk case, and this guide used to say it was.** Python auto-enables UTF-8 mode for the C/POSIX locale, so C-locale rigs were always fine:
+
+| environment | result |
+|---|---|
+| `LC_ALL=C` | `utf8_mode=1  stdout=utf-8` — protected |
+| `LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` | `utf8_mode=0  stdout=ascii` — synthetic repro only |
+| a real `en_US.ISO-8859-1` / `de_DE.iso88591` | `utf8_mode=0  stdout=iso8859-1` — **the genuine at-risk case** |
+
+Reproduce with a **real** single-byte locale (`localedef -f ISO-8859-1 -i en_US "$dir/en_US.ISO-8859-1"` + `LOCPATH`), not `PYTHONUTF8=0`. And note the failure shape differs: a single-byte locale **decodes any byte happily and corrupts quietly** — only the encode side raises. Compare output byte-for-byte across locales; don't probe for one character.
+
+**Still write `encoding="utf-8"` explicitly** — belt and braces if the env var is ever overridden, and mandatory in these cases:
+
+- **Writes, always paired with their reads.** `Path.write_text()` opens with mode `w`, which **truncates on open** — so pinning a read without pinning its paired write converts a clean crash into **data loss** (#777/#780: a `BENCHMARKS.md` copy went 180693 bytes → 0). For anything overwriting a file that matters, write a temp sibling and `os.replace()`: atomic, and a failed encode leaves the original intact.
+- **`subprocess` output.** `subprocess.run(..., text=True)` decodes the child's stdout with the locale codec too. `patch_attribution.py` pinned every one of its own reads, was fully compliant with this rule, and still died reading `docker compose config` (#781). Pass `encoding="utf-8"` on the call.
+- **`sys.argv`.** Under a non-UTF-8 locale argv is decoded with ASCII + `surrogateescape`, so unicode arguments arrive as *lone surrogates* that no `encoding=` pin can write. Recover with `os.fsencode(sys.argv[i]).decode("utf-8", "replace")` — correct under any locale — or pass long unicode payloads via stdin/file (#777).
+- **Emit blocks that print unicode to a pipe:** `sys.stdout.reconfigure(encoding="utf-8")`.
+
+Other corollaries:
 - **The launcher table path is python-STDLIB-ONLY** — no PyYAML, no pip deps (community VMs ship bare python3; #584's `ModuleNotFoundError: yaml`). The `--json` contract path may require PyYAML but must fail with a `Fix:` hint, not a traceback. `test-registry-emit-no-yaml` guards both plus the locale cases.
-- **Repro before claiming fixed:** modern Python coerces `C` → `C.UTF-8`, so plain `LC_ALL=C` won't reproduce — use `PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 LC_ALL=C`.
+- **A `.py` tool invoked directly** (`python3 tools/kv-calc.py`) gets no shell script to export the var. In-repo callers all go through the scripts; a user doing this on a single-byte locale is still exposed.
 - **Don't blind-`2>/dev/null` launcher derive paths** — swallowing the traceback hid this exact class for months; capture stderr and surface it on failure instead.
 
 ### CHANGELOG
@@ -104,7 +131,7 @@ The directory hierarchy encodes model, engine, topology, and the weights artifac
 
 **Default-resolver knobs** (maintainer-owned, next to `DEFAULTS` in `compose_registry.py`):
 - `DEFAULTS[(model, engine, topology)] → slug` — the `<engine>/default` map (club-3090's recommended config per engine; reason can evolve, edited by PR).
-- `ENGINE_PREFERENCE[topology] → [engine, …]` — the curated `<model>/default` policy. The resolver walks this list and picks the first engine with a **functional** (`status ∉ {experimental, preview, upstream-gated, deprecated}`) `DEFAULTS` entry. **Reorder a row to change a recommendation — no code change, any topology.** single = `[beellama, ik-llama, llamacpp, vllm]`; dual/multi = `[vllm, ik-llama, llamacpp, beellama]`. `beellama` leads the single ranking **and has live `DEFAULTS` entries** — it IS the shipped single-card default for `qwen3.6-27b` (`beellama/dflash`) and `gemma-4-31b` (`beellama/gemma-dflash`).
+- `ENGINE_PREFERENCE[topology] → [engine, …]` — the curated `<model>/default` policy. The resolver walks this list and picks the first engine with a **functional** (`status ∉ {experimental, preview, upstream-gated, deprecated}`) `DEFAULTS` entry. **Reorder a row to change a recommendation — no code change, any topology.** single = `[ik-llama, llamacpp, vllm]`; dual/multi = `[vllm, ik-llama, llamacpp]`. **`beellama` was removed from every walk 2026-07-27** (engine retired: Anbeeld #98 won't-fix; all 10 slugs `deprecated`, launchable by name with `--force`). The shipped single-card default for `qwen3.6-27b` is now `ik-llama/iq4ks-mtp` via the walk; **`gemma-4-31b` single-card has NO functional default** (resolver honestly degrades to "pick explicitly") until a mainline Gemma single compose lands — see the retire plan in the stack tracker.
 - `RECOMMENDED_DEFAULT_MODELS` — a **short opt-in shortlist** (`["qwen3.6-27b", "gemma-4-31b"]`) of models eligible to be the *bare-`launch.sh`* default (first installed → its `<model>/default`). **NOT** an exhaustive ranking; absent models are runnable by name but never auto-default; **new models are NOT auto-added** — promote one explicitly.
 - The shared resolver `model_default_target(root, model, topology)` (in `registry-emit.sh`) is the single injection point for both launchers. Precedence: `--variant` → user `.env` pin (`CLUB3090_DEFAULT_<MODELID, non-alnum→_>`) → community seam (`community_default_target` → `None` today) → curated walk → degradation (nearest-lower topology, else "pick explicitly"). `X/default` dispatch: `X ∈ engine-set` → engine rec; `X ∈ model-set` → model default; else error. Users pin/clear via `switch.sh --set-default <slug>` / `--clear-default <model>`.
 
@@ -265,7 +292,7 @@ bash benchlocal-cli/tools/build-sandboxes.sh   # ~30 GB free; `docker system pru
    ⚠️ For the reasoning-ON leg on a thinking model, boot the compose with reasoning parsing on (`REASONING=on` for llama.cpp composes, `--reasoning-parser` for vLLM) so `<think>` lands in `reasoning_content`, not the graded answer.
 2. **Operational health:** `bash scripts/report.sh --full` (~43 min; redacted, paste-ready bundle — verify + stress + soak + bench + agentic).
 
-**Don't pair `rebench-full.sh` with `report.sh --full`** — rebench re-runs the same operational gates (verify/bench/stress/soak), so it *replaces* `report.sh --full` rather than complementing it. Pick by goal: `rebench-full --with-8pack-thinking=both` when you want one synthesized `REPORT.md` (quant A/B, BENCHMARKS row); the two-pass split above when you want the paste-ready cross-rig bundle. If you ran rebench-full and also want the agentic curve, add only `report.sh --agentic`. The same guidance ships user-facing in [`docs/ANNOUNCEMENT_TEMPLATE.md`](docs/ANNOUNCEMENT_TEMPLATE.md) §7 "Run the evals".
+**Don't pair `rebench-full.sh` with `report.sh --full`** — rebench re-runs the same operational gates (verify/bench/agentic/concurrency/stress/soak), so it *replaces* `report.sh --full` rather than complementing it. Pick by goal: `rebench-full --with-8pack-thinking=both` when you want one synthesized `REPORT.md` (quant A/B, BENCHMARKS row); the two-pass split above when you want the paste-ready cross-rig bundle. Since #805, rebench runs the **agentic curve and the concurrency rungs itself** (steps 1b/1c), so there is nothing left to top up with `report.sh --agentic` — it would just re-measure. The same guidance ships user-facing in [`docs/ANNOUNCEMENT_TEMPLATE.md`](docs/ANNOUNCEMENT_TEMPLATE.md) §7 "Run the evals".
 
 ### serve-cockpit (c3)
 `tools/serve-cockpit/` is the Textual TUI cockpit — a separate Python app with its **own venv and pytest suite**, NOT covered by `scripts/tests/*.sh`. See its `README.md`. For agents:

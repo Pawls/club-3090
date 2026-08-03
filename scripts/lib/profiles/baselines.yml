@@ -554,6 +554,75 @@ baselines:
     submitted_by: "noonghunna"
     tier: local
 
+  vllm/thinkingcap-dual-w4a8:
+    # Promotion gate (#748): rebench-full 2026-07-21 — decode 73.3/106.1 (served
+    # W4A8, int8 activations via the shared qwen-w4a8-int8-act patches, + built-in
+    # MTP n=5, accept-len 5.0 / 80% warm), verify-full 9/9, verify-stress boundary
+    # 8/8 incl. the NIAH ceiling ladder to 0.92x262K, soak PASS (0/100 silent-empty,
+    # p50 119.75). 8-pack both modes TOPS Tess W4A16 (108/115) and the Qwen fast
+    # tier (109) on BOTH legs. Measured on the v0.25.1 pin.
+    narr_tps: 73.3
+    code_tps: 106.1
+    prefill_tps: { 10k: 2466, 90k: 1742 }
+    quality_8pk: "118/150"
+    quality_8pk_think_on: "123/150"
+    # CANONICAL PAIR 2026-07-21 19:27 — both legs back-to-back, one harness state, one
+    # boot, agent pinned: benchlocal-cli master @ 488521e (post-#105), baked hermes-agent
+    # 44cdf555, reasonmath budget 16384. NOTE: no tag was cut, so the saved artifacts
+    # self-report runner_version 0.9.8 — reproduce from the COMMIT, not the version.
+    # Supersedes 114/126 (and 113/120). The movement is NOT improvement:
+    #   OFF 114->118 = hermesagent +4 (re-baseline onto a different agent build, not a
+    #   gain) + the other seven packs summing to 0.  ON 126->123.
+    # NOISE BAND IS +/-3 AT n=1: bugfind -3 on the OFF leg, cli-40 -3 on the ON leg —
+    # neither pack is touched by #105 (no hermes dep, budgets unchanged) and both run at
+    # temperature 0, so it isn't sampling. 7 of 8 packs moved and roughly cancelled.
+    # Every single-run delta here sits inside that band, including reasonmath +1.
+    # Report the mean of n>=3 before treating any per-pack move as real (credit @qwen).
+    # Artifacts: results/quality/quality-2026-07-21T18-46-04.json (OFF) + 18-59-04 (ON).
+    #
+    # PRIOR RUN 2026-07-21 16:20 on benchlocal-cli v0.9.8 (the original gate ran on a
+    # v0.9.7 checkout, predating the grader-fidelity fixes). OFF 113->114 (a tie),
+    # ON 120->126 (+6) — driven by cli-40 (+9 ON / +4 OFF, #101 correctness-
+    # authoritative) and reasonmath (+2, #102).
+    #
+    # hermesagent (-2/-3): CONFOUNDED — do not attribute. Two earlier readings were
+    # both wrong: "the verifier tightened" (inference, no evidence) and then
+    # "run-to-run variance" (adopted from @qwen, also wrong). The actual cause is a
+    # SECOND unpinned component. The Hermes CLI under test is pinned (44cdf555,
+    # asserted by hermes-runtime.mjs); hermes-agent — the AGENT implementation — is
+    # separate and was auto-detected from the host and bind-mounted, so the recorded
+    # hermes_agent_commit IS executed code, not metadata. Provenance from the saved
+    # result JSONs: 07-20 host-mount 7f12d4f = 12/20 · 07-21 host-mount d604141 =
+    # 9/20 · 07-21 baked 44cdf555 = 13/20. Three agent builds, three numbers, none
+    # comparable. hermesagent-20 also runs at temperature 0, so a 4-point spread is
+    # not plausibly inference non-determinism.
+    # FIXED in benchlocal-cli #105 (merged): the baked agent is now the DEFAULT; host
+    # use is opt-in (HERMES_AGENT_ALLOW_HOST=1). Any hermesagent number from before
+    # that carries an unrecorded agent version — re-establish, don't reconcile.
+    #
+    # NOTE: the think-OFF 114 is UNDERSTATED — the pack default capped completions at
+    # max_tokens=1024 vs 16384 on the thinking arm, so RM-04/RM-06 truncated before
+    # emitting ANSWER:. Measured recovery was +1 (11->12), not the +2 projected:
+    # RM-06 completed at 4096 and was WRONG (the cap had been masking a real miss),
+    # and RM-04 still truncated at 4096. FIXED in #105: reasonmath-15 now defaults to
+    # 16384 with timeout_baseline_tokens=1024 so the clock scales with it.
+    # A canonical both-arms re-run on the merged harness supersedes 114/126.
+    # Evidence: results/rebench/thinkingcap-27b-20260721-1620/. Operational numbers
+    # (tps, prefill, ctx_validated) still come from source_tag below (the 0758 gate).
+    # WARNING - NOT like-for-like vs the Tess (108/115) / Qwen (109) rows: those were
+    # measured on PRE-v0.9.8 harnesses. The like-for-like pairing is the v0.9.7 one
+    # (ThinkingCap 113/120 vs Tess 108/115). Re-run those before any ranking claim
+    # against these numbers.
+    quality_env: { harness: "benchlocal-cli v0.9.8 (runner_version 0.9.8; hermes/bugfind sandboxes rebuilt pre-run) --full, quality re-run 2026-07-21, evidence results/rebench/thinkingcap-27b-20260721-1620" }
+    ctx_validated: { tokens: 240634, niah: "clean@240K" }
+    date: 2026-07-21
+    engine_pin: "vllm/vllm-openai:v0.25.1"
+    rig: "2x3090-pcie"
+    power_cap_w: [370, 370]
+    source_tag: "thinkingcap-27b-20260721-0758"
+    submitted_by: "noonghunna"
+    tier: local
+
 # ───────────────────────────────────────────────────────────────────────────
 # KNOWN GAPS — wave-2 dispositions (2026-07-04): each slug below has NO row
 # on purpose; the disposition says what unlocks one. Do NOT guess numbers in.

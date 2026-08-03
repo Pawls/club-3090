@@ -8,6 +8,51 @@ This is the home for **getting the most out of a PCIe-only multi-GPU rig** — u
 
 ---
 
+## The three layers of "is P2P on?" — read this first
+
+"P2P" is three independent questions stacked on top of each other, and every confused triage in our tracker came from conflating them ([disc #773](https://github.com/noonghunna/club-3090/discussions/773) has the worked example):
+
+| Layer | Question | How to check |
+|---|---|---|
+| **1. Driver** | Is direct GPU↔GPU access *granted*? | `nvidia-smi topo -p2p rw` (= OK), module flavor (§5); strongest: a transfer-verified cache (§7) |
+| **2. NCCL** | Is the granted path *used* for transfers? | `NCCL_P2P_LEVEL` set + layer 1 granted — this is where most of the P2P benefit flows, at any GPU count |
+| **3. vLLM's custom all-reduce** | Is vLLM's *extra* kernel on top of NCCL active? | vLLM's own log: the `Custom allreduce is disabled…` line means no. At >2 GPUs it requires a **full NVLink mesh** and never consults P2P ([#786](https://github.com/noonghunna/club-3090/issues/786)) — so on 3+-card PCIe rigs layer 3 is always off, *by design, not misconfiguration*, and P2P still pays through layer 2 |
+
+### Why layer 3's gate asks about NVLink and not peer access (2026-07-30)
+
+Read from `vllm/distributed/device_communicators/custom_all_reduce.py` (verified identical in v0.24.0 and v0.25.1). **The NVLink test was never intended as the requirement — it is a cheap pre-filter in front of an expensive one**, and its own comments say so:
+
+```python
+# test nvlink first, this will filter out most of the cases
+# where custom allreduce is not supported
+fully_connected = current_platform.is_fully_connected(physical_device_ids)
+if world_size > 2 and not fully_connected:
+    logger.warning("Custom allreduce is disabled because it's not supported on"
+                   " more than two PCIe-only GPUs. ...")
+    return                      # <-- disqualifies, instead of falling through
+# test P2P capability, this checks software/cudaruntime support
+# this is expensive to compute at the first time
+# then we cache the result
+if not current_platform.is_rocm() and not _can_p2p(rank, world_size):
+```
+
+`gpu_p2p_access_check()` spawns subprocesses to test real transfers — slow on first call, hence cached. `is_fully_connected` exists to avoid paying that when it would fail anyway. The narrow defect: at `world_size > 2` the pre-filter `return`s rather than deferring to the P2P check a patched PCIe rig would pass. An early-out optimisation became a hard gate.
+
+Two details confirming it is a heuristic and not a kernel limit:
+
+- The condition is literally `world_size > 2`. **At TP=2 the NVLink test is skipped entirely**, which is exactly why dual-card PCIe rigs get layer 3 and 4-card rigs do not — the peer-access result is never consulted at world>2.
+- `_SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]` — the kernel itself supports 4 cards. Patching `is_fully_connected` works rather than crashing.
+
+**Why `>2` plausibly exists** (inference from the algorithm shape, *not* stated upstream): custom AR has every rank write into every peer's buffer. At 2 GPUs that is one peer over one link; at 4 on a shared PCIe fabric the N−1 peer writes per rank contend for the same host-bridge bandwidth, while NVLink is point-to-point per pair and NCCL's ring/tree is topology-aware. It reads as an NVSwitch-era assumption never retested against P2P-patched consumer hardware.
+
+**The 8 MiB cap is why forcing the gate is a tradeoff, not a free win.** `CustomAllreduce(max_size=8192 * 1024)` — tensors above 8 MiB fall back to NCCL regardless. So decode-sized tensors take the custom path and win, while prefill-sized ones exceed the cap, go through NCCL anyway, and still pay the registration overhead.
+
+**We measured the bypass and deliberately do not ship it.** Forcing `is_fully_connected → True` at TP=4 on a patched 4×3090 gives **≈ +15% decode**, independently reproduced by [@superalesha](https://github.com/noonghunna/club-3090/discussions/773#discussioncomment-17834828) at **+14.8%** (80.9 → 92.9 tok/s single-stream, 144 → 165 at 16 users) — **with prefill paying for it** (TTFT +9% at c16, consistent with the cap above). Note the flag is read twice, once to build the communicator and once in `should_custom_ar`, so a half-patch does nothing. club-3090 keeps the gate: the tradeoff is workload-dependent, and monkeypatching an engine's topology gate is not something we want in a default path on other people's rigs. The clean upstream fix is to let `world_size > 2` fall through to `_can_p2p` and gate on measured benefit instead of link type.
+
+**Where NVLink fits:** a bridge is the native version of layer 1 (no patched driver needed) and a faster layer 2 for the bridged pair. Layer 3 follows the same mesh rule: **2× 3090 + bridge → all three layers on**; **4× 3090 with two pairwise bridges → layer 3 still off** (consumer cards bridge exactly two GPUs; full meshes are NVSwitch/SXM territory). `report.sh`'s *Interconnect verdict* (§7) resolves all three layers for you.
+
+---
+
 ## 1. Reading your topology: why `PHB`, not `PIX`
 
 `nvidia-smi topo -m` labels each GPU↔GPU link by the *closest common point* the two cards share:
@@ -100,6 +145,10 @@ NVLINK_MODE=pcie_p2p
 
 > If `nvidia-smi topo -p2p rw` already shows `OK` between your GPUs *without* the patched module (some server boards / layouts genuinely expose P2P), `detect_nvlink.sh` auto-enables the PCIe-P2P path on its own — no env var needed.
 
+⚠️ **The flip side of auto-enable: installing the patched module changes launcher behavior by itself.** The next launch after the module is in place, `detect_nvlink.sh` sees the new `OK` grant and switches every dual/multi compose to the P2P path (`NCCL_P2P_LEVEL=PHB` + custom-all-reduce) with no config change on your side. A driver *grant* is not the same as *working transfers* — if the grant doesn't actually carry bytes (patch branch not matching your exact driver version, ACS/IOMMU redirecting peer TLPs, or a card family where P2P is hard-locked), NCCL blocks forever on its first peer operation and **every vLLM slug hangs silently at `pynccl` init with weights never loading** (§8). The escape hatch is always `NVLINK_MODE=force_off` in `.env`. Before trusting a fresh grant, run the transfer check (§7, `VLLM_SKIP_P2P_CHECK=0`) or cuda-samples `p2pBandwidthLatencyTest` — both move real bytes; the topo matrix does not.
+
+> **Blackwell / 50-series (first field report, 2026-08-01):** P2P is deliberately driver-locked on GeForce Blackwell, and the patched-module path is **unvalidated** there — the first report (5090 pair, driver 610.43.03 + patch) got a granted `OK` matrix and the silent `pynccl` hang above. Treat 5090 P2P as experimental: validate with `p2pBandwidthLatencyTest` *before* letting the launcher auto-enable it, and expect the patch branch to lag new driver releases.
+
 ---
 
 ## 6. Realistic expectations
@@ -110,9 +159,11 @@ From cross-rig data on this stack (2× 3090, TP=2):
 |---|---|---|
 | `dual.yml` (fp8 KV) — patched P2P vs unpatched | **+2% narrative / +9% code** | [#91](https://github.com/noonghunna/club-3090/issues/91) |
 | DFlash / spec-decode path — patched P2P | **+19–22%** | [#95](https://github.com/noonghunna/club-3090/issues/95) |
-| NVLink hardware (reference, power-matched A/B) | **~+15%** | [#77](https://github.com/noonghunna/club-3090/issues/77) |
+| NVLink hardware — workload-shaped (same-host A/B) | **decode +3–5% · prefill/long-ctx +35–49%** | [#698](https://github.com/noonghunna/club-3090/issues/698) — supersedes the flat ~+15% from [#77](https://github.com/noonghunna/club-3090/issues/77) (older v7.72.2 image) |
 
-**Translation:** code / spec-decode workloads see a real lift (the K+1 cross-card verify is bandwidth-bound, so it benefits most); narrative decode barely moves. The gain also grows with GPU count (more all-reduce traffic at TP=4). For most users the stock no-P2P PCIe path is already perfectly fine — **P2P is an enthusiast tuning lever, not a requirement.**
+**Translation:** code / spec-decode workloads see a real lift (the K+1 cross-card verify is bandwidth-bound, so it benefits most); narrative decode barely moves. For most users the stock no-P2P PCIe path is already perfectly fine — **P2P is an enthusiast tuning lever, not a requirement.**
+
+⚠️ **These are DUAL-card measurements — do not extrapolate them to 3+ GPUs.** At world_size > 2 without NVLink, **vLLM force-disables its custom all-reduce kernel** (its gate queries NVML for NVLink and never consults peer access — [#786](https://github.com/noonghunna/club-3090/issues/786)), so whatever P2P is worth at TP=4 arrives **through NCCL peer transfers only** — a lower ceiling than the dual-card custom-kernel path above. An earlier revision claimed the gain "grows with GPU count"; that was a projection, not a measurement, and stays withdrawn. **UPDATE 2026-07-30 — a measured multi-GPU A/B now exists, on ONE rig:** [disc #773](https://github.com/noonghunna/club-3090/discussions/773) (4× 3090, patched P2P, vLLM 0.25.1, MTP n=3, 220 W, one sitting) reports TP=2 → TP=4 as **prefill +55% @10K / +62% @90K, TTFT −38% @90K, decode +4.0% prose / −2.6% code**. Read it as *four cards read faster; they do not write faster* — the win is prefill and TTFT, and the decode column is inside run-to-run noise. It is one rig, one sitting, and it is a **TP-scaling** A/B (2 vs 4 cards, P2P on throughout), **not** a P2P-on-vs-off A/B at fixed TP — that one still does not exist. So: do not extrapolate "P2P scales with GPU count" from it, and do not cite the decode figures as a P2P result.
 
 ---
 
@@ -126,6 +177,10 @@ bash scripts/report.sh
 
 Read the **"Interconnect verdict"** line under *Boot log highlights* — the report cross-references host capability against the running container's engagement automatically: `✓ engaged`, `⚠ WARN` (NVLink bridge present but idle), or `ℹ` (P2P-capable driver, container not using it), each naming the fix. The raw evidence sits directly above it: the `[nvlink]` boot line plus the resolved `NCCL_P2P_LEVEL` + custom-all-reduce env. On rigs with no P2P capability the verdict line is deliberately absent — silence means "nothing to gain here", not "check failed". (This is exactly the round-trip the field was added to avoid — [#446](https://github.com/noonghunna/club-3090/issues/446), [#488](https://github.com/noonghunna/club-3090/issues/488).)
 
+**On 3+ PCIe cards, expect "engaged via NCCL", not "custom all-reduce ON".** vLLM vetoes its custom kernel at world_size > 2 without NVLink and logs `Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs` — that line is **expected on every 3+-card PCIe rig, patched or not**, and is not a misconfiguration. The same veto fires on **pairwise NVLink bridges** at 3+ cards (2 bridges on 4x 3090 is never a full 1-hop mesh — consumer cards bridge exactly two GPUs), so a quad-3090-with-bridges rig is also NCCL-only in vLLM; only NVSwitch/SXM-class full meshes keep the custom kernel at world>2. The report folds it into the verdict automatically ([#786](https://github.com/noonghunna/club-3090/issues/786)); P2P remains active on the NCCL path.
+
+**Transfer-verified P2P — the strongest evidence tier.** Everything above is ultimately a driver *assertion* (the topo matrix, the module license, a clean boot — all the same query asked three ways). vLLM ships a functional check that actually moves bytes: boot once with `VLLM_SKIP_P2P_CHECK=0` and it performs an IPC write/read-back across every directed GPU pair, caching the result to `~/.cache/vllm/gpu_p2p_access_cache_for_<devices>.json`. `report.sh` reads that cache automatically when present (host first, then the serving container) and adds a **"Transfer check"** line — `✓ N/N directed pairs OK` upgrades the verdict from driver-asserted to *measured*, and a partial result flags advertised-but-broken peer access that no driver query can see. The check costs seconds and the cache is a durable, paste-able artifact (idea from [disc #773](https://github.com/noonghunna/club-3090/discussions/773)).
+
 ---
 
 ## 8. Troubleshooting
@@ -137,6 +192,8 @@ Read the **"Interconnect verdict"** line under *Boot log highlights* — the rep
 | `topo -p2p rw` shows `CNS` ("chipset not supported") | Stock driver refusing P2P on consumer GPU → install the patched module (§5), then re-check. |
 | `topo -p2p rw` shows `GNS` **and** `lspci` `BAR 1: supported:` caps at 256MB | **Pre-ReBAR / BAR1-capped VBIOS** — a firmware gate, not a driver or topology problem (#734). No BIOS setting or driver swap helps; the §5 patched path needs large BAR1. Vendor ReBAR VBIOS first (§4 note + the board-ID tip in §5), then re-check `supported:`. |
 | Boot crash after enabling P2P: `custom_all_reduce.cuh … invalid argument` | Known `expandable_segments` ↔ custom-all-reduce IPC clash → `detect_nvlink.sh` strips the token on the P2P path automatically; ensure you're on a current pin ([UPSTREAM.md → #42609](UPSTREAM.md)). |
+| **vLLM slugs HANG at `pynccl` init after installing a patched driver/module** (last line `vLLM is using nccl==…`, weights never load, no error) | The driver now *grants* P2P, so `detect_nvlink.sh` auto-enabled the P2P path (§5) — but the grant doesn't carry actual transfers, so NCCL blocks on its first peer op. **Unblock: `NVLINK_MODE=force_off` in `.env`, relaunch** (back to pre-patch behavior). Then validate the grant with raw transfers: cuda-samples `p2pBandwidthLatencyTest`, or §7's `VLLM_SKIP_P2P_CHECK=0` transfer check. If raw P2P hangs/reads garbage: match the patch branch to your **exact** driver version, check ACS (`lspci -vvv \| grep ACSCtl` — ACS redirect stalls peer TLPs; disable ACS/IOMMU per §4), or accept the card family is hard-locked (GeForce Blackwell — §5 note). Common right after a driver upgrade: the patch fork lags new driver branches. |
+| Raw `p2pBandwidthLatencyTest` passes but vLLM still hangs | The grant works; the issue is in the NCCL/custom-AR layer. Rerun one slug with `NCCL_DEBUG=INFO` and read the last transport lines; try `NCCL_P2P_DISABLE=1` in the compose env to split NCCL peer transport from the custom-all-reduce path, and re-check the `expandable_segments` row above. |
 | Enabled it but TPS didn't move | Check it actually engaged (§7); then check your workload — narrative decode barely benefits, code/spec-decode does (§6). |
 
 ---

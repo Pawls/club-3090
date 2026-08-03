@@ -17,6 +17,8 @@ services:
       # Temporary probe (2026-07-13): log what reasoning shape harnesses replay for the
       # qwen preserve_thinking models (custom_hooks.py §C). Set to 0 / remove once diagnosed.
       - CLUB3090_REASONING_DEBUG=1
+      # Cloud reference route (qwen3.8-max*) — referenced as os.environ/DASHSCOPE_API_KEY
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
     command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0", "--num_workers", "1"]
     extra_hosts:
       - "host.docker.internal:host-gateway"

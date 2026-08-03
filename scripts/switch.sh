@@ -70,6 +70,15 @@
 
 set -euo pipefail
 
+# Force Python's UTF-8 mode (PEP 540) for every python3 this script runs.
+# Repo sources are full of unicode (— × → ⚠), and without this a rig on a real
+# non-UTF-8 locale (de_DE.iso88591 and friends) decodes reads, stdout AND argv
+# with the locale codec, which crashes the launcher/emit paths (#779). Python
+# already auto-enables UTF-8 mode for the C/POSIX locale, so this covers the
+# case it does NOT: a genuine non-UTF-8, non-C locale. Exported, so child
+# processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_BIN="${COMPOSE_BIN:-docker compose}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
@@ -941,6 +950,13 @@ export_variant_engine_pin() {
         export VLLM_USE_DEEP_GEMM="$value"
         echo "[switch] fp8 weights: VLLM_USE_DEEP_GEMM=${value} (consumer card has no DeepGEMM recipe — disc #571)" ;;
       VLLM_ATTENTION_BACKEND) export VLLM_ATTENTION_BACKEND="$value" ;;
+      # #809 — the model's declared decode class. A block-diffusion (dLLM)
+      # model has no measurable decode window on a single-canvas response,
+      # so decode_TPS is not a decode rate for it; the harness labels the
+      # output instead of printing a divide-by-epsilon figure.
+      DECODE_GRANULARITY)
+        export DECODE_GRANULARITY="$value"
+        echo "[switch] decode granularity: DECODE_GRANULARITY=${value} (declared by the model profile; decode_TPS is not a decode rate for this class — #809)" ;;
       *) echo "[switch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
     esac
   done <<< "$output"
