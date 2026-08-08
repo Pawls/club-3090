@@ -153,7 +153,31 @@ Stock Qwen3.6-27B, single-card llama.cpp (`--reasoning on`), **FREE thinking-on 
 | **no-think** (shipped default) | **155 (94.5%)** | **63 (90.0%)** | **218 (93.2%)** | 319 / 2610 | — |
 | FREE (thinking-on) | 151 (92.1%) | 45 (64.3%) | 196 (83.8%) | 2902 / 6662 | 0% / 49% |
 
-**Thinking is net-negative for code on stock Qwen3.6 — and bounding it doesn't flip that.** Two failure modes: on **easy code (HE+)** thinking finishes (0% truncation) yet overthinks correct→wrong (−4, at ~13× the tokens); on **hard code (LCB v6)** it *runs away* — **49% never converge within the 10K budget** and truncate→fail (−18). Giving FREE a bigger budget or **grammar-bounding the reasoning** (the structured-CoT `bounded-thinking.yml` row above: **93.9% HE+ / 66.0% LCB v6**, *separate eval, different conditions*) caps the runaway but lands LCB at ~66% — still **~24 pp under no-think's 90%**. Bounding makes thinking *terminate*, not *out-reason just writing the code*. (The FREE arm's completion-only LCB slice looks like ~parity — 35/36 — but that's selection bias: the problems thinking finished naturally are the easy ones.) **Verdict: thinking-off is the correct default for code-gen; thinking-on — free or grammar-bounded — ties at best, at multiples of the token cost.** Thinking's payoff, if any, is on non-code reasoning (math/science) — untested here; the `quality-test.sh --reasoning` packs (GSM-Symbolic, GPQA, `default_thinking: on`) are the probe. A clean same-run 3-arm (no-think / FREE / FSM-bounded) on LCB would pin the grammar-rescue exactly.
+**Thinking is net-negative for code on stock Qwen3.6 — and bounding it doesn't flip that.** Two failure modes: on **easy code (HE+)** thinking finishes (0% truncation) yet overthinks correct→wrong (−4, at ~13× the tokens); on **hard code (LCB v6)** it *runs away* — **49% never converge within the 10K budget** and truncate→fail (−18). Giving FREE a bigger budget or **grammar-bounding the reasoning** (the structured-CoT `bounded-thinking.yml` row above: **93.9% HE+ / 66.0% LCB v6**, *separate eval, different conditions*) caps the runaway but lands LCB at ~66% — still **~24 pp under no-think's 90%**. Bounding makes thinking *terminate*, not *out-reason just writing the code*. (The FREE arm's completion-only LCB slice looks like ~parity — 35/36 — but that's selection bias: the problems thinking finished naturally are the easy ones.) **Verdict: thinking-off is the correct default for code-gen; thinking-on — free or grammar-bounded — ties at best, at multiples of the token cost.** ~~Thinking's payoff, if any, is on non-code reasoning (math/science) — untested here~~ — **measured, and it isn't there either: see the math/science section below.** A clean same-run 3-arm (no-think / FREE / FSM-bounded) on LCB would pin the grammar-rescue exactly.
+
+### Thinking on vs off — math / science (GSM-Symbolic / GPQA-Diamond / AIME-2026)
+
+The non-code half of the probe, from [discussion #221](https://github.com/noonghunna/club-3090/discussions/221). Same stock Qwen3.6-27B.
+
+| Benchmark | thinking OFF | thinking ON | Read |
+| --- | ---: | ---: | --- |
+| GSM-Symbolic | **100%** | 80% | Thinking *loses* on a difficulty level already solved perfectly without it — the overthink-correct→wrong mode from HE+. |
+| GPQA-Diamond (n=50) | 40/50 (80%) | 43/50 (86%) | Within noise at n=50 — tie. |
+| 8-pack (maintainer, n=1) | 108/150 | 111/150 | +3/150 ≈ 2 pp, inside n=1 noise. |
+
+**AIME-2026 follow-up** (`sztlink`, 1× 3090, Q4_K_M, 30 problems, three arms) — the sharpest evidence that the runaway is the *model*, not the budget:
+
+| Arm | Score | Note |
+| --- | ---: | --- |
+| no-think, 4096 tok | **17/30** | — |
+| FREE thinking, 30K tok | 18/30 | +1 (noise) — and **~50% still hit `finish_reason=length` at 7× the budget** |
+| bounded CoT (GBNF), 4096 tok | 12/30 | Grammar-bounding *hurts* math — long derivations need the length it removes |
+
+**Two things this pins down.** (1) The non-termination is real: giving thinking 7× the tokens still leaves half the runs unable to finish, so it is not budget starvation. (2) The structured-CoT rescue does **not** generalize off code — on math, bounding costs 5/30 outright. That matches the code finding where bounding made thinking *terminate* without making it *correct*.
+
+⚠️ **Budget both arms before you trust an A/B here.** The first GPQA pass in #221 read **43/50 vs 7/50** — an apparent 72-point win for thinking — purely because the no-think arm's token budget truncated it mid-answer. Fair budgets collapsed it to the tie above. Any "thinking is transformative" result on this model should be assumed to be this artifact until the no-think arm's `finish_reason` distribution is checked.
+
+ℹ️ GPQA-Diamond is **not reproducible through the shipped harness today** — `quality-test.sh --reasoning` carries it metadata-only and reports `dataset-unavailable` pending dataset access (see [`docs/QUALITY_TEST.md`](docs/QUALITY_TEST.md)). GSM-Symbolic-30 does run.
 
 ### Dual-card (2× RTX 3090, TP=2)
 
