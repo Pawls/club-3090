@@ -68,5 +68,44 @@ if preflight_compose_gpu_fit "$single" 0 >/dev/null 2>&1; then pass "single-card
     echo "  ok:   (nvidia-smi present on host — skip-case not exercised)"
   fi )
 
+# 7-9) The compose-dir `.env` leg. Until 2026-08-08 the gate read ONLY the YAML
+# `${GPU_MEMORY_UTILIZATION:-<X>}` fallback, so lowering util in the `.env` next to the
+# compose — the documented way to leave desktop headroom, and the value docker compose
+# actually interpolates — left this gate hard-failing a config that fits. Needs its own
+# directory: the gate looks for `.env` beside the compose file, and the mktemp composes
+# above live in a shared /tmp.
+envdir=$(mktemp -d)
+cat > "$envdir/compose.yml" <<'YAML'
+# Tensor-parallel: 2
+services:
+  x:
+    command: ["--gpu-memory-utilization", "${GPU_MEMORY_UTILIZATION:-0.95}"]
+YAML
+MOCK_SMI=$'0, 24576, 22350\n1, 24576, 22060'   # the #535 numbers: short at 0.95, fine at 0.88
+
+# 7) no .env → unchanged behaviour, still blocks on the YAML default.
+if ( unset GPU_MEMORY_UTILIZATION; preflight_compose_gpu_fit "$envdir/compose.yml" 0 >/dev/null 2>&1 ); then
+  fail "no-.env case should still block on the YAML default"
+else
+  pass "no .env → still gates on the YAML default"
+fi
+
+# 8) .env lowers util → the gate must honour it and allow the boot.
+printf 'GPU_MEMORY_UTILIZATION=0.88\n' > "$envdir/.env"
+if ( unset GPU_MEMORY_UTILIZATION; preflight_compose_gpu_fit "$envdir/compose.yml" 0 >/dev/null 2>&1 ); then
+  pass "compose-dir .env util (0.88) is honoured"
+else
+  fail "compose-dir .env util should be read (regression: gate used the YAML fallback)"
+fi
+
+# 9) precedence — an EXPORTED var still beats the .env, matching docker compose, which
+#    treats the .env file as defaults for interpolation.
+if GPU_MEMORY_UTILIZATION=0.95 preflight_compose_gpu_fit "$envdir/compose.yml" 0 >/dev/null 2>&1; then
+  fail "exported var must override the .env (0.95 should block)"
+else
+  pass "exported var overrides the .env"
+fi
+rm -rf "$envdir"
+
 rm -f "$tp2" "$single"
 if [ "$FAILS" -eq 0 ]; then echo "PASS test-preflight-gpu-fit"; exit 0; else echo "FAIL test-preflight-gpu-fit ($FAILS)"; exit 1; fi

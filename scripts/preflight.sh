@@ -639,6 +639,38 @@ preflight_gpu_idle() {
   return 0
 }
 
+# preflight_env_file_value <compose_file> <VAR>
+#   Echo VAR's value from the `.env` sitting in the compose file's OWN directory — the
+#   one `docker compose` auto-loads when it interpolates `${VAR:-<default>}`. Empty when
+#   the file or the key is absent.
+#
+#   Why this exists: the gates below used to read only the compose YAML's `:-<default>`,
+#   so a user who set the value in `.env` was gated on a number the engine would never
+#   use. Callers must preserve compose's precedence:
+#       exported shell var  >  compose-dir `.env`  >  YAML `${VAR:-<default>}`
+#   (compose treats the `.env` file as *defaults* for interpolation, so a real
+#   environment variable still wins — hence `${VAR:-${envfile:-$yaml}}` at call sites.)
+#
+#   NB this deliberately reads only the compose's own directory. A `.env` at a PARENT
+#   level is never loaded by compose either, so reading one here would make preflight
+#   pass on a value the container won't get — see the "`.env` overrides must live next
+#   to the compose file" note in AGENTS.md.
+preflight_env_file_value() {
+  local compose="$1" var="$2" env_file val
+  env_file="$(dirname -- "$compose")/.env"
+  [[ -f "$env_file" ]] || return 0
+  # Last assignment wins, mirroring docker compose's own `.env` handling.
+  val=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${var}[[:space:]]*=" "$env_file" 2>/dev/null | tail -1)
+  [[ -n "$val" ]] || return 0
+  val="${val#*=}"                        # drop the key
+  val="${val%%#*}"                       # drop any trailing comment
+  val="${val#"${val%%[![:space:]]*}"}"   # ltrim
+  val="${val%"${val##*[![:space:]]}"}"   # rtrim
+  val="${val%\"}"; val="${val#\"}"       # unquote "
+  val="${val%\'}"; val="${val#\'}"       # unquote '
+  printf '%s' "$val"
+}
+
 # preflight_compose_gpu_fit <compose_file> <force>
 #   HARD-fail (unless force=1) when the GPUs lack enough FREE VRAM for the compose's
 #   gpu_memory_utilization. vLLM aborts at boot if `free < util × total`; with
@@ -654,11 +686,15 @@ preflight_compose_gpu_fit() {
   command -v nvidia-smi >/dev/null 2>&1 || return 0
   [[ -f "$compose" ]] || return 0
 
-  # Effective util: an env GPU_MEMORY_UTILIZATION override wins over the compose default
-  # (`${GPU_MEMORY_UTILIZATION:-<X>}`), so the gate matches what vLLM will actually use.
-  local util_default util
+  # Effective util, in docker compose's own precedence order:
+  #   exported shell var  >  compose-dir `.env`  >  the YAML `${GPU_MEMORY_UTILIZATION:-<X>}`
+  # so the gate matches what vLLM will actually use. The `.env` leg was missing until
+  # 2026-08-08: lowering util there (the documented way to leave desktop headroom) left
+  # this gate reading the YAML fallback and hard-failing a config that fits.
+  local util_default util_envfile util
   util_default=$(grep -oE 'GPU_MEMORY_UTILIZATION:-[0-9.]+' "$compose" | head -1 | sed 's/.*-//')
-  util="${GPU_MEMORY_UTILIZATION:-$util_default}"
+  util_envfile=$(preflight_env_file_value "$compose" GPU_MEMORY_UTILIZATION)
+  util="${GPU_MEMORY_UTILIZATION:-${util_envfile:-$util_default}}"
   case "$util" in ''|*[!0-9.]*) return 0 ;; esac   # unknown / non-numeric → can't gate
 
   # Cards this compose uses (TP / min-gpu-count header; default 1).
@@ -689,8 +725,10 @@ preflight_compose_gpu_fit() {
   echo "[preflight] ERROR: GPU ${idx} has ${fg} GiB free, but this config needs ~${ng} GiB/card" >&2
   echo "[preflight]        (gpu_memory_utilization=${util}, ${need_cards} card(s) for TP). Something else is holding VRAM —" >&2
   echo "[preflight]        a desktop on the GPU, another model, or a scene that isn't fully stopped (check: docker ps / nvidia-smi)." >&2
-  echo "[preflight]        Fix: free that VRAM, or lower the ceiling —" >&2
+  echo "[preflight]        Fix: free that VRAM, or lower the ceiling — either inline —" >&2
   echo "[preflight]             GPU_MEMORY_UTILIZATION=0.90 bash scripts/switch.sh <variant>" >&2
+  echo "[preflight]        — or persistently, in the .env NEXT TO the compose file (read by both" >&2
+  echo "[preflight]        this check and docker compose): $(dirname -- "$compose")/.env" >&2
   echo "[preflight]        — then retry.  (Bypass this check with --force.)" >&2
   if [[ "$force" == "1" ]]; then
     echo "[preflight] WARN:  --force set — launching anyway; vLLM may still abort at the free-memory check." >&2
@@ -1538,7 +1576,11 @@ _driver_cuda_version() {
 preflight_single_card_util() {
   local compose_file="$1" variant="${2:-}"
   [[ -f "$compose_file" ]] || return 0
+  # Same precedence as preflight_compose_gpu_fit: exported var, else the compose-dir
+  # `.env`. Before the `.env` leg existed this warn silently no-opped for anyone who
+  # raised util in the file rather than exporting it — i.e. it missed the common case.
   local user_util="${GPU_MEMORY_UTILIZATION:-}"
+  [[ -n "$user_util" ]] || user_util="$(preflight_env_file_value "$compose_file" GPU_MEMORY_UTILIZATION)"
   [[ -n "$user_util" ]] || return 0                 # only when explicitly overridden
 
   local tp=""

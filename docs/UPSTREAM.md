@@ -84,6 +84,16 @@ purged (e.g. `VLLM_IMAGE=vllm/vllm-openai:latest`).
 
 ---
 
+## club-3090 (`noonghunna/club-3090`) — the upstream of this fork
+
+Bugs in the upstream repo itself, fixed locally on this fork ahead of an upstream fix. Same rules as any other section: keep the row, update the status, don't delete.
+
+| Issue / PR | Status | Why it matters to us | Workaround / notes |
+|---|---|---|---|
+| **`preflight_compose_gpu_fit` ignores the compose-dir `.env`** — introduced by [`05f10762`](https://github.com/noonghunna/club-3090/commit/05f10762) *"fix(#535): fail fast + actionable when gpu_memory_utilization doesn't fit free VRAM"* (2026-07-02), reached this fork via merge `617ac65d`. **Not filed upstream yet.** | ⚫ **Workaround locally** (fixed on `pawl-cleanup` 2026-08-08); 🔴 no upstream issue filed | The #535 VRAM gate derived `gpu_memory_utilization` by grepping the compose YAML's `${GPU_MEMORY_UTILIZATION:-<X>}` fallback, overridable **only** by an exported shell var. It never read the `.env` beside the compose — which is the value `docker compose` actually interpolates, and the documented way to lower util for desktop headroom. Net effect: `switch.sh` / `launch.sh` **hard-fail a config that fits**, gating on a number the engine will never use, while `docker compose up` from the compose dir boots fine. Silent for anyone whose `.env` doesn't set util, so it fires hardest on exactly the desktop-GPU users #535 was written to help. Reproduced on the reference fork's rig: `.env` at `0.86`, Windows desktop holding ~2.5 GB on card 0, `vllm/qwen-35b-a3b-dual` refused with *"needs ~21.6 GiB/card (gpu_memory_utilization=0.92)"* — the real requirement at `0.86` was ~20.2 GiB against 21.1 GiB free. A second site, `preflight_single_card_util` (the #617 advisory warn), had the same blind spot in the opposite direction: it silently no-opped for anyone who **raised** util in `.env` rather than exporting it. | **Fixed locally**: new `preflight_env_file_value <compose> <VAR>` helper in [`scripts/preflight.sh`](../scripts/preflight.sh) reads the compose's own-directory `.env`, and both sites now resolve in docker compose's precedence order — **exported shell var > compose-dir `.env` > YAML `:-default`**. Deliberately does **not** read a parent-level `.env` (compose doesn't either — see the AGENTS.md "`.env` overrides must live next to the compose file" note; reading one would make preflight pass on a value the container never gets). Regression guard: cases 7-9 in [`scripts/tests/test-preflight-gpu-fit.sh`](../scripts/tests/test-preflight-gpu-fit.sh) — verified to FAIL when the `.env` leg is reverted. Upstream-ready as-is; **needs an issue + PR filed**. |
+
+---
+
 ## vLLM (`vllm-project/vllm`)
 
 | Issue / PR | Status | Why it matters | Workaround |
