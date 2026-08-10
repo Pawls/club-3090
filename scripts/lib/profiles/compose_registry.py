@@ -68,6 +68,12 @@ def _entry(
     # PCIe); "prefetch" = vLLM bulk layer prefetch. Surfaced as the c3 catalog
     # "offload" column. First used by the Laguna 118B-MoE offload slugs.
     offload=None,
+    # Minimum HOST RAM in GB for a weight-offload slug — the worst case (all experts
+    # on CPU). This is a HARD GATE, not a recommendation: below it the box thrashes or
+    # OOMs, and preflight_cpu_offload_ram() REFUSES. Surfaced as the c3 catalog
+    # "host RAM" column so a user sees it BEFORE selecting a slug, rather than
+    # discovering it at launch refusal. None = fully VRAM-resident, nothing to warn about.
+    host_ram_gb=None,
     chat_template="native",
     tp,
     max_ctx,
@@ -123,6 +129,7 @@ def _entry(
         "act_format": act_format,
         "act8_capable": act8_capable,
         "offload": offload,
+        "host_ram_gb": host_ram_gb,
         "chat_template": chat_template,
         "tp": tp,
         "pp": 1,
@@ -935,6 +942,23 @@ COMPOSE_REGISTRY = {
         status_note="Qwen3.6-35B-A3B NVFP4-Fast (unsloth compressed-tensors MIXED: true W4A4 NVFP4 expert FFNs + FP8-dynamic attention; quant auto-detects — NOT modelopt), TP=2 @262K. THE AMPERE-VALIDATED NVFP4 PATH — inverse of dual-nvfp4: FIRST-PARTY VALIDATED on the reference 2x3090 2026-07-11 (first MoE-FP4 fallback boot anywhere, MARLIN NvFp4 MoE backend): decode 179.5/179.4 (n=5, CV<=0.8%) + 8-pack think-off 103/150 = DOUBLE STATISTICAL TIE with the AutoRound tier (182.3/182.3, 104-equiv) at full 262K, 22.46 GB/card; cli-40 20/40 = best measured on this MoE. See BENCHMARKS 2026-07-11. PROMOTED to Production w/ caveats 2026-07-11 on the full gate: verify-stress 8/8 (NIAH to 240,635 = 91%, ceiling margin 1,801 MB) + soak-continuous PASS (0 err, 0 growth, 100% retention) + bench + 8-pack. CAVEATS: streaming-toolcall+thinking-on finish=length (known family class, verify-full check 6; non-streaming unaffected); native-FP4 quality unvalidated (numbers = Ampere W4A16 bound). NATIVE FP4 (sm_90+) UNVALIDATED — there the silicon quantizes activations too (true W4A4; family is activation-quant-sensitive), so the native quality number is the arc's missing datapoint. Ships real calibrated k/v scale tensors (nvidia's export ships none) and they LOAD (in-worker verified 2026-07-11 on the 27B sibling); measured effect vs scale=1.0 on this family: none (27B A/B quality/NIAH tie). mtp.* head shipped unquantized but OFF (net-negative on this MoE at TP=2). On Ampere, pick the AutoRound tier unless you specifically want the NVFP4 artifact. No DEFAULTS row (opt-in only).",
     ),
 
+    # Qwen-AgentWorld-35B-A3B — Qwen's specialized language world model for
+    # predicting environment state after an agent action. Same Qwen3-Next MoE
+    # geometry as qwen3.6-35b-a3b, but language-only and MTP-stripped despite
+    # inherited multimodal/MTP config fields. FP8-E4M3 KV production path with
+    # four full-context serving slots; full operational + behavioral gates passed.
+    "vllm/qwen-agentworld-35b-a3b-dual-awq-int4": _entry(
+        model="qwen-agentworld-35b-a3b", weights_variant="cyankiwi-awq-int4",
+        workload="multi-stream-tenant",
+        engine="vllm-stable", drafter=None, kv_format="fp8_e4m3",
+        tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
+        compose_path="models/qwen-agentworld-35b-a3b/vllm/compose/dual/cyankiwi-awq-int4/fp8.yml",
+        default_port=8080,
+        kvcalc_key="qwen-agentworld-35b-a3b:dual",
+        status="production",
+        status_note="Qwen-AgentWorld-35B-A3B language world model, cyankiwi AWQ INT4 compressed-tensors, dual TP=2 at 262K with FP8-E4M3 KV and four serving slots. PRODUCTION gate on 2x3090, stock vLLM v0.25.1: verify-full PASS; verify-stress 8/8 with exact recall through 240,634 tokens (91%); canonical decode 147.12 narrative / 147.24 code TPS, prefill 5,116 @10K / 3,788 @90K; 100-turn soak PASS with 0 errors, 0 silent outputs, 0 MiB growth, p50 147.61 TPS, and 100% retention. The 1,795,289-token KV pool projects 6.85 full-length sequences; C=4 was exercised for six rounds with four simultaneous ~261,529-token prompts: 24/24 completed, 0 errors, 0 silent outputs, 0 MiB growth, 100% retention. FP8 quick quality scored ToolCall 14/15 and InstructFollow 15/15 thinking ON; the matched BF16 baseline full 8-pack scored 125/150 ON vs 101/150 OFF. Checkpoint is language-only (--language-model-only) and has zero mtp.* tensors, so vision and speculation stay off. No DEFAULTS or recommended-model promotion.",
+    ),
+
     # Agents-A1 — InternScience's 35B agentic MoE (Qwen3-Next MoE arch, OWN model
     # per its card's base_model; NOT a qwen fine-tune slug). Official FP8-dynamic
     # compressed-tensors checkpoint; on Ampere sm_86 vLLM serves it Marlin FP8-MoE
@@ -973,6 +997,68 @@ COMPOSE_REGISTRY = {
     # First EXTERNAL-MTP compose in the catalog: the nextn head ships as a SEPARATE
     # GGUF (mtp-Tess-*.gguf), engaged via --spec-draft-model + --spec-type draft-mtp
     # (contrast Deckard's embedded head). kv_format q4_0 (K+V). kvcalc SKIP.
+    # ── DeepSeek-V4-Flash-0731 (284B MoE) — the catalog's first CPU-OFFLOAD slugs.
+    # 137 GiB of routed experts live in HOST RAM; a few bundles are pinned back onto
+    # the GPUs (residency) and the rules are INJECTED by the launcher from detected
+    # free VRAM, never hardcoded. kvcalc SKIP (hybrid MoE + MLA — the calculator has
+    # no model for it). required_sm 8.6 so 3090/4090/5090 all qualify; the 4090/5090
+    # paths are INFERRED from the image's arch list, never booted here.
+    # No DEFAULTS row on purpose: incubating is excluded from the curated walk.
+    "llamacpp/deepseek-flash-dual-q8": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-q8-kxl/offload.yml",
+        # DSpark is REQUIRED, not optional -- the compose passes -md and will not
+        # boot without it, so readiness must gate on it (c3 Start would serve-fail).
+        weights_companions=("dspark",),  # DSpark draft GGUF the compose mounts
+        default_port=8030,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        host_ram_gb=146,
+        required_sm=8.6,
+        status="incubating",
+        status_note="A 284B MoE on 2x24 GB. QUALITY TIER of the two DeepSeek-Flash offload slugs. Stock upstream b10236, zero patches. Three levers compose: CPU expert offload (137 GiB of routed experts in host RAM) + partial residency (bundles pinned back onto the GPUs, sized by the launcher from DETECTED free VRAM) + the DSpark drafter. HARD GATE: ~146 GB host RAM worst case -- preflight REFUSES below it. Ships 200K, NOT 262K: at 262K with the drafter it boots READY at 97.4% VRAM, passes a trivial decode, then dies on a ~15.7K-token prefill (CUDA OOM in cuMemCreate, reproduced 2026-08-06). CANONICAL BENCH PUBLISHED 2026-08-09 (BENCHMARKS.md row 2, reference 2x3090, 3-boot medians): decode 17.1 narrative / 26.9 code at canonical sampling, prefill 369 @10K / 287 @90K, TTFT 169 ms; greedy-replay 35.2. The 8-pack is still owed -- stays incubating until quality lands.",
+        category="frontier",
+    ),
+
+    "llamacpp/deepseek-flash-dual-iq2": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-iq2-xxs", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-iq2-xxs/offload.yml",
+        # DSpark is REQUIRED, not optional -- the compose passes -md and will not
+        # boot without it, so readiness must gate on it (c3 Start would serve-fail).
+        weights_companions=("dspark",),  # DSpark draft GGUF the compose mounts
+        default_port=8031,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        host_ram_gb=86,
+        required_sm=8.6,
+        status="incubating",
+        status_note="REACH TIER of the two DeepSeek-Flash offload slugs: ~86 GB host RAM worst case vs the Q8 tier's ~146 GB, which is what makes a 284B model fit a constrained box. Stock upstream b10236, zero patches; same three levers (offload + launcher-sized residency + DSpark). ~2.6-bit experts. Scoped to dual 24 GB by design. CANONICAL BENCH PUBLISHED 2026-08-09 (BENCHMARKS.md row 3, reference 2x3090): decode 15.4 narrative / 24.3 code at canonical sampling, prefill 436 @10K / 311 @90K -- decode ~10% SLOWER than Q8 (lower draft acceptance on 2.6-bit experts); this tier's case is the RAM gate and prefill, not decode. The 8-pack is still owed, and quality is the open question on a quant this low -- stays incubating. FIRST COMMUNITY VALIDATION: 2x5090 + 123 GB (#931) -- asymmetric 7+8 residency, prefill-90K x3 clean, NIAH ladder to 188K, soak-stable VRAM; that pair of runs is the calibration source for the additive auto-sizer.",
+        category="frontier",
+    ),
+
+    # multi4: AUTHORED HERE, VALIDATED ELSEWHERE. We have 2 cards.
+    "llamacpp/deepseek-flash-multi4-q8": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=4, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/multi4/unsloth-q8-kxl/offload.yml",
+        # DSpark is REQUIRED, not optional -- the compose passes -md and will not
+        # boot without it, so readiness must gate on it (c3 Start would serve-fail).
+        weights_companions=("dspark",),  # DSpark draft GGUF the compose mounts
+        default_port=8032,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        host_ram_gb=120,
+        required_sm=8.6,
+        status="incubating",
+        status_note="4-card QUALITY tier. NEVER BOOTED BY US. 2026-08-07: a 4x3090 + 128 GB owner (@milano, Discord) BOOTED it after correcting two constants this compose had COPIED from the dual file and never re-derived for four cards -- reserve 18000 (a 2-way dense split) granted 1 bundle/card where 2 fit, and the 146 GB gate then REFUSED the 128 GB box this slug exists to serve. Reserve now 14500 (additive #931 recalibration; the interim x0.55-era value was 12000); host_ram_gb=120 HERE is the nominal 4x24 figure (what the catalog displays -- @milano measured it), while the COMPOSE HEADER carries the 146 all-experts-on-CPU worst case and preflight computes the rig-specific need by subtracting detected residency (~121 at 4x24; 4x16 GB fits zero bundles and correctly gates at ~146). The mismatch is deliberate -- do not 'fix' either number to match the other. STILL UNVALIDATED BEYOND BOOT: no real prefill probe yet, and on this model boot is NOT sufficient -- the 262K config booted, passed a trivial decode, then died on the first ~15.7K prefill. Prefill probe requested. The argument is NOT throughput: every layer pinned to a GPU is a layer NOT in host RAM, so host RAM FALLS with card count -- **120 GB MEASURED** at 4x24 GB (was ~113 est.) vs ~146 at 2x24 -- first 4-card boot by @milano 2026-08-07. 128 GB is a very common host config, which the 2-card Q8 slug EXCLUDES and this one FITS, so multi4 is what puts the quality tier inside a mainstream RAM budget. Residency should also be at its best here (~23% of expert traffic on GPU vs 4.7% on two cards). No IQ2 multi slug: on four cards Q8 itself drops into a 128 GB budget, so a low-bit tier is not needed to fit.",
+        category="frontier",
+    ),
+
     "llamacpp/tess-dual-mtp": _entry(
         model="tess-4-27b", weights_variant="migtissera-q4km", workload="fast-chat",
         engine="llama-cpp-local", drafter="tess-mtp-gguf", kv_format="q4_0",

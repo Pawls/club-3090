@@ -94,6 +94,13 @@ _pcie_p2p_available() {
 # rig, and silently withholding P2P from a rig where it works would be the worse
 # error. Promote to a gate only with a confirmed case. Fails open — a driver that
 # doesn't report these fields yields no lines and no warning.
+#
+# ⚠️ Necessary, not sufficient — do NOT read silence here as "P2P will work". The
+# #873 rig reported BAR1 Total 32768 MiB against 32607 MiB of VRAM (so this probe
+# stays quiet) and still hung in NCCL init until the driver was forced onto the
+# static mapping via NVreg_RegistryDwords. What this catches is the *aperture*
+# being too small (the firmware-gated #734 class) — one cause of an unusable
+# mapping, ahead of the hang rather than after it, not all of them.
 _bar1_undersized() {
   nvidia-smi -q -d MEMORY 2>/dev/null | awk '
     /^GPU /             { idx++; sect = ""; next }
@@ -206,7 +213,7 @@ if [ "$_NVLINK_ENABLED" -eq 1 ]; then
   if [ "$NCCL_P2P_LEVEL" != "NVL" ]; then
     _BAR1_BAD="$(_bar1_undersized)"
     if [ -n "$_BAR1_BAD" ]; then
-      echo "[nvlink] WARNING: enabling PCIe P2P, but BAR1 is far smaller than VRAM on: ${_BAR1_BAD}— the patched-driver P2P path maps the FULL VRAM aperture through BAR1 (static BAR1 mapping), which a BAR1 this small cannot back. Peer access can still be ADVERTISED by the driver (topo -p2p: OK) while transfers fail, and NCCL then HANGS during init rather than falling back — if this boot stops right after 'using nccl', this is why. Fix: enable Above 4G Decoding + Re-Size BAR in BIOS (some cards need a ReBAR VBIOS; some driver branches need the static-BAR1 registry override) — docs/PCIE_P2P.md §4-§5. To boot now without P2P: NVLINK_MODE=force_off." >&2
+      echo "[nvlink] WARNING: enabling PCIe P2P, but BAR1 is far smaller than VRAM on: ${_BAR1_BAD}— the patched-driver P2P path maps the FULL VRAM aperture through BAR1 (static BAR1 mapping), which a BAR1 this small cannot back. Peer access can still be ADVERTISED by the driver (topo -p2p: OK) while transfers fail, and NCCL then HANGS during init rather than falling back — if this boot stops right after 'using nccl', this is why. Fix: enable Above 4G Decoding + Re-Size BAR in BIOS; if lspci says the card's Physical Resizable BAR tops out at 256MB it is a VBIOS ceiling, not a BIOS setting (docs/PCIE_P2P.md §4). NOTE: the NVreg static-BAR1 override in §5 does NOT help here — that addresses a driver refusing to USE a full-size aperture, not an aperture that is too small. To boot now without P2P: NVLINK_MODE=force_off." >&2
     fi
     unset _BAR1_BAD
   fi

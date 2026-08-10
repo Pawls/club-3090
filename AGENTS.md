@@ -272,7 +272,11 @@ For **entirely new models** under validation (e.g. "let's try MiniMax-M2.7"): ke
 
 **Long-running tests: redirect full output to a log file — NEVER pipe through `tail`/`head`/`grep`.** A pipe buffers until the process exits, so a `--full` quality run piped to `tail -12` is a ~2 h black box: no live `[N/M]` progress, no partial scores, and an interrupt leaves nothing readable (benchlocal also writes its results JSON only at completion — noonghunna/benchlocal-cli#82 tracks scenario-level resume). Do `bash scripts/quality-test.sh --full ... > /path/run.log 2>&1` (or `| tee`) and summarize from the file; `tail -f` the file for live progress. Learned 2026-07-11 on a template A/B.
 
-**Gotcha (all serving tests):** `verify-*`/`bench.sh` default `MODEL=qwen3.6-27b-autoround` — against any other served model that's a silent HTTP 404. Pass `MODEL=<served-name>` explicitly (or use `rebench-full.sh`, which autodetects).
+**Model resolution (all serving tests): they auto-detect — don't hand-pass `MODEL=` out of superstition.** Every serving script resolves the served-model id from `GET /v1/models` when `MODEL` is unset: `verify.sh`, `verify-full.sh`, `verify-stress.sh`, `bench.sh` (via `preflight_autodetect_model`), plus `quality-test.sh`, `soak-test.sh`, `bench-agentic.sh`, `concurrency-probe.sh`, `spec-sweep.sh`, `rebench-full.sh` (each inline). `bench.sh` announces it: `[autodetect] served model='…'`. An explicit `MODEL=` **always wins and is never clobbered**. The `qwen3.6-27b` literal in some of them is a **last-resort fallback for an unreachable endpoint**, not the effective default.
+
+⚠️ **Do pin `MODEL=` on multi-model endpoints** (llama-swap, or a compose registering several `--served-model-name` aliases): detection takes `data[0].id`, which may not be the alias you mean.
+
+> *This paragraph used to read "`verify-*`/`bench.sh` default `MODEL=qwen3.6-27b-autoround` — against any other served model that's a silent HTTP 404." That stopped being true when #372 landed autodetect, and the stale wording caused a wrong support answer on [#873](https://github.com/noonghunna/club-3090/issues/873) (a contributor was told his bench run would 404 when it would have auto-resolved). Verified against all ten scripts 2026-08-04.*
 
 The pipeline is layered: each script has a different question it answers ("does it serve / work / survive / fast / behave correctly / stay healthy"). Skipping any layer can mask regressions.
 
@@ -303,6 +307,11 @@ bash benchlocal-cli/tools/build-sandboxes.sh   # ~30 GB free; `docker system pru
 ### serve-cockpit (c3)
 `tools/serve-cockpit/` is the Textual TUI cockpit — a separate Python app with its **own venv and pytest suite**, NOT covered by `scripts/tests/*.sh`. See its `README.md`. For agents:
 - Run tests with `tools/serve-cockpit/.venv/bin/python -m pytest tools/serve-cockpit/tests/ -q`. `test_services.py` + `test_registry_parser.py` are fast — run them on every c3 change; `test_app_headless.py` boots the full app and is slow — prefer targeted `-k` selection while iterating.
+- ⚠️ **The c3 suite is NOT in `scripts/tests/*.sh`, so the full sweep being green says nothing about c3.** A c3 change needs both, run separately. #905 shipped two red c3 tests behind a green `99/0` sweep for exactly this reason.
+- ⚠️⚠️ **Never run this venv from a git worktree — it silently tests the WRONG TREE.** The editable install pins **absolute** paths (`.venv/lib/python*/site-packages/_editable_impl_club3090_*.pth` → `/…/club-3090/tools/serve-cockpit` and `/…/tools/tui-core` in the **main checkout**). So `import club3090_cockpit` resolves to the main tree no matter your cwd or which worktree you are in: pytest collects *your* test files and runs them against **master's** application code. That mismatch produced **495 failures where 2 were real**, and — far worse — it *masked* a genuine bug in the change under test. Do c3 work in the **main checkout**, or build a venv inside the worktree. Verify which code you are actually testing before trusting a result:
+  ```bash
+  cd tools/serve-cockpit && .venv/bin/python -c "import club3090_cockpit; print(club3090_cockpit.__file__)"
+  ```
 - c3 consumes the `registry-emit.sh --json` contract. Adding a field to the emit means threading it through `services.py` (`_variant_row_from_dict`) and, if displayed, `app.py` — and emit changes also need the `test-switch-registry-parity` / `test-launch-registry-parity` guards green.
 - DataTable cells render in terminals: avoid U+FE0F variation-selector emoji (`⚠️ 👁️ ⏸️ 🗑️`) in fixed-width columns — Rich reserves 2 cells but many terminals draw 1, misaligning every column after it. Use `Emoji_Presentation=Yes` glyphs (see `_STATUS_GLYPH` in `app.py`).
 
