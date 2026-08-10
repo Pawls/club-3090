@@ -139,7 +139,7 @@ Set `MODEL_DIR` **consistently** — either `export` it in your shell *or* put i
 
 WSL2's container CUDA context reserves **~1.3 GiB of VRAM that `nvidia-smi` doesn't show at idle** but is locked once a container starts — so the headless-Linux defaults can crash on boot. The fixes (don't repeat them here):
 
-- **Single-card vLLM:** drop `GPU_MEMORY_UTILIZATION=0.94` into `models/qwen3.6-27b/vllm/compose/.env`.
+- **Single-card vLLM:** drop `GPU_MEMORY_UTILIZATION=0.94` into the `.env` **next to the compose you launch** — e.g. `models/qwen3.6-27b/vllm/compose/single/autoround-int4/.env`. A `.env` at the parent `compose/` level is never read (Compose only auto-loads from the directory it's invoked in).
 - **Single-card llama.cpp / ik_llama:** lower the context (e.g. `CTX_SIZE=131072`), since these allocate by fixed size, not a ratio.
 
 **Shrink the overhead (not just budget for it).** Part of the ~1.3 GiB is the WSL2 GPU-paravirtualization context itself — unavoidable while you're on WSL2 at all — but the **display/WDDM portion is reclaimable**, often most of it:

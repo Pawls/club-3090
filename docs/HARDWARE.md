@@ -575,10 +575,10 @@ Known occurrences:
 
 #### Override
 
-All single-card and PCIe dual-card composes now expose `PYTORCH_CUDA_ALLOC_CONF` as a `${...}` override knob. Drop a `.env` next to the compose file (or export the var in your shell):
+All single-card and PCIe dual-card composes now expose `PYTORCH_CUDA_ALLOC_CONF` as a `${...}` override knob. Drop a `.env` **in the compose file's own directory** — Compose auto-loads `.env` only from the directory it is invoked in, and the launchers `cd` there — or export the var in your shell:
 
 ```sh
-# models/qwen3.6-27b/vllm/compose/.env
+# models/qwen3.6-27b/vllm/compose/single/autoround-int4/.env  (the compose's OWN dir)
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 ```
 
@@ -597,7 +597,7 @@ A third runtime failure mode separate from TDR + `expandable_segments`: at ~50-6
 Since 2026-05-07 ([PR #99](https://github.com/noonghunna/club-3090/pull/99) by @easel) all qwen3.6-27b vLLM composes expose `VLLM_ENFORCE_EAGER` as an env-var hook so you can enable the flag from gitignored `.env` instead of editing tracked files:
 
 ```sh
-# models/qwen3.6-27b/vllm/compose/.env
+# models/qwen3.6-27b/vllm/compose/single/autoround-int4/.env  (the compose's OWN dir)
 VLLM_ENFORCE_EAGER=1
 ```
 
@@ -605,7 +605,7 @@ Then `docker compose up -d` as usual. The bash entrypoint expands `${VLLM_ENFORC
 
 ### Combined WSL2 / laptop `.env` template
 
-Three overrides commonly land together on WSL2 / laptop rigs (5090 Laptop validated 2026-05-07 by @easel). Drop this into `models/qwen3.6-27b/vllm/compose/.env`:
+Three overrides commonly land together on WSL2 / laptop rigs (5090 Laptop validated 2026-05-07 by @easel). Drop this into the `.env` **next to the compose you launch** (e.g. `models/qwen3.6-27b/vllm/compose/single/autoround-int4/.env`) — a `.env` at the parent `compose/` level is never read:
 
 ```sh
 # WSL2 boot overhead caps safe gpu_memory_utilization at ~0.94 (vs 0.95 desktop default)
