@@ -3027,7 +3027,24 @@ class CockpitData:
                 sm = _re.search(r'"method"\s*:\s*"([a-z0-9_]+)"', txt)
                 if sm:
                     method = sm.group(1)
-                    nm = _re.search(r'"num_speculative_tokens"\s*:\s*(\d+)', txt)
+                    # num_speculative_tokens is written EITHER as a literal
+                    #   "num_speculative_tokens":3
+                    # or parameterized behind an env default
+                    #   "num_speculative_tokens":${SPEC_N:-4}
+                    # Both ship today (13 composes use the second form, under five
+                    # different var names: SPEC_N, SPEC_N_MAX, NUM_SPEC_TOKENS,
+                    # MTP_SPEC_TOKENS, …), so match the optional ${VAR:- prefix and
+                    # read the DEFAULT — that is what the compose serves unless the
+                    # operator overrides it, which is exactly what this editor
+                    # pre-fills.  A literal-only regex silently yielded SPEC_N=""
+                    # and dropped the "n=N" from the drafter label.
+                    # ("method" is a quoted literal in every shipped compose — mtp
+                    # or dflash — so it needs no such handling yet.)
+                    nm = _re.search(
+                        r'"num_speculative_tokens"\s*:\s*'
+                        r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*:-)?(\d+)',
+                        txt,
+                    )
                     out["SPEC_METHOD"] = method                    # raw, e.g. "mtp"
                     out["SPEC_N"] = nm.group(1) if nm else ""
                     out["SPEC_DRAFTER"] = (
