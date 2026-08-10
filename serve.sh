@@ -534,24 +534,18 @@ fi
 # resolved mode via a state file it bind-mounts. GPU-mutex → one live model, so one global file
 # is exact. Mirrors what the template does: --preserve-window N → window · --preserve → full ·
 # --no-preserve → off · no flag → the compose's own effective PRESERVE_THINKING default.
-_ps_mode=off; _ps_window=0
-if [[ -n "$WINDOW_FLAG" && "$WINDOW_FLAG" -gt 0 ]]; then
-  _ps_mode=window; _ps_window="$WINDOW_FLAG"
-elif [[ "$PRESERVE_FLAG" == keep ]]; then
-  _ps_mode=full
-elif [[ "$PRESERVE_FLAG" == strip ]]; then
-  _ps_mode=off
-elif grep -qE '\$\{PRESERVE_THINKING' "$compose"; then
-  _w="$(_effective "$compose" PRESERVE_THINKING_WINDOW)"
-  if   [[ "$_w" =~ ^[0-9]+$ && "$_w" -gt 0 ]];               then _ps_mode=window; _ps_window="$_w"
-  elif [[ "$(_effective "$compose" PRESERVE_THINKING)" == true ]]; then _ps_mode=full
-  fi
+#
+# The resolution + write now live in scripts/preserve-state.sh so that EVERY launcher writes
+# this file — switch.sh / launch.sh / the serve-cockpit all boot models too, and when only
+# serve.sh wrote it those boots silently inherited the last serve.sh mode. We pass the explicit
+# mode when a flag was given and let the script read the compose otherwise.
+if [[ -n "$WINDOW_FLAG" && "$WINDOW_FLAG" -gt 0 ]]; then _ps_args=(--mode window --window "$WINDOW_FLAG")
+elif [[ "$PRESERVE_FLAG" == keep  ]];                then _ps_args=(--mode full)
+elif [[ "$PRESERVE_FLAG" == strip ]];                then _ps_args=(--mode off)
+else                                                      _ps_args=(--compose "$compose")
 fi
-if [[ "${NO_LITELLM:-0}" != 1 && -d "$REPO/$LITELLM_DIR" ]]; then
-  # Truncate-in-place (same inode) so the bind mount reflects it live — no litellm restart.
-  printf '{"mode":"%s","window":%s}\n' "$_ps_mode" "$_ps_window" > "$REPO/$LITELLM_DIR/preserve_state.json"
-  echo "Preserve carryover: mode=$_ps_mode window=$_ps_window  (LiteLLM cross-turn <think> re-inline)"
-fi
+bash "$REPO/scripts/preserve-state.sh" "${_ps_args[@]}" \
+  || echo "  ⚠ preserve-state sync failed — LiteLLM <think> carryover may be stale" >&2
 
 echo "Target: $compose"
 echo "Evicting current GPU model:"; evict

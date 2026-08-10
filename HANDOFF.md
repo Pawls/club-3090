@@ -147,3 +147,143 @@ GPU_MEMORY_UTILIZATION=0.92
 3. If the earlier `shm_broadcast.py` engine hang (diagnosed as likely VRAM/allocator pressure under TP=2, no crash/traceback in logs) recurs, the next lever is dropping `GPU_MEMORY_UTILIZATION` further (0.92 → 0.88-0.90) in the now-correctly-located `.env`.
 4. If more models get installed later, check their compose directories for the same `.env`-location bug before assuming any WSL2/rig-specific overrides are actually active — `docker compose config` (run from the compose's own directory) is the fast way to verify.
 5. User's stated goal from here: continue "optimizing things" — open-ended, likely concurrency tuning, KV-cache tradeoffs, possibly `dual-turbo` for multi-stream throughput, or quality-vs-speed tuning via `quality-test.sh`.
+
+---
+
+# Update — 2026-08-09 (code change: LiteLLM preserve-state launcher gap + SPEC_N parser)
+
+> **Different in kind from the sections above.** Those are rig-tuning snapshots. This one is a
+> **code change** sitting UNCOMMITTED in the working tree. Read this before touching
+> `scripts/preserve-state.sh`, `serve.sh`'s tail, `CockpitData.serve()`, or `app.py::_with_force`.
+>
+> The load-bearing invariants are also written as comments at each site — those are the durable
+> copy. This section is the narrative: *why* the change exists and what nearly went wrong.
+
+## 1. The bug this started from
+
+`services/litellm/custom_hooks.py` §C re-inlines prior-turn `<think>` blocks into requests. That
+hook runs **in a separate container** and cannot read the GPU compose's environment, so the
+launcher must hand it the resolved mode out-of-band. The transport is
+`services/litellm/preserve_state.json` (bind-mounted into the litellm container).
+
+**Only `serve.sh` ever wrote that file.** The serve-cockpit boots models via
+`bash scripts/switch.sh <slug>`, which never touched it — so a cockpit-launched model inherited
+whatever mode the *last* `serve.sh` boot left behind.
+
+This fails **silently**: nothing errors, the hook just replays `<think>` into a model whose compose
+says not to. Caught live — the file held `{"mode":"full"}` while `vllm/qwen-35b-a3b-dual` resolves
+to `off` (its co-located `.env` sets `PRESERVE_THINKING=false`). That carryover is exactly what
+seeded thought-loops on the always-reasoning a3b lanes (see `MODEL_REFERENCE.md` fn 10).
+
+## 2. What was built
+
+**`scripts/preserve-state.sh` (NEW)** — the single resolver. Takes `--slug` (registry lookup),
+`--compose <path>`, or an explicit `--mode off|full|window [--window N]`. Honours `NO_LITELLM=1`
+and no-op's cleanly when `services/litellm/` is absent.
+
+- **`serve.sh`** — its inline 18-line resolution block now delegates here, passing an explicit
+  `--mode` when `--preserve` / `--no-preserve` / `--preserve-window` was given, else `--compose`.
+- **The cockpit** — `CockpitData.serve()` now emits
+  `["bash", "-c", <script>, "cockpit-serve", <slug>]`, where the script runs `switch.sh` then
+  `preserve-state.sh`.
+
+**Design decision: `switch.sh` was deliberately NOT modified.** `AGENTS.md` says launchers
+auto-derive from the registry and shouldn't be hand-edited, and it's upstream-tracked — changes
+there become merge conflicts on every upstream pull. If a future launcher boots GPU models, it must
+call `preserve-state.sh` too, or it re-opens this exact gap.
+
+## 3. Invariants you must not break
+
+| Invariant | Why | Enforced by |
+|---|---|---|
+| **Slug is the LAST element of `plan.cmd`** | `app.py` recovers it via `plan.cmd[-1]` for the pending-serve watch (~L9183) and the problem reporter (~L9394) | `assert_serve_cmd()` in `tests/conftest.py` |
+| **Slug is POSITIONAL, never interpolated into the script text** | otherwise a slug can inject shell | same helper (asserts `slug not in script`) |
+| **`--force` lives INSIDE the script text** | keeps it from displacing the slug from the end of `cmd` | same helper (`force=` arg) |
+| **`preserve_state.json` is truncated IN PLACE (same inode)** | the litellm container bind-mounts that inode; a temp-file + `os.replace()` swaps it and the container keeps reading the old one. **This is a deliberate exception to AGENTS.md's write-atomically rule.** | comment in `preserve-state.sh` |
+| **One global state file** | only correct because of the GPU-mutex (one live model). If that stops holding, this must become per-model. | comment in `preserve-state.sh` |
+
+## 4. The trap I fell into — read this before changing the cmd shape
+
+Moving `scripts/switch.sh` from an argv element into script text **silently broke forcing.**
+`app.py::_with_force()` splices argv and guards on `if "scripts/switch.sh" in cmd` — a list-
+membership test that quietly evaluated False, so `--force` was never injected. Pressing `f` on an
+unsafe gate would have booted *unforced*.
+
+That is the **same bug class the whole change set is about**: something changed shape, and a
+consumer pattern-matching on it silently stopped working. I reintroduced it one layer up.
+
+- The fast tests did **not** catch it. Only the full `test_app_headless.py` did.
+- 5 of the 7 failures printed `switch.sh "$slug"` with no `--force` — the tests were saying exactly
+  what was wrong, and I first misread them as assertion churn. **Read the assertion payload.**
+- Fix: `_with_force()` now swaps in `CockpitData._serve_script(force=True)` — the same builder
+  `serve()` uses — instead of splicing argv. A legacy branch still handles the old shape.
+
+**If you change the serve cmd shape again**, grep for consumers first:
+`grep -rn 'scripts/switch.sh' tools/serve-cockpit/club3090_cockpit/*.py` and
+`grep -rn 'cmd\[-1\]\|"--force" in' tools/serve-cockpit/`.
+
+## 5. Second bug, found in the same suite run (SPEC_N)
+
+Two `TestServeOverrides` failures were **pre-existing** (baselined against a clean stash), and
+genuinely broken — not flaky. Commit `72272e60` parameterized a compose:
+
+```diff
+- '{"method":"mtp","num_speculative_tokens":3}'
++ '{"method":"mtp","num_speculative_tokens":${MTP_SPEC_TOKENS:-3}}'
+```
+
+`serve_override_defaults()` matched `"num_speculative_tokens"\s*:\s*(\d+)` — literal digits only —
+so it returned `SPEC_N=""` and degraded the drafter label from `MTP n=3` to `MTP`.
+
+**Blast radius was wider than the tests showed:** the tests only cover `vllm/dual`, but **13
+composes** use the interpolated form under **five** variable names (`SPEC_N`, `SPEC_N_MAX`,
+`NUM_SPEC_TOKENS`, `MTP_SPEC_TOKENS`, …). Fixed by matching an optional `${VAR:-` prefix and
+reading the default.
+
+Two things verified rather than assumed:
+- The 11 **Gemma** composes still parse empty — **correct**. Their `num_speculative_tokens` hits are
+  inside comment blocks; MTP is deliberately disabled there (v0.24.0 breaks tool-calling). No active
+  drafter → no label.
+- That exposed that the parser reads commented lines, so every slug that *does* match was checked to
+  be matching a live, uncommented config line.
+
+**Left deliberately:** the `"method"` regex stays literal-only — it's a quoted literal in all 28
+shipped composes, so generalizing would be speculative. Noted in-code so it reads as a decision.
+
+## 6. Verification performed (reproduce before trusting a refactor)
+
+- **77/77 compose parity.** The ported resolver was diffed against `serve.sh`'s original logic
+  across every compose — zero mismatches. This is THE test that matters if you touch resolution:
+  extract serve.sh's `_compose_default`/`_env_override`/`_effective` into a harness and compare.
+- **Full cockpit suite: `876 passed, 0 failed`** (~8.7 min).
+  ```bash
+  cd tools/serve-cockpit && uv run --with pytest --with pytest-asyncio \
+    --with-editable ../tui-core --with-editable . pytest tests/ -q > /tmp/suite.log 2>&1
+  ```
+  ⚠️ `pytest` is **not** installed in the repo `.venv`; the above uses an ephemeral `uv` env so the
+  venv isn't mutated. It writes `tools/serve-cockpit/uv.lock` — **delete it afterwards.**
+  ⚠️ Redirect to a log, never pipe to `tail` (AGENTS.md: a pipe buffers until exit).
+- **Behavioral tests with stubs:** switch.sh failure propagates its exit code and skips the sync;
+  preserve-state failure is non-fatal (model is already up); slug `evil; touch /tmp/PWNED` does not
+  inject; forcing is idempotent; non-serve plans untouched.
+- `scripts/tests/test-locale-utf8.sh` passes with the new script (it carries the required
+  `export PYTHONUTF8="${PYTHONUTF8:-1}"` above its first `python3` call).
+
+**Known flaky:** `test_one_tab_from_tab_bar_reaches_scene_table` failed once in a combined run,
+then passed 3/3 alone and 571/571 in its own file. It's a Textual focus assertion driven by
+`pilot.pause()`. Nothing in this change touches focus or tab order.
+
+## 7. State of the tree / open items
+
+**UNCOMMITTED** — 7 modified files + `scripts/preserve-state.sh` (new, +x) + `DAILY_DRIVERS.md`
+(new, a model tier-list unrelated to this code change). Net ≈ +134/−49.
+
+1. **`services/litellm/preserve_state.json` was left at `{"mode":"off","window":0}`** (was `full`).
+   Changed as a side effect of testing; left at `off` deliberately — `full` was the stale buggy
+   value, nothing was running, and the next boot rewrites it. Flip it back if you disagree.
+2. **Nothing is committed.** Suggested split: (a) `preserve-state.sh` + `serve.sh` + cockpit wiring
+   + tests, (b) the SPEC_N parser fix, (c) `DAILY_DRIVERS.md`.
+3. The SPEC_N fix is arguably **upstreamable** — the parser bug affects any rig using a
+   parameterized compose, not just this one.
+4. `DAILY_DRIVERS.md` §"9.0" documents that both launchers are now equivalent for correctness; if
+   this change is reverted, that line becomes wrong.

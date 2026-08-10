@@ -73,6 +73,7 @@ from club3090_cockpit.data import (
     strip_ansi,
 )
 from club3090_cockpit.services import CockpitData, RealRunner, RunResult, _variant_row_from_dict
+from tests.conftest import assert_serve_cmd
 
 
 _REAL_RUN = RealRunner.run
@@ -1491,8 +1492,7 @@ class TestActionBuilders:
         cd = CockpitData(ROOT, runner=full_runner())
         plan = cd.serve("vllm/dual")
         assert plan.kind == "serve"
-        assert plan.cmd == ["bash", "scripts/switch.sh", "vllm/dual"]
-        assert "--force" not in plan.cmd
+        assert_serve_cmd(plan.cmd, "vllm/dual")
         assert plan.requires_reconcile is True
 
     def test_serve_force_requires_reason(self):
@@ -1503,7 +1503,9 @@ class TestActionBuilders:
     def test_serve_force_with_reason(self):
         cd = CockpitData(ROOT, runner=full_runner())
         plan = cd.serve("vllm/dual", force=True, force_reason="user override after VRAM check")
-        assert "--force" in plan.cmd
+        # --force now lives INSIDE the `bash -c` script text, not as a trailing
+        # argv element — that keeps the slug last for app.py's cmd[-1] lookup.
+        assert_serve_cmd(plan.cmd, "vllm/dual", force=True)
         assert plan.force is True
         assert plan.force_reason
 
@@ -2401,7 +2403,7 @@ class TestExecuteActionGated:
         assert executed is True
         assert rec is not None and rec.safe is True
         assert len(write_runner.started) == 1
-        assert write_runner.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+        assert_serve_cmd(write_runner.started[0]["cmd"], "vllm/dual")
 
     @pytest.mark.asyncio
     async def test_force_override_proceeds_despite_unsafe(self):

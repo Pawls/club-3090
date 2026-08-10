@@ -63,3 +63,31 @@ def _no_live_subprocess(monkeypatch):
     monkeypatch.setattr(RealRunner, "run", _blocked_real_run)
     monkeypatch.setattr(SubprocessRunner, "start_raw", _blocked_start_raw)
     yield
+
+
+def assert_serve_cmd(cmd: list[str], slug: str, *, force: bool = False) -> None:
+    """Assert a serve ActionPlan's cmd matches the two-step serve contract.
+
+    A serve is `bash -c <script> cockpit-serve <slug>`: switch.sh boots the
+    model, then preserve-state.sh hands the resolved cross-turn <think> mode to
+    the LiteLLM re-inline hook (it reads services/litellm/preserve_state.json,
+    which only serve.sh used to write — so cockpit-launched models silently
+    inherited the last serve.sh mode).
+
+    Asserted structurally, not as an exact list, so the script's wording can
+    change without churning every call site.  The load-bearing invariants:
+
+      * the slug is the LAST element — app.py recovers it via ``plan.cmd[-1]``
+        for the pending-serve watch and the problem reporter;
+      * the slug is a POSITIONAL arg, never interpolated into the script text
+        (no shell injection via a slug);
+      * ``--force`` lives inside the script text, so it can't displace the slug
+        from the end of cmd.
+    """
+    assert cmd[:2] == ["bash", "-c"], f"serve should run under `bash -c`, got {cmd[:2]}"
+    assert cmd[-1] == slug, f"slug must be LAST (app.py reads cmd[-1]), got {cmd[-1]!r}"
+    script = cmd[2]
+    assert slug not in script, "slug must be positional, not interpolated into the script"
+    assert "scripts/switch.sh" in script, "serve must still boot via switch.sh"
+    assert "scripts/preserve-state.sh" in script, "serve must sync the LiteLLM preserve state"
+    assert ("--force" in script) is force, f"--force presence should be {force}"

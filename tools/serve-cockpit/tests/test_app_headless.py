@@ -82,6 +82,7 @@ from club3090_cockpit.__main__ import (
     load_surface_setting,
     save_surface_setting,
 )
+from tests.conftest import assert_serve_cmd
 
 
 FAKE_REPO_ROOT = Path("/tmp/fake-club-3090-test-root")
@@ -2199,7 +2200,7 @@ class TestServeFoldedIntoRun:
             assert isinstance(app.screen, ConfirmActionScreen)
             plan = app.screen._plan
             assert plan.kind == "serve"
-            assert "--force" not in plan.cmd
+            assert_serve_cmd(plan.cmd, plan.cmd[-1], force=False)
             assert plan.requires_reconcile is True
 
     @pytest.mark.asyncio
@@ -2232,7 +2233,7 @@ class TestServeFoldedIntoRun:
             assert "serving" in live.classes
             # Gated executor ran (mocked write runner), never a live spawn.
             assert len(wr.started) == 1
-            assert wr.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual")
 
 
 # ===========================================================================
@@ -3223,7 +3224,7 @@ class TestEveryWriteGoesThroughReconcile:
             await pilot.press("enter")          # footer Confirm
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert wr.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual")
 
     @pytest.mark.asyncio
     async def test_dispatch_refuses_when_unsafe_no_force(self):
@@ -3254,7 +3255,7 @@ class TestEveryWriteGoesThroughReconcile:
             app.dispatch_action(plan)
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "--force" in wr.started[0]["cmd"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual", force=True)
 
     @pytest.mark.asyncio
     async def test_force_button_reissues_forced_plan(self):
@@ -3273,7 +3274,7 @@ class TestEveryWriteGoesThroughReconcile:
             await pilot.press("f")              # footer override (Force / Switch anyway)
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "--force" in wr.started[0]["cmd"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual", force=True)
 
     @pytest.mark.asyncio
     async def test_scene_switch_dispatch_through_gate(self):
@@ -5596,7 +5597,7 @@ class TestModalKeyCapture:
             await pilot.press("enter")
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert wr.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual")
 
     @pytest.mark.asyncio
     async def test_esc_cancels_confirm_modal_no_write(self):
@@ -9034,7 +9035,7 @@ class TestA11ConfirmModalDiscoverableBindings:
             await pilot.press("enter")
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert wr.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual")
 
     @pytest.mark.asyncio
     async def test_f_still_forces_through_the_same_gate(self):
@@ -9053,7 +9054,7 @@ class TestA11ConfirmModalDiscoverableBindings:
             await pilot.press("f")
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "--force" in wr.started[0]["cmd"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual", force=True)
 
     @pytest.mark.asyncio
     async def test_f_is_inert_on_a_safe_gate(self):
@@ -9101,7 +9102,7 @@ class TestA11ConfirmModalDiscoverableBindings:
             await pilot.press("f")
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "--force" in wr.started[0]["cmd"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual", force=True)
 
 
 # ===========================================================================
@@ -9222,7 +9223,7 @@ class TestServeConfirmStateAware:
             await pilot.press("enter")                        # Start
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert wr.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual")
             assert "--force" not in wr.started[0]["cmd"]
 
     # (c) ⏎ on a NOT-serving slug with a GPU conflict → Start + Cancel, warned.
@@ -9289,7 +9290,7 @@ class TestServeConfirmStateAware:
             await _settle(pilot)
             assert len(wr.started) == 1
             # teardown-then-serve == switch.sh --force <slug> (force folded in).
-            assert "--force" in wr.started[0]["cmd"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual", force=True)
             assert wr.started[0]["cmd"][-1] == "vllm/dual"
 
     # (c'''') a NON-functional (experimental) slug → Force Start: switch.sh refuses
@@ -9327,7 +9328,7 @@ class TestServeConfirmStateAware:
             await pilot.press("enter")                                  # Force Start
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "--force" in wr.started[0]["cmd"]                     # the fix
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/qwen-27b-dual-max", force=True)                     # the fix
             assert wr.started[0]["cmd"][-1] == "vllm/qwen-27b-dual-max"
 
     @pytest.mark.asyncio
@@ -9776,7 +9777,7 @@ class TestTier1ReconcileGateSafetyUntouched:
             await pilot.press("f")
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "--force" in wr.started[0]["cmd"]
+            assert_serve_cmd(wr.started[0]["cmd"], "vllm/dual", force=True)
 
 
 # ===========================================================================

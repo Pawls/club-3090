@@ -2903,16 +2903,42 @@ class CockpitData:
 
     # ── WRITE: action builders (wired, execution-gated) ──────────────────────────
 
+    # Two-step serve: switch.sh boots the model, then preserve-state.sh hands the
+    # resolved cross-turn <think> mode to the LiteLLM re-inline hook
+    # (services/litellm/custom_hooks.py §C reads preserve_state.json, which it
+    # bind-mounts).  serve.sh has always written that file; switch.sh does not, so
+    # a cockpit-launched model used to inherit whatever mode the LAST serve.sh boot
+    # left behind — silent, because nothing errors: the hook just replays prior
+    # <think> into a model whose compose says not to (the carryover that seeded
+    # thought-loops on the always-reasoning 35B-A3B lanes).
+    #
+    # Run under `bash -c` because ActionPlan carries a single cmd.  The SLUG is
+    # passed POSITIONALLY and is never interpolated into the script text — it
+    # can't inject shell, and it stays the LAST element of cmd, which app.py
+    # relies on to recover the slug (`plan.cmd[-1]`) for the pending-serve watch
+    # and the problem reporter.  ``--force`` is a literal we control, so it goes
+    # inside the script text rather than becoming a trailing argv element.
+    #
+    # The preserve-state step is non-fatal: the model is already up by then, so a
+    # failure warns instead of turning a good boot into a reported failure.
+    @staticmethod
+    def _serve_script(force: bool) -> str:
+        return (
+            'slug="$1"\n'
+            f'bash scripts/switch.sh {"--force " if force else ""}"$slug" || exit $?\n'
+            'bash scripts/preserve-state.sh --slug "$slug" '
+            '|| echo "warn: preserve-state sync failed — LiteLLM <think> carryover may be stale" >&2\n'
+        )
+
     def serve(self, slug: str, *, force: bool = False, force_reason: str = "") -> ActionPlan:
-        """Build the GATED switch.sh <slug> action.  ``--force`` is only added
-        when explicitly requested WITH a reason (surfaced to the user)."""
-        cmd = ["bash", "scripts/switch.sh"]
-        if force:
-            if not force_reason:
-                raise ValueError("force=True requires a force_reason (surfaced to user)")
-            cmd.append("--force")
-        cmd.append(slug)
-        desc = f"switch.sh {'--force ' if force else ''}{slug}"
+        """Build the GATED switch.sh <slug> action, followed by the LiteLLM
+        preserve-state sync.  ``--force`` is only added when explicitly requested
+        WITH a reason (surfaced to the user)."""
+        if force and not force_reason:
+            raise ValueError("force=True requires a force_reason (surfaced to user)")
+        # argv: $0=label, $1=slug — slug LAST (app.py reads plan.cmd[-1]).
+        cmd = ["bash", "-c", self._serve_script(force), "cockpit-serve", slug]
+        desc = f"switch.sh {'--force ' if force else ''}{slug} + preserve-state sync"
         return ActionPlan(
             kind="serve",
             cmd=cmd,

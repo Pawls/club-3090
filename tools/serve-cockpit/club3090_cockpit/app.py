@@ -2525,13 +2525,30 @@ class ConfirmActionScreen(ModalScreen):
 
 
 def _with_force(plan: ActionPlan) -> list[str]:
-    """Insert --force into a serve switch.sh command for the forced re-issue.
+    """Rebuild a serve command as its --force variant for the forced re-issue.
 
     Only the serve (switch.sh) plan supports --force; for other kinds the
-    command is unchanged (the force flag just relaxes the gate refusal)."""
+    command is unchanged (the force flag just relaxes the gate refusal).
+
+    A serve plan is `bash -c <script> cockpit-serve <slug>` — switch.sh is a
+    token INSIDE the script text, not an argv element, and --force lives there
+    too (so the slug stays last for the cmd[-1] lookups below).  We therefore
+    swap in the forced script from the same builder ``CockpitData.serve`` uses,
+    rather than splicing argv: one source of truth for the shape.
+
+    The legacy `bash scripts/switch.sh <slug>` branch is kept so a plan built by
+    an older code path (or a pickled/replayed one) still forces correctly.
+    """
     cmd = list(plan.cmd)
-    if plan.kind == "serve" and "scripts/switch.sh" in cmd and "--force" not in cmd:
-        # switch.sh --force <slug>: insert before the slug (last positional).
+    if plan.kind != "serve":
+        return cmd
+    # Current shape: the script text carries switch.sh and --force.
+    if len(cmd) >= 3 and cmd[0] == "bash" and cmd[1] == "-c" and "scripts/switch.sh" in cmd[2]:
+        if "--force" not in cmd[2]:
+            cmd[2] = CockpitData._serve_script(force=True)
+        return cmd
+    # Legacy shape: switch.sh --force <slug> (insert before the trailing slug).
+    if "scripts/switch.sh" in cmd and "--force" not in cmd:
         cmd.insert(len(cmd) - 1, "--force")
     return cmd
 
