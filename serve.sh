@@ -96,6 +96,8 @@ declare -A COMPOSE=(
   [hauhau-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/vision.yml"
   [27b-single]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/fp8-mtp.yml"
   [apex-yarn-1m]="models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml"
+  [muse]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/dflash-vision.yml"
+  [muse-long]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/long.yml"
 )
 
 declare -A GROUP=(
@@ -103,7 +105,7 @@ declare -A GROUP=(
   [carnice]=repo [deckard]=repo [hauhau]=repo [omni]=repo [agents-a1]=repo
   [apex-vision-ik]=ours [apex-vision-mainline]=ours [deckard-vision]=ours
   [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours [27b-vision]=ours
-  [ud-vision]=ours
+  [ud-vision]=ours [muse]=ours [muse-long]=ours
 )
 
 declare -A INFO=(
@@ -125,6 +127,8 @@ declare -A INFO=(
   [hauhau-vision]=":8073  dual · 262K · uncensored · vision + MTP kept"
   [27b-single]=":8021  single GPU0 · 28K · vision · MTP — fast solo, tiny ctx"
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
+  [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
+  [muse]=":8210  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 131K · vision · DFlash n=15 · llama.cpp master 030ebb5 (local build) · 🧪 UNVALIDATED — effort via REASONING_STRENGTH=low|medium|high|xhigh, not --think"
 )
 
 APEX_GGUF="qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf"
@@ -137,6 +141,12 @@ CARNICE_GGUF="carnice-v2-27b-gguf/stuchapin-q8/Carnice-V2-27B-Q8_0-mtp.gguf"
 UBERGARM_27B_GGUF="qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf"
 QWEN_27B_MMPROJ="qwen3.6-27b-gguf/mmproj-F16.gguf"
 UD_GGUF="qwen3.6-35b-a3b-gguf/unsloth-ud-iq4xs/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
+# Muse Glimmer: trunk + perception encoder + DFlash drafter, all three from Meta's
+# official GGUF repo. Unsloth mirrors the mmproj/drafter byte-for-byte, so there is
+# no reason to mix repos; their added value is the wider quant ladder for the trunk.
+MUSE_GGUF="muse-glimmer-30b-gguf/meta-kquant/muse-glimmer-30B-kquant-17gb.gguf"
+MUSE_MMPROJ="muse-glimmer-30b-gguf/meta-kquant/mmproj-kquant.gguf"
+MUSE_DFLASH="muse-glimmer-30b-gguf/meta-kquant/dflash-kquant.gguf"
 
 declare -A WEIGHTS=(
   [apex]="$APEX_GGUF"
@@ -151,6 +161,8 @@ declare -A WEIGHTS=(
   [carnice]="$CARNICE_GGUF"
   [ud-vision]="$UD_GGUF $QWEN_MMPROJ"
   [27b-vision]="$UBERGARM_27B_GGUF $QWEN_27B_MMPROJ"
+  [muse]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
+  [muse-long]="$MUSE_GGUF $MUSE_DFLASH"
   [27b]="qwen3.6-27b-autoround-int4"
   [27b-single]="qwen3.6-27b-autoround-int4"
   [27b-minimal]="qwen3.6-27b-autoround-int4"
@@ -170,6 +182,9 @@ declare -A HFREPO=(
   ["$UBERGARM_27B_GGUF"]="ubergarm/Qwen3.6-27B-GGUF"
   ["$QWEN_27B_MMPROJ"]="unsloth/Qwen3.6-27B-GGUF"
   ["$UD_GGUF"]="unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+  ["$MUSE_GGUF"]="meta-models/Muse-Glimmer-30B-GGUF"
+  ["$MUSE_MMPROJ"]="meta-models/Muse-Glimmer-30B-GGUF"
+  ["$MUSE_DFLASH"]="meta-models/Muse-Glimmer-30B-GGUF"
   ["qwen3.6-27b-autoround-int4"]="Lorbus/Qwen3.6-27B-int4-AutoRound"
   ["qwen3.6-35b-a3b-autoround-int4"]="Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound"
   ["qwen3-omni-30b-a3b-instruct-int4-autoround"]="Intel/Qwen3-Omni-30B-A3B-Instruct-int4-AutoRound"
@@ -222,9 +237,17 @@ pull_weights() {  # <name> -> hf-download everything missing_weights reports
 # raw compose-path targets, and so --list can't drift from what the file actually reads.
 
 think_spec() {  # <compose> -> REASONING | ENABLE_THINKING | FIXED | NONE
+  # ⚠ The REASONING probe is anchored on the char AFTER the name ([:}-]) so it can't
+  # prefix-match a DIFFERENT var. `${REASONING_FORMAT}` / `${REASONING_BUDGET}` /
+  # `${REASONING_STRENGTH}` are all real vars in this repo, and a bare '${REASONING'
+  # grep matches every one of them. Lanes carrying both forms were saved by accident
+  # (the bare ${REASONING:-off} matched first, for the right reason); Muse Glimmer is
+  # the first compose with a REASONING_* var and NO bare one, and it mis-reported as
+  # REASONING → _effective found nothing → {think:?}, and --think would have exported
+  # a var the compose ignores: a SILENT NO-OP, which this script exists to prevent.
   local c="$1"
   if   grep -qE '\$\{ENABLE_THINKING' "$c"; then echo ENABLE_THINKING
-  elif grep -qE '\$\{REASONING'       "$c"; then echo REASONING
+  elif grep -qE '\$\{REASONING[:}-]'  "$c"; then echo REASONING
   elif grep -qiE 'enable_thinking|--reasoning[ =]' "$c"; then echo FIXED   # hardcoded, not env-togglable
   else echo NONE                                                            # not a thinking model
   fi
@@ -255,7 +278,8 @@ preserve_state() {  # <compose> -> keep | strip | n/a
 }
 ctx_spec() {  # <compose> -> which env var sets the context window (for --ctx to target)
   local c="$1"
-  if   grep -qE '\$\{VISION_CTX_SIZE' "$c"; then echo VISION_CTX_SIZE   # ik vision.yml (most specific first)
+  if   grep -qE '\$\{LONG_CTX_SIZE'   "$c"; then echo LONG_CTX_SIZE     # muse long.yml (distinct var: shared .env pins CTX_SIZE)
+  elif grep -qE '\$\{VISION_CTX_SIZE' "$c"; then echo VISION_CTX_SIZE   # ik vision.yml (most specific first)
   elif grep -qE '\$\{CTX_SIZE'        "$c"; then echo CTX_SIZE          # llama.cpp / ik text
   elif grep -qE '\$\{MAX_MODEL_LEN'   "$c"; then echo MAX_MODEL_LEN     # vLLM
   else echo NONE
