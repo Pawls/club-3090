@@ -152,6 +152,49 @@ def _muse_level_from_alias(model):
     return None
 
 
+# Hermes fires at least one AUXILIARY call per visible turn (title generation,
+# summarisation — agent/auxiliary_client.py) that carries NO reasoning field, so it lands on
+# Muse's server default of `high`: a full high-effort reasoning pass to write an 8-word title.
+# MEASURED 2026-08-11 on the title-shaped call (msgs=1, max_tokens=1500, non-streaming):
+#   no effort field (today)  4.27 s   1095c reasoning   406 completion tokens
+#   reasoning_effort=low     1.78 s    543c reasoning   191 completion tokens
+# ⇒ ~2.5 s of dead latency per aux call, on every turn.
+#
+# ⚠ THE OBVIOUS FIX — "no effort field ⇒ low" — IS A TRAP, DO NOT DO IT. benchlocal-cli,
+# curl, LM Studio, cron and the messaging gateways ALL send no reasoning_effort. A blanket
+# rule silently downgrades every one of them, which would (a) invalidate the committed
+# 8-pack numbers in dflash-vision.yml while looking like a model regression, and (b) be
+# exactly the request-rewriting class AGENTS.md forbids shipping default-on.
+#
+# Nor can the two populations be told apart by fingerprint, contra the Hermes-side agent's
+# suggestion: this hook's own log has `via=none msgs=2 stream=True max_tokens=None` — a
+# STREAMING call with no effort field, matching neither the visible-turn shape
+# (stream=True, max_tokens=65536) nor the title shape. The populations overlap.
+#
+# So this gates on the NARROW title shape only, and deliberately does NOT touch the msgs>=2
+# aux population: those may include SUMMARISATION, whose output is fed back into the agent's
+# own context, so quietly thinning it would degrade context quality in a way that is very
+# hard to trace later. A title is cosmetic; a summary is not. The bounds below cannot collide
+# with benchlocal (--max-tokens 4096/8192) or a visible turn (65536 / unset).
+# Disable with CLUB3090_MUSE_AUX_LOW=0.
+_AUX_LOW = os.environ.get("CLUB3090_MUSE_AUX_LOW", "1").strip().lower() not in ("0", "false", "no")
+_AUX_MAX_TOKENS_CEILING = 2048
+
+
+def _is_aux_title_shaped(data):
+    """True for a small, single-message, non-streaming bookkeeping call (title generation).
+
+    Bounds rather than an equality test on 1500: that is Hermes' current constant, not a
+    contract. Anything larger is assumed to be real work and left at the server default.
+    """
+    if data.get("stream"):
+        return False
+    if len(data.get("messages") or []) != 1:
+        return False
+    mt = data.get("max_tokens")
+    return isinstance(mt, int) and 0 < mt <= _AUX_MAX_TOKENS_CEILING
+
+
 def _apply_muse_effort(data, model):
     """Resolve Muse reasoning effort into chat_template_kwargs.reasoning_strength.
 
@@ -263,6 +306,8 @@ def _apply_muse_effort(data, model):
             _hook_log(f"[club3090][muse-effort][WARN] unmapped reasoning_effort={effort!r} "
                       f"(normalised {key!r}) — falling back to the server default. "
                       f"Muse accepts only {MUSE_LEVELS}; add this spelling to MUSE_EFFORT_MAP.")
+    if chosen is None and _AUX_LOW and _is_aux_title_shaped(data):
+        chosen, source = "low", "aux-title-default"
     if chosen:
         ck["reasoning_strength"] = chosen
         data["chat_template_kwargs"] = ck
