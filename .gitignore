@@ -79,3 +79,6 @@ results/*
 
 # Runtime hook diagnostics (bind-mounted into the litellm container; not source).
 services/litellm/logs/
+
+# Sandbox pack logs captured by quality-test.sh --sandbox-log-dir (run output).
+logs/
