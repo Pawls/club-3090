@@ -298,7 +298,33 @@
 #     failed on a SECOND confirmation step (approvedAfterClarification=false).
 #     Dig in with: benchlocal-cli inspect <results.json> --scenario <ID> --full
 #
-# Raw: results/quality/20260811-muse-8pack.json (+ …-retry8192-<pack>.json)
+# REASONING_STRENGTH=xhigh A/B — WORTH IT FOR AGENTIC WORK, WORTHLESS FOR TOOL DISPATCH
+# (2026-08-11, budget held at 4096 both arms so effort is the ONLY variable, and with a
+# REPEATED high control because this pack samples at temp 1.0 with seed=-1):
+#
+#   pack              high            xhigh        verdict
+#   HermesAgent-20    12/20  12/20    15/20        real, small (see below)
+#   ToolCall-15       12/15            12/15       NO EFFECT AT ALL
+#
+# · high reproduced EXACTLY (12/20 twice), so the 60% above is the model's level, not an
+#   unlucky draw. Per-scenario, only HA-02 (memory curation at capacity) and HA-05
+#   (fix-then-verify) fail at high in BOTH runs and pass at xhigh. HA-06/HA-09 flip
+#   between the two high runs, so they are noise, NOT effort. ⇒ the honest figure is
+#   +2/20 (~10pp), not the +3 the raw totals suggest. Five failures (HA-07/08/13/16/20)
+#   fail in all three runs — effort-immune.
+# · ToolCall was IDENTICAL: same three scenarios (TC-05/06/09), same details, and
+#   reasoning length FLAT (mean 543 -> 538 chars, max 1365 -> 1187).
+#
+# ⇒ MECHANISM: reasoning_strength is a CEILING, NOT A FLOOR. It permits more thinking on
+#   prompts the model judges hard; it does not force more on prompts it judges easy. On
+#   the hard prompt "is 2^61-1 prime" the four levels give 916 / 2137 / 4847 / 6268
+#   reasoning chars — the lever plainly works. On ToolCall prompts the model emits ~540
+#   chars at EVERY level, decides one call suffices, and stops. Corollary: THE
+#   PARALLEL-TOOL-CALL GAP CANNOT BE TUNED AWAY WITH EFFORT — fix it in the harness
+#   (prompt for enumeration / loop until the request is fully covered), not the compose.
+#
+# Raw: results/quality/20260811-muse-8pack.json (+ …-retry8192-<pack>.json,
+#      …-xhigh-<pack>.json, …-high-rep2-hermesagent-20.json)
 #
 # VRAM @131072 (measured, GPU1):
 #   DFlash ON   20.62 GiB idle  ·  21.36 GiB PEAK under a 90K-token prefill
