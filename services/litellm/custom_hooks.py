@@ -159,8 +159,9 @@ def _apply_muse_effort(data, model):
       1. explicit chat_template_kwargs.reasoning_strength from the client — never overridden
       2. the model ALIAS suffix (muse-glimmer-30b-low / -xhigh) — a deliberate per-request
          pick from the model list
-      3. OpenAI-style reasoning_effort on the request — a GLOBAL app-wide knob; mapped,
-         then POPPED so it can't reach llama.cpp as an unknown field
+      3. OpenAI-style reasoning_effort on the request — mapped, then POPPED so it can't
+         reach llama.cpp as an unknown field. ⚠ THIS IS NO LONGER ALWAYS A GLOBAL KNOB —
+         see the note below rule 4.
       4. nothing — leave the body alone so the server's own --chat-template-kwargs default
          (REASONING_STRENGTH in the compose .env, currently 'high') applies
 
@@ -174,6 +175,32 @@ def _apply_muse_effort(data, model):
     A global default must never beat an explicit per-request selection. Net effect now:
     bare `muse-glimmer-30b` follows the app's effort knob; an alias PINS its level and
     ignores the knob.
+
+    ⚠⚠ DON'T COMBINE AN ALIAS WITH HERMES' IN-CHAT PICKER (changed 2026-08-11).
+    The Hermes desktop picker used to be inert for this provider — its selection never left
+    the UI, so every request carried the GLOBAL `agent.reasoning_effort: high` and ranking
+    the alias above it (rule 2 > rule 3) was unambiguously right. The Hermes-side agent then
+    FIXED the picker: the desktop model menu was comparing a catalog slug against a billing
+    class (`'litellm' === 'custom'`, never true for a user-defined provider), so it never
+    made the `config.set` RPC. Its selection is now session-scoped and reaches the wire.
+    ⇒ `reasoning_effort` can now be a genuine PER-CONVERSATION pick, and rule 2 still beats
+    it — so selecting `muse-glimmer-30b-xhigh` AND moving the picker gives you xhigh, and the
+    picker will look broken again. The precedence is deliberately unchanged (an alias exists
+    to PIN a level; that is its whole job), so pick ONE mechanism per conversation:
+      · Hermes desktop  → bare `muse-glimmer-30b` + the picker.
+      · Anything whose effort control does NOT work (LM Studio, scripts, cron, the
+        messaging gateways) → the -low/-medium/-high/-xhigh aliases.
+    The hook's own debug line disambiguates: `via=model-alias (alias pinned; ignored global
+    reasoning_effort=...)` means an alias ate a picker value.
+
+    ⚠ On my earlier reading of the log being wrong: I tallied 13 log lines as flat requests
+    and concluded the effort field was ABSENT on 8 of them. They are PAIRS — one streaming
+    visible turn (which carried reasoning_effort EVERY time) plus one non-streaming auxiliary
+    call (title/summary, via `agent/auxiliary_client.py`, which attaches reasoning only when
+    its caller passes a reasoning_config). The symptom was never "nothing arrives"; it was
+    "`high` arrives, always, regardless of the picker". The debug line below already recorded
+    the stream/max_tokens fingerprint needed to separate the two populations — the aggregate
+    tally is what got it wrong. Fingerprint them, don't count them.
     """
     # Snapshot the reasoning-ish keys BEFORE any mutation — this line's whole job is to
     # reveal an unrecognised wire shape from a new client, so it must see the body as sent.
@@ -185,6 +212,18 @@ def _apply_muse_effort(data, model):
     # use for it and forwarding unknown top-level fields is how 400s start.
     if effort is not None:
         data.pop("reasoning_effort", None)
+    # Same treatment for `think`, which ONLY appears on a "thinking off" selection: Hermes'
+    # `custom` provider profile emits reasoning_effort:"none" PLUS a top-level think:false
+    # (Ollama heritage — ollama#14820, where /v1/chat/completions ignores `think` and only
+    # /api/chat honours it). MEASURED 2026-08-11 against this build: llama.cpp ignores it
+    # outright — think absent / false / true all return HTTP 200 with byte-identical
+    # reasoning length — so this is hygiene, NOT a live bugfix. Popped anyway because it is
+    # an unrecognised top-level field that only a future engine bump has to start
+    # validating. Reported by the Hermes-side agent, who found the emit path we can't see.
+    # ⚠ Muse has NO reasoning-off, so "none" maps to `low` — a user who picks "thinking
+    # off" silently gets low. That is a real semantic mismatch between the two systems and
+    # the only possible behaviour here, not a bug.
+    thinking = data.pop("think", None)
     chosen = source = None
     alias = _muse_level_from_alias(model)
     if ck.get("reasoning_strength"):
@@ -239,6 +278,7 @@ def _apply_muse_effort(data, model):
         _msgs = data.get("messages") or []
         _hook_log(f"[club3090][muse-effort] model={model} strength={chosen or '(server default)'} "
                   f"via={source or 'none'} request_keys={_seen} "
+                  f"think={thinking!r} "
                   f"msgs={len(_msgs)} stream={bool(data.get('stream'))} "
                   f"max_tokens={data.get('max_tokens')}")
 
