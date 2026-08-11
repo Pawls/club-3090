@@ -142,6 +142,70 @@ model_list:
       api_base: http://host.docker.internal:8073/v1
       api_key: EMPTY
 
+  # Muse-Glimmer-30B (Meta, dense 30B + ViT-G/14 perception encoder, Apache 2.0).
+  # Meta's official K-Quant-17GB GGUF on a LOCALLY BUILT llama.cpp (no upstream image
+  # carries this arch yet), single GPU1, 131K, vision + the official DFlash drafter.
+  # `./serve.sh muse` → llama-cpp-muse-glimmer-30b at :8210. Single-card (GPU mutex).
+  # Measured 2026-08-10: 80.8 code / 74.2 prose TPS greedy (1.98x / 1.81x vs no
+  # drafter), TTFT ~163 ms, 21.4 GiB peak. Tool calls + image input verified here.
+  # ⚠ Two things that WILL surprise a caller through this route:
+  #   1. Reasoning is billed against max_tokens and does NOT appear in `content` (it
+  #      arrives in `reasoning_content`). A tight max_tokens returns a truncated
+  #      answer with finish_reason=length, which reads as a broken model.
+  #   2. Effort is NOT --reasoning / enable_thinking. It is the template kwarg
+  #      `reasoning_strength` (low|medium|high|xhigh, default high, set per-boot via
+  #      REASONING_STRENGTH). --think/--no-think correctly ERROR on this lane.
+  - model_name: muse-glimmer-30b
+    litellm_params:
+      model: openai/muse-glimmer-30b
+      api_base: http://host.docker.internal:8210/v1
+      api_key: EMPTY
+
+  # Muse Glimmer LONG lane — 262K via --override-kv, TEXT-ONLY (no mmproj), :8211.
+  # `./serve.sh muse-long`. Separate compose + port, so it coexists in the picker with
+  # the 131K vision lane above (GPU mutex: only one actually runs at a time).
+  # Needle-verified 3/3 at 151K / 231K / 255K prompt tokens. ⚠ TTFT is ~5 MINUTES at
+  # 255K — set a generous client timeout or it reads as a hang. No image input here.
+  - model_name: muse-glimmer-30b-long
+    litellm_params:
+      model: openai/muse-glimmer-30b-long
+      api_base: http://host.docker.internal:8211/v1
+      api_key: EMPTY
+      timeout: 900
+
+  # Reasoning-effort aliases — SAME backend, SAME served model, only the template's
+  # `reasoning_strength` differs. custom_hooks.py §D reads the level off the alias suffix and
+  # injects it per request, so switching effort is "pick another model in the dropdown"
+  # instead of rebooting the lane. Same trick as qwen3.8-max / -nothink below.
+  # Costs nothing: no extra VRAM, no second process, no reload — one server, N front doors.
+  # Meta advises high/xhigh for coding + agentic work, low/medium for chat latency.
+  - model_name: muse-glimmer-30b-low
+    litellm_params:
+      model: openai/muse-glimmer-30b
+      api_base: http://host.docker.internal:8210/v1
+      api_key: EMPTY
+
+  - model_name: muse-glimmer-30b-medium
+    litellm_params:
+      model: openai/muse-glimmer-30b
+      api_base: http://host.docker.internal:8210/v1
+      api_key: EMPTY
+
+  # -high is redundant with the bare alias TODAY (server default is high) but is listed
+  # explicitly so the picker shows the whole ladder and so the level survives someone
+  # changing REASONING_STRENGTH in the compose .env.
+  - model_name: muse-glimmer-30b-high
+    litellm_params:
+      model: openai/muse-glimmer-30b
+      api_base: http://host.docker.internal:8210/v1
+      api_key: EMPTY
+
+  - model_name: muse-glimmer-30b-xhigh
+    litellm_params:
+      model: openai/muse-glimmer-30b
+      api_base: http://host.docker.internal:8210/v1
+      api_key: EMPTY
+
   # === Local single-rig additions (Paul, 2026-07) — carnice / ik-single / omni ===
 
   # Carnice-V2-27B Q8 (beellama, dual) at :8070. Text-only agentic SFT.

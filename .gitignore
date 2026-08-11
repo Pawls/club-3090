@@ -76,3 +76,6 @@ results/*
 # #252: curated quality-baseline corpus (committed; the trusted n>=3 aggregates
 # `quality-baseline.sh` diffs fresh runs against). Run output elsewhere stays ignored.
 !results/baselines/
+
+# Runtime hook diagnostics (bind-mounted into the litellm container; not source).
+services/litellm/logs/

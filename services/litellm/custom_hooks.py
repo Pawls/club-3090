@@ -29,10 +29,22 @@ them, and forcing them risks flipping 27b's intended thinking-OFF. See memory
 preserve-thinking-vllm-field-drop + NousResearch/hermes-agent#56004 (Hermes must also STOP
 stripping reasoning on replay — the primary, harness-side half of this fix).
 
+(D) Muse-Glimmer-30B reasoning effort (2026-08-10): Muse's effort control is the chat-template
+variable `reasoning_strength` (low/medium/high/xhigh, template-default 'high'), NOT --reasoning
+or enable_thinking — so neither the (B) path nor any server flag reaches it, and out of the box
+the level is frozen at whatever the compose booted with. Two levers are wired here: an
+OpenAI-style `reasoning_effort` on the request is mapped through (so a client's global effort
+knob works IF it sends one), and failing that a model-ALIAS suffix is honoured
+(`muse-glimmer-30b-low` / `-xhigh` → same :8210 backend, different level). The alias route is
+the one that needs no client support at all — it turns "switch reasoning level" into "pick a
+different model in the dropdown", the same trick qwen3.8-max / qwen3.8-max-nothink already use.
+An explicit client-sent chat_template_kwargs.reasoning_strength always wins over both.
+
 Only these models are touched; the big-context text models keep their full output budget.
 """
 import json
 import os
+import re
 import sys
 from litellm.integrations.custom_logger import CustomLogger
 
@@ -43,6 +55,25 @@ OMNI_MAX_TOKENS = 8192
 # probe for hermes-agent#56004 — it tells us whether the harness is stripping reasoning
 # before it ever reaches us. One compact line to stdout (docker logs litellm).
 _REASON_DEBUG = os.environ.get("CLUB3090_REASONING_DEBUG", "") not in ("", "0", "false")
+
+# Durable copy of the diagnostic lines. `docker logs` is per-CONTAINER, and this stack needs
+# `down` + `up -d` to pick up edits to its bind-mounted files (a plain `restart` exits 127 on
+# Docker-Desktop-for-WSL2 once the mount cache is stale) — so every redeploy wipes the log,
+# including the evidence of whatever a client just did. Bind-mounted to services/litellm/logs.
+_HOOK_LOG = "/app/logs/muse-effort.log"
+
+
+def _hook_log(line):
+    """Emit to stdout (docker logs) AND append to the bind-mounted file. Never raises —
+    a diagnostic must not be able to take down a request."""
+    print(line, file=sys.stdout, flush=True)
+    try:
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(_HOOK_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} {line}\n")
+    except Exception:
+        pass
 
 
 def _debug_reasoning_shape(model, messages):
@@ -73,6 +104,143 @@ AGENTS_A1_THINKING = True   # set False to let Agents-A1 use its compose default
 # capability is restored, but off-by-default, flag-driven. See _read_preserve_state below +
 # memory preserve-thinking-vllm-field-drop.
 QWEN_PRESERVE_MODELS = ("qwen3.6-27b", "qwen3.6-35b-a3b", "apex-35b")
+
+# (D) Muse-Glimmer reasoning effort (2026-08-10) — see module docstring §D.
+# Muse's effort knob is a CHAT-TEMPLATE VARIABLE (`reasoning_strength`), not a thinking
+# on/off gate: its template renders "Reasoning strength: <level>." into the system block,
+# defaulting to 'high' when unset. It is NOT --reasoning / enable_thinking, so nothing in
+# the existing (B) path reaches it. Verified this hop end-to-end through the proxy:
+# chat_template_kwargs passes through LiteLLM untouched (low → 104 chars of
+# reasoning_content / 55 completion tokens; xhigh → 398 / 137).
+MUSE_MODELS = ("muse-glimmer",)
+MUSE_LEVELS = ("low", "medium", "high", "xhigh")   # ALL the template accepts — only four
+
+# reasoning_effort → Muse level. Muse has exactly FOUR levels, while clients expose more:
+# Hermes' picker offers minimal / low / medium / high / extra high / max / ultra (seven), and
+# OpenAI ships none / minimal / low / medium / high. So the ladder necessarily COLLAPSES at
+# both ends: everything below 'low' floors to low, and extra-high / max / ultra all mean the
+# same thing here — xhigh, because Muse has nothing above it. Picking 'ultra' does NOT buy
+# more thinking than 'extra high'.
+# Keys are NORMALISED (lowercased, non-alphanumerics stripped) so "extra high", "extra_high"
+# and "x-high" all land on the same entry — a client's exact spelling is not knowable up front.
+# 2026-08-10: 'ultra' was MISSING here and fell through to the server default, i.e. silently
+# became 'high' — exactly the failure the previous version of this comment claimed to prevent.
+# Any value not in this table now logs a loud WARN (see _apply_muse_effort) instead of
+# vanishing, because a silent fallback is indistinguishable from a working knob.
+MUSE_EFFORT_MAP = {
+    "none": "low", "minimal": "low", "min": "low", "low": "low",
+    "medium": "medium", "med": "medium", "moderate": "medium",
+    "high": "high",
+    "xhigh": "xhigh", "extrahigh": "xhigh", "veryhigh": "xhigh",
+    "max": "xhigh", "maximum": "xhigh", "ultra": "xhigh", "highest": "xhigh",
+}
+
+
+def _norm_effort(v):
+    """'Extra High' / 'extra_high' / 'x-high' -> 'extrahigh' / 'extrahigh' / 'xhigh'."""
+    return re.sub(r"[^a-z0-9]", "", str(v).lower())
+
+
+def _muse_level_from_alias(model):
+    """`muse-glimmer-30b-xhigh` -> 'xhigh'; bare alias -> None (server default wins).
+
+    Longest-suffix-first so '-xhigh' cannot be shadowed by a '-high' prefix match.
+    """
+    for lvl in sorted(MUSE_LEVELS, key=len, reverse=True):
+        if model.endswith("-" + lvl):
+            return lvl
+    return None
+
+
+def _apply_muse_effort(data, model):
+    """Resolve Muse reasoning effort into chat_template_kwargs.reasoning_strength.
+
+    Precedence (first match wins) — SPECIFIC beats GLOBAL:
+      1. explicit chat_template_kwargs.reasoning_strength from the client — never overridden
+      2. the model ALIAS suffix (muse-glimmer-30b-low / -xhigh) — a deliberate per-request
+         pick from the model list
+      3. OpenAI-style reasoning_effort on the request — a GLOBAL app-wide knob; mapped,
+         then POPPED so it can't reach llama.cpp as an unknown field
+      4. nothing — leave the body alone so the server's own --chat-template-kwargs default
+         (REASONING_STRENGTH in the compose .env, currently 'high') applies
+
+    ⚠ 2 MUST OUTRANK 3, and originally it didn't (fixed 2026-08-10 the same day). Hermes
+    sends `reasoning_effort: high` (its global config knob) on EVERY main chat request, so
+    with reasoning_effort ranked higher the -low and -xhigh aliases were both silently
+    rewritten to 'high' and produced byte-comparable output — the aliases looked broken
+    while behaving exactly as ordered. Observed in this hook's own debug line:
+      model=muse-glimmer-30b-low   strength=high via=reasoning_effort=high
+      model=muse-glimmer-30b-xhigh strength=high via=reasoning_effort=high
+    A global default must never beat an explicit per-request selection. Net effect now:
+    bare `muse-glimmer-30b` follows the app's effort knob; an alias PINS its level and
+    ignores the knob.
+    """
+    # Snapshot the reasoning-ish keys BEFORE any mutation — this line's whole job is to
+    # reveal an unrecognised wire shape from a new client, so it must see the body as sent.
+    _seen = sorted(k for k in data
+                   if "reason" in k.lower() or "think" in k.lower() or "effort" in k.lower())
+    ck = dict(data.get("chat_template_kwargs") or {})
+    effort = data.get("reasoning_effort")
+    # (2) always consume reasoning_effort even if we end up not using it — llama.cpp has no
+    # use for it and forwarding unknown top-level fields is how 400s start.
+    if effort is not None:
+        data.pop("reasoning_effort", None)
+    chosen = source = None
+    alias = _muse_level_from_alias(model)
+    if ck.get("reasoning_strength"):
+        # VALIDATE, don't trust. The template does NO validation of this variable: it renders
+        # "Reasoning strength: <whatever>." straight into the system prompt, so a client
+        # sending "max" or "ultra" here would inject an UNTRAINED value the model never saw
+        # in training. Only the four real levels may reach the prompt; anything else is
+        # normalised through the same map, and if even that fails we drop it so the server
+        # default applies. (Credit: r/LocalLLM 1vkr0vr, which flagged the no-validation
+        # behaviour; our own map already normalised the reasoning_effort path but this
+        # client-supplied path was passing through verbatim.)
+        raw = str(ck["reasoning_strength"])
+        if raw in MUSE_LEVELS:
+            chosen, source = raw, "client-kwargs"
+        elif _norm_effort(raw) in MUSE_EFFORT_MAP:
+            chosen = MUSE_EFFORT_MAP[_norm_effort(raw)]
+            source = f"client-kwargs={raw}->normalised"
+        else:
+            ck.pop("reasoning_strength", None)
+            data["chat_template_kwargs"] = ck
+            _hook_log(f"[club3090][muse-effort][WARN] client sent unknown "
+                      f"reasoning_strength={raw!r} — DROPPED (would render an untrained "
+                      f"value into the system prompt). Valid: {MUSE_LEVELS}")
+    elif alias:
+        # Explicit per-request pick — outranks any global effort knob (see docstring).
+        chosen, source = alias, "model-alias"
+        if isinstance(effort, str) and effort.strip():
+            source += f" (alias pinned; ignored global reasoning_effort={effort})"
+    elif isinstance(effort, str) and effort.strip():
+        key = _norm_effort(effort)
+        if key in MUSE_EFFORT_MAP:
+            chosen, source = MUSE_EFFORT_MAP[key], f"reasoning_effort={effort}"
+        else:
+            # UNCONDITIONAL warn (not gated on _REASON_DEBUG): an effort level we cannot map
+            # would otherwise fall through to the server default and look like a working knob.
+            # If this fires, add the spelling to MUSE_EFFORT_MAP.
+            _hook_log(f"[club3090][muse-effort][WARN] unmapped reasoning_effort={effort!r} "
+                      f"(normalised {key!r}) — falling back to the server default. "
+                      f"Muse accepts only {MUSE_LEVELS}; add this spelling to MUSE_EFFORT_MAP.")
+    if chosen:
+        ck["reasoning_strength"] = chosen
+        data["chat_template_kwargs"] = ck
+    if _REASON_DEBUG:
+        # Ground truth for "does the app send an effort field at all?" — the ONLY way to
+        # learn a harness's wire shape is to look at a real request from it. If a client's
+        # effort control does nothing and this logs request_keys=[], the client sent NOTHING
+        # and no proxy-side mapping can help; if it logs an unhandled key, add it above.
+        # msgs/stream/max_tokens fingerprint the CALL, not just the effort: a harness often
+        # fires a secondary request per turn (title/summary) that carries different fields,
+        # and "which of the two is the visible answer?" is unanswerable without this.
+        # The visible chat turn is the streaming, many-message, big-max_tokens one.
+        _msgs = data.get("messages") or []
+        _hook_log(f"[club3090][muse-effort] model={model} strength={chosen or '(server default)'} "
+                  f"via={source or 'none'} request_keys={_seen} "
+                  f"msgs={len(_msgs)} stream={bool(data.get('stream'))} "
+                  f"max_tokens={data.get('max_tokens')}")
 
 # serve.sh writes the ACTIVE model's cross-turn preserve mode here on every launch (GPU-mutex
 # → one live model, so a single global file is unambiguous). Mounted read-only into the
@@ -181,6 +349,10 @@ class MaxTokensCap(CustomLogger):
             ck.setdefault("enable_thinking", True)
             ck.setdefault("preserve_thinking", False)
             data["chat_template_kwargs"] = ck
+        elif any(tag in model for tag in MUSE_MODELS):
+            # (D) Resolve Muse's reasoning_strength template var per request, so effort is
+            # switchable from the client instead of needing a compose reboot.
+            _apply_muse_effort(data, model)
         if any(tag in model for tag in QWEN_PRESERVE_MODELS):
             # (C) Carry prior <think> across turns at the durable layer, honoring the launch-time
             # mode (off/full/window) serve.sh recorded — vLLM/ik drop the reasoning FIELD, so
