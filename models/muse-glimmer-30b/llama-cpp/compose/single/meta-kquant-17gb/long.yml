@@ -1,0 +1,209 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Muse-Glimmer-30B (Meta official K-Quant-17GB GGUF, 4.81 bpw)
+#   Engine:    llama.cpp (LOCALLY BUILT from master 030ebb5, sm_86) — see dflash-vision.yml
+#   Topology:  Single 3090 (GPU1 headless)
+#   Drafter:   DFlash n=15 (--spec-type draft-dflash + official dflash-kquant.gguf)
+#   KV:        q8_0 K + q8_0 V (f16 does NOT fit at this ctx — see the budget below)
+#   Vision:    NO — deliberately text-only, THE reason this variant exists (see below)
+#   Template:  GGUF-embedded (--jinja) — channel format, NOT <think>
+#   Max ctx:   262144 via --override-kv (the GGUF declares 131072)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - ⚠️ ABOVE THE VENDOR-VALIDATED WINDOW. Meta validated to 131072 ("Context length
+#       131,072+" on the card, and their long-context benchmark is Beam128K). 262144 is
+#       reachable but NOT vendor-validated, and quality >131K is our own to prove. See
+#       the needle results below for what we actually measured.
+#     - ⚠️ NO VISION, ON PURPOSE. Two independent reasons, not laziness:
+#       (1) it frees the 1.30 GiB mmproj, which is what makes 262K fit at all, and
+#       (2) high-resolution image input SPIKES VRAM — a single-3090 report on
+#           r/LocalLLaMA (1vkm42m, u/stddealer) had it "spike above 24GB" with
+#           hi-res images, mitigated by capping input to ~3 Mpx. At 131K we had
+#           ~2.6 GiB of headroom to absorb that; at 262K we do not.
+#       ⇒ Use the sibling dflash-vision.yml when you need images. This lane is for
+#         long TEXT (big repo dumps, long transcripts, many-turn agent traces).
+#     - ⚠️ --override-kv is a DECLARATION change, not a rope-scaling change — but on
+#       this architecture that is fine, and the reason is worth understanding: the 39
+#       sliding-window layers never see more than 2048 positions, and the 13
+#       full-attention layers have rope_theta = 0, i.e. they are NoPE (the model card
+#       says "RoPE (θ = 500,000), local layers only"). There is no RoPE extrapolation
+#       to break, which is why this stretches where a normal model would not.
+#     - BOTH --override-kv keys are REQUIRED. Overriding only the trunk leaves the
+#       DFlash drafter declaring 131072. llama-server also hard-caps the slot to
+#       n_ctx_train, so `-c 262144` ALONE yields a 400 "exceeds the available context
+#       size" — the override is what lifts that cap, not -c.
+#     - -np 1 is load-bearing here: -c divides across slots, so any NP>1 silently
+#       quarters the window (model card).
+#   Best for:  Long-text / long-agent-trace work on one card at 262K. ⭐ long ctx
+# ---------------------------------------------------------------------------
+# ===== MEASURED 2026-08-11, this rig (1x RTX 3090 sm_86, GPU1) =====================
+# n_ctx_slot = 262144 confirmed in the boot log (the override IS what lifts the cap —
+# with CTX_SIZE colliding via the shared .env we silently got 131072 instead).
+#
+#   idle VRAM @262144 ............ 20664 MiB (20.18 GiB)
+#   peak VRAM (255K filled) ...... 20866 MiB (20.38 GiB)  -> ~3.6 GiB headroom
+#   Peak did NOT grow with fill beyond +200 MiB: the KV pool is allocated up front,
+#   so a filled 255K context costs no more than an empty one. VRAM is NOT the wall.
+#
+# NEEDLE RETRIEVAL — 3 needles per haystack at 8% / 49% / 91% depth, unguessable codes,
+# temp 0, reasoning_strength=medium, q8_0 KV, one query per size (all three depths in
+# one pass, so a tail-only model would miss the early ones):
+#
+#   prompt tokens    score    wall     implied prefill
+#   151,151          3/3      153 s    ~1021 tok/s
+#   230,711          3/3      271 s    ~867 tok/s
+#   254,921          3/3      312 s    ~830 tok/s
+#
+#   9/9 needles retrieved verbatim. The two lower rows are ALREADY above the declared
+#   131072 window, so this is not just a 262K result — retrieval is clean across the
+#   whole stretched range. Consistent with the NoPE global layers (nothing to
+#   extrapolate) and with two independent community reports (3/3 at 178K filled;
+#   a 2-needle pass at ~150K).
+#
+# ⚠️ THE REAL COST IS PREFILL TIME, NOT VRAM. TTFT at 255K is ~5 MINUTES on this card.
+#   Prefill falls ~19% from 151K to 255K (1021 -> 830 tok/s) and there is no cache to
+#   save you on a cold prompt (this arch has no prompt-cache save/restore — see
+#   dflash-vision.yml). Budget accordingly: this lane is for a big context you then
+#   ask MANY questions about (--cache-reuse helps on shared prefixes), not for
+#   one-shot 250K queries. A 5-minute TTFT will look like a hang to any client with a
+#   default timeout.
+#
+# ⚠️ QUALITY BEYOND RETRIEVAL IS STILL UNPROVEN. A needle test measures whether the
+#   model can FIND a fact, not whether it can REASON over 250K tokens. Meta validated
+#   to 131072 and published nothing above it. Treat >131K as "retrieval verified,
+#   reasoning unverified" until the 8-pack runs at depth.
+#
+# ===== DFLASH's PREFILL COST — A/B/A, MEASURED 2026-08-11, this lane ===============
+# The drafter roughly doubles DECODE, but a community report had it costing ~33% of
+# PREFILL. On a lane whose TTFT is already minutes that could make it net-NEGATIVE, so
+# it was worth measuring rather than assuming. Method: /completion, cache_prompt=false,
+# non-repeating filler (no cache path can short-circuit the prefill), ignore_eos=true
+# (WITHOUT it this model EOSes immediately on raw completion and llama.cpp reports its
+# 1e6 tok/s sentinel — decode is silently never measured), one warmup prefill per boot
+# discarded (the first is ~30% slow), 2 measured runs at 8.5K/68K, 1 at 200K (prefill
+# sd <=0.5%, so 1 is enough there and a warmup would cost 3 extra minutes).
+# A/B/A: drafter ON -> OFF -> ON. The two ON arms agree within 2%, so the OFF arm is a
+# real delta and not boot-to-boot drift.
+#
+#   prompt tok   prefill ON   prefill OFF   delta     TTFT ON   TTFT OFF   dTTFT
+#     8,526      1278.6       1582.4        -19.2%      6.7 s     5.4 s    +1.2 s
+#    68,250      1141.2       1365.0        -16.4%     59.8 s    50.0 s    +9.8 s
+#   204,750       892.0       1036.6        -13.9%    229.5 s   197.5 s   +32.0 s
+#
+# ⇒ The -33% claim does NOT reproduce here: we measure -14% to -19%, and the RELATIVE
+#   penalty SHRINKS as the prompt grows (while the absolute seconds grow).
+#
+# ⚠️ The decode half of this run is NOT a usable speedup figure. ignore_eos on
+#   repetitive filler is the drafter's best case — it measured 4.1x / 4.8x / 5.8x
+#   (ON 163.8 / 156.8 / 133.6 vs OFF 39.7 / 32.4 / 23.1 tok/s). It IS the proof the
+#   drafter was genuinely off in the OFF arm (39.7 vs 163.8 at 8.5K) — the boot log is
+#   NOT: it still prints "loading draft model" under --spec-type none. Trust VRAM
+#   (20664 -> 18242 MiB, -2.36 GiB) and decode, not that line. For real speedup use the
+#   sibling's honest numbers: 1.90x greedy, 1.29x at temp 1.0.
+#
+# BREAK-EVEN — output tokens above which the drafter wins, using OFF decode measured
+# here and the sibling's real-text ratios:
+#
+#   prompt tok    break-even @1.29x (temp 1.0)   break-even @1.90x (greedy)
+#     8,526          ~210 tok                       ~100 tok
+#    68,250        ~1,410 tok                       ~670 tok
+#   204,750        ~3,290 tok                     ~1,560 tok
+#
+# ⇒ KEEP THE DRAFTER ON as this lane's default. Reasoning + a substantive answer clears
+#   1.5-3K output tokens routinely (xhigh alone emits ~6.3K CHARS of reasoning).
+#   BUT flip SPEC_TYPE=none when the job is ONE SHORT ANSWER over a giant dump — at
+#   200K a <=1.5K-token reply pays 32 s of extra TTFT it never earns back, and turning
+#   the drafter off also hands back 2.36 GiB (enough for a materially bigger KV pool).
+#
+# VRAM budget @262144 (predicted before the run, kept for calibration):
+#   weights 15.61 + drafter 2.51 + KV q8_0 1.73 + compute/graph ~0.5
+#   Dropping the mmproj (-1.30) is what pays for the extra 0.78 GiB of KV, so this
+#   lane lands in the same envelope as the 131K vision lane rather than above it.
+#   f16 KV at 262K would be 3.25 GiB (+1.52 over q8_0) and does NOT fit alongside
+#   the drafter. q8_0 is not a compromise here: the sibling thread measured q8_0
+#   BEATING f16 on prefill (609 vs 567 tok/s) and scoring 3/3 needles at 200K.
+#
+# KV arithmetic for this architecture (only 13 of 52 layers hold long-range state):
+#   13 layers x 2 (K+V) x 2 KV heads x 128 head_dim = 6,656 values/token
+#     q8_0: 7,072 bytes/token   ->  262144 tok = 1.73 GiB
+#     f16 : 13,312 bytes/token  ->  262144 tok = 3.25 GiB
+#   Both figures independently confirmed by r/LocalLLM 1vkr0vr. ⚠ NEVER --swa-full:
+#   it forces all 52 layers to full length (~4x the KV) and blows the budget.
+#
+# Override defaults via .env or shell (shell env wins):
+#   LONG_CTX_SIZE     KV pool size            (default: 262144)
+#                     ⚠ NOT `CTX_SIZE`, and NOT a style choice: the .env in THIS
+#                     directory is shared with dflash-vision.yml and pins
+#                     CTX_SIZE=131072. A directory .env BEATS a compose default, so
+#                     using CTX_SIZE here silently booted at 131072 with n_ctx_slot
+#                     =131072 — the override-kv applied and did nothing visible.
+#                     Same reason LONG_SERVED_NAME / LONG_PORT are distinct (the
+#                     shared .env pins SERVED_NAME=muse-glimmer-30b and PORT=8210).
+#                     Same pattern as the deckard vision lane's VISION_* vars.
+#   OVERRIDE_CTX      the int: value in BOTH --override-kv keys (default: 262144)
+#   KV_TYPE_K/_V      K / V quant             (defaults: q8_0 / q8_0)
+#   REASONING_STRENGTH low|medium|high|xhigh  (default: high)
+#   DFLASH_N_MAX      drafted tokens          (default: 15, upstream clamps above 15)
+#   SPEC_TYPE         draft-dflash | none     (none = drafter OFF, frees 2.51 GiB)
+#   UBATCH_SIZE       microbatch              (default: 1024 — MEASURED faster than 512
+#                     on this rig by 4%, contra a community report; 512 saves 678 MiB
+#                     if you need it back. See dflash-vision.yml's A/B block.)
+#   FIT               -fit on|off             (default: on; measured a no-op here)
+#   SERVED_NAME / PORT                        (defaults: muse-glimmer-30b-long / 8211)
+#
+# Quick start (from this directory):
+#   MODEL_DIR=/home/pawl/models CUDA_VISIBLE_DEVICES=1 docker compose -f long.yml up -d
+#   curl http://localhost:8211/v1/models   # -> muse-glimmer-30b-long
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  llama-cpp-muse-glimmer-30b-long:
+    image: ${LLAMACPP_IMAGE:-club3090/llama.cpp:server-cuda-master-030ebb5-sm86}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-muse-glimmer-30b-long}"
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${LONG_PORT:-8211}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-muse-glimmer-30b-gguf/meta-kquant/muse-glimmer-30B-kquant-17gb.gguf}
+      --spec-draft-model /models/${DFLASH_FILE:-muse-glimmer-30b-gguf/meta-kquant/dflash-kquant.gguf}
+      --spec-type ${SPEC_TYPE:-draft-dflash}
+      --spec-draft-n-max ${DFLASH_N_MAX:-15}
+      -ngld ${DRAFT_NGL:-99}
+      --override-kv muse-glimmer.context_length=int:${OVERRIDE_CTX:-262144},dflash.context_length=int:${OVERRIDE_CTX:-262144}
+      --alias ${LONG_SERVED_NAME:-muse-glimmer-30b-long}
+      -c ${LONG_CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-1024}
+      -ngl 99
+      -fa ${FLASH_ATTN:-on}
+      -fit ${FIT:-on}
+      --cache-type-k ${KV_TYPE_K:-q8_0}
+      --cache-type-v ${KV_TYPE_V:-q8_0}
+      -np ${NP:-1}
+      --cache-ram ${CACHE_RAM:-0}
+      --jinja
+      --reasoning-budget ${REASONING_BUDGET:--1}
+      --chat-template-kwargs '{"reasoning_strength":"${REASONING_STRENGTH:-high}"}'
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-64}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-1}}"]
+              capabilities: [gpu]

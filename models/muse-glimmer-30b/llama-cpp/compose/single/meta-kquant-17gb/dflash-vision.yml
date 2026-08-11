@@ -1,0 +1,365 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Muse-Glimmer-30B (Meta official K-Quant-17GB GGUF, 4.81 bpw) + official mmproj
+#   Engine:    llama.cpp (LOCALLY BUILT from master 030ebb5, sm_86) — see pin caveat
+#   Topology:  Single 3090 (GPU1 headless; x4 slot irrelevant to single-GPU inference)
+#   Drafter:   DFlash n=15 (--spec-type draft-dflash + official dflash-kquant.gguf)
+#              MEASURED 2026-08-10 on this rig: 1.98x code / 1.81x prose at greedy
+#              (acceptance 22.4% / 20.0%), costing 2.51 GiB. Full table below.
+#   KV:        q8_0 K + q8_0 V (f16 also affordable here — see the KV note below)
+#   Vision:    YES — official mmproj-kquant (~1.30 GiB perception encoder). VERIFIED
+#              alongside the drafter: exact chart-title OCR + correct bar values.
+#   Template:  GGUF-embedded (--jinja) — channel format, NOT <think>; see below
+#   Max ctx:   131072 (the model's native window; KV is unusually cheap on this arch)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#              Boots, serves, drafts, sees images and calls tools — all measured. NOT
+#              promoted because the ✅ gate also needs verify-full 8/8, verify-stress
+#              7/7, soak-test (SOAK_MODE=continuous) and quality-test.sh --quick,
+#              none of which have run. Bench + functional checks only so far.
+#   Caveats:
+#     - ⚠ NO UPSTREAM IMAGE EXISTS FOR THIS MODEL YET — THIS IMAGE IS OURS.
+#       Muse Glimmer support is llama.cpp PR #26841, commit 62bf73d, merged to
+#       master 2026-08-10. Verified against the registry + GitHub API that day:
+#         · repo-wide pin  server-cuda-b10236 (2026-08-03) — 19+ commits behind
+#         · newest RELEASE b10344 (16:24 UTC)  — 5 commits BEHIND 62bf73d
+#         · newest GHCR CUDA image server-cuda-b10335 — 14 commits behind 62bf73d,
+#           and byte-identical (same digest) to the rolling :server-cuda tag
+#       Do NOT trust commit timestamps here: 62bf73d's committer date (11:07 UTC)
+#       is EARLIER than b10344's publish time (16:24 UTC) yet b10344 lacks it —
+#       the PR was rebase-merged, so the date predates when it landed. Use
+#       `git merge-base --is-ancestor` / the compare API, never the clock.
+#       ⇒ This lane therefore runs a LOCALLY BUILT image:
+#           club3090/llama.cpp:server-cuda-master-030ebb5-sm86
+#         built from master 030ebb558a5820b444a8f836ed5cdd46c9b4bd7a via
+#         .devops/cuda.Dockerfile --target server, CUDA_DOCKER_ARCH=86 (3090 only —
+#         NOT multi-arch; it will not run on 4090/5090). Rebuild recipe (~7 min on
+#         16 cores; CHANGELOG.md is git-cliff-generated so it cannot live there):
+#           git clone --depth 25 https://github.com/ggml-org/llama.cpp.git
+#           cd llama.cpp && git merge-base --is-ancestor \
+#             62bf73d25c53b8161f8a22894d4f90c4aebbd7d0 HEAD   # must succeed
+#           docker build -f .devops/cuda.Dockerfile --target server \
+#             --build-arg CUDA_DOCKER_ARCH=86 \
+#             -t club3090/llama.cpp:server-cuda-master-$(git log -1 --format=%h)-sm86 .
+#         then point LLAMACPP_IMAGE at the new tag. (No GGML_CUDA_FA_ALL_QUANTS — the
+#         q8_0/q8_0 and f16 KV combos this lane uses are in the default FA set. Add it
+#         if you want to try asymmetric KV like the apex lanes' q8/q5.)
+#       ⇒ REPLACE IT with an official pin as soon as a release/GHCR image lands
+#         that contains 62bf73d — a locally built image is a maintenance liability
+#         (unreproducible for anyone else, invisible to engine-pin-bump.sh). Check
+#         with: git merge-base --is-ancestor 62bf73d <tag>
+#       ⇒ This does NOT bump scripts/lib/profiles/engines/llama-cpp-mainline.yml;
+#         a global pin bump needs its own PR with verify-full + bench per AGENTS.md.
+#     - ⚠ DFLASH DEPTH IS NOT PER-REQUEST TUNABLE ON THIS BUILD — spec-sweep.sh's
+#       llama.cpp "fast path" DOES NOT WORK HERE, and it is right to refuse. Sending
+#       `"speculative": {"n_max": N}` per request is SILENTLY IGNORED: swept
+#       N = 0/1/2/4/8/15 at greedy and got byte-identical draft_n=6916,
+#       accepted=1120, 16.2% acceptance on EVERY arm including n_max=0 — a textbook
+#       fake-flat curve. `/props` confirms it: default_generation_settings.params
+#       .speculative is `null`, so the field never reaches the sampler. n_max=0 does
+#       NOT disable drafting either. ⇒ Any depth sweep or ON/OFF A/B needs a REBOOT
+#       per arm (SPEC_TYPE / DFLASH_N_MAX below), which reintroduces the thermal
+#       confound bench.sh warns about — interleave A/B/A/B, don't run one pair.
+#     - VISION + DFLASH COEXISTENCE: ✅ CONFIRMED on this build (2026-08-10). Both
+#       load ("loaded multimodal model" + "adding speculative implementation
+#       'draft-dflash'"), and with BOTH active the model read a 1990px chart's exact
+#       title plus two correct bar-value pairs (32/33 and 40/72) at temp 0. Vision
+#       quality is unaffected by drafting and you keep the speedup — same conclusion
+#       as the Deckard draft-mtp lane, now verified for draft-dflash too.
+#     - ⚠ REASONING EATS max_tokens AND IS INVISIBLE IN `content`. Reasoning lands in
+#       `reasoning_content` (llama.cpp parses the `assistant to=self` channel with NO
+#       --reasoning-format needed), but it is billed against max_tokens. The vision
+#       probe at max_tokens=300 returned finish_reason=length with a HALF-WRITTEN
+#       answer because 814 chars of reasoning consumed the budget first. Budget
+#       generously, or lower REASONING_STRENGTH (high→low cut reasoning 814→355 chars
+#       and completion 326→174 tokens). Anything calling this lane with a tight
+#       max_tokens will look broken when it is merely truncated.
+#     - Boot logs one benign-looking tokenizer warning worth knowing about:
+#       "special_eot_id is not in special_eog_ids - the tokenizer config may be
+#       incorrect". Generation stops correctly anyway (finish_reason=stop/eos
+#       observed), so it did not bite here — but if you ever see runaway decode that
+#       ignores a stop token, start at this line.
+#     - A "failed to measure draft model memory / dflash requires ctx_other to be
+#       set" error appears ONCE early in boot. Upstream's own message says "(this
+#       warning is normal during memory fitting)" — the drafter loads fine ~9 s
+#       later. Not a fault; don't chase it.
+#     - NO PROMPT-CACHE SAVE/RESTORE. Upstream disabled state save/load for this
+#       architecture, so --slot-save-path / cache reuse across restarts is
+#       unavailable. --cache-ram 0 below is consistent with that.
+#     - REASONING IS NOT A <think> GATE — do NOT add --reasoning/--reasoning-format.
+#       This model uses a CHANNEL format: reasoning is emitted as
+#       `<|start|>assistant to=self<|message|>…<|eom|>`, with no <think> tags
+#       anywhere. --reasoning-format deepseek (what every Qwen lane here uses) has
+#       nothing to match and would be a no-op at best. Effort is instead a template
+#       kwarg — see REASONING_STRENGTH below. Consequence: serve.sh reports
+#       {think:n/a preserve:n/a} for this lane and --think/--no-think correctly ERROR
+#       instead of silently no-op'ing.
+#     - TOOL CALLS ARE 'atem' XML, NOT JSON. The embedded template emits
+#       <atem:function_calls><atem:invoke name="…"><atem:parameter …>. Upstream
+#       describes its chat-template test coverage as "basic minimum to allow tool
+#       calling", so Hermes round-trips through LiteLLM need an explicit check (the
+#       template also hard-raises if tool_call.function.arguments arrives as a JSON
+#       string rather than a dict). Verify a real multi-turn tool call before
+#       trusting this lane agentically.
+#     - SAMPLING DEVIATES FROM EVERY OTHER LANE HERE. Meta specifies temp 1.0 /
+#       top_p 0.95 / top_k 64. Do NOT inherit the Qwen 0.6/0.95/20 defaults.
+#   Best for:  Single-card agentic driver with vision + a lossless 3x drafter at full
+#              131K. Beats Qwen3.6-27B / Gemma4-31B on MCP-Atlas, DeepSearch QA,
+#              SWE-Bench Pro and Gaia2 per Meta's card. ⭐ agentic (pending validation)
+# ---------------------------------------------------------------------------
+# Why K-Quant-17GB and not kquant-dynamic / an Unsloth quant:
+#   Meta ships BF16 safetensors only; both Meta's GGUFs and Unsloth's are quantized
+#   from those same weights, so neither has a precision advantage the other lacks.
+#   Measured bits/weight over the 27.86B language-model params (the ViT lives in the
+#   mmproj, so it is excluded):
+#
+#     UD-Q4_K_XL         14.79 GiB   4.56 bpw
+#     kquant-17gb        15.61 GiB   4.81 bpw   <- THIS FILE
+#     UD-Q5_K_M          17.87 GiB   5.51 bpw
+#     kquant-dynamic     18.30 GiB   5.64 bpw
+#     UD-Q5_K_L          18.41 GiB   5.68 bpw   <- the true kquant-dynamic equivalent
+#
+#   kquant-17gb has NO Unsloth equivalent — it lands in the Q4_K_XL/Q5_K_M gap.
+#   Picked anyway because (a) it is the build Meta actually measured (1.0% average
+#   degradation across 15 benchmarks; kquant-dynamic is 0.2%) and the build their
+#   74.9 -> 233.4 tok/s RTX 5090 DFlash figure was measured on, and (b) it is the
+#   only option that seats weights + vision tower + drafter + full 131K KV inside
+#   24 GB with real headroom. Note Meta's card says "approximately 4-bit" — that is
+#   a round-down; the mixed recipe holds the 202K-vocab embeddings well above 4-bit.
+#
+#   kquant-dynamic / UD-Q5_K_L (~18.4 GiB) need ~23.2 GiB all-in. That fits GPU1
+#   alone only with no cushion; prefer a dual layer-split for those. Sibling
+#   composes for them are deliberately NOT written until this one validates.
+#
+# ===== TUNING A/B — a community config DID NOT TRANSFER (measured 2026-08-11) ======
+# r/LocalLLM 1vkr0vr reported, on a 3090 at 100K filled with 262k allocated: ubatch 512
+# FASTER than 1024 (649 vs 610 tok/s) and `-fit off` worth +13% prefill (574 -> 649).
+# Re-measured here with single-variable isolation, 102,375-token prompt, 2 runs/arm
+# (prefill CV is <=1% so 2 is plenty), rebooting per arm:
+#
+#   arm                     prefill tok/s     idle VRAM     verdict
+#   ub1024 + fit on  (ours)  1067.7 ± 7.8     21116 MiB     BEST — keep
+#   ub512  + fit on          1024.8 ± 9.1     20438 MiB     -4.0% slower, saves 678 MiB
+#   ub1024 + fit off         1042.1 ± 10.4    21116 MiB     -2.4% (~noise), VRAM IDENTICAL
+#   ub512  + fit off         1024.1 ± 4.2     20438 MiB     no better than ub512 alone
+#
+# NEITHER claim reproduced: ubatch 512 is SLOWER here, and `-fit off` changed VRAM by
+# ZERO — meaning -fit was never adjusting anything for us, so disabling it can't help.
+# The difference is almost certainly memory pressure: they allocate 262k (tight, so -fit
+# actively shrinks) on Q4_K_XL with no mmproj; we allocate 131072 and already fit. Their
+# absolute prefill (649) is also 39% below ours (1068) — different config entirely.
+# ⇒ ubatch 512 remains the lever to reach for if you ever need 678 MiB back (e.g. going
+#   to 262k ctx), at a ~4% prefill cost. Don't take it for speed.
+# ⇒ This is the AGENTS.md "never hand-copy another rig's workaround" rule paying off.
+#
+# ===== MODEL-CARD SPECS VERIFIED AGAINST THIS LANE (2026-08-11) =====================
+#   ✅ "requires llama.cpp b10353 or newer" — our master 030ebb5 is 5 commits NEWER.
+#      Verified with `git merge-base --is-ancestor b10353 030ebb5`, NOT the compare API
+#      (whose ahead/behind is relative to the BASE arg and reads backwards — it fooled
+#      me twice in this lane's history; see the pin caveat above).
+#   ✅ `--jinja` mandatory, no separate template file — we pass it.
+#   ✅ "-c divides across -np slots" — we run -np 1, so the slot gets all 131072
+#      (log: "n_ctx_slot = 131072"). Raising NP would silently quarter the window.
+#   ✅ card's memory table "~20 GB with vision + drafter" — measured 20.62 GiB idle.
+#   ⚠️ card says "use --reasoning-budget N to hard-cap thinking tokens". VERIFIED FALSE
+#      on this template/build: booted with --reasoning-budget 400 (confirmed present in
+#      the container's argv) and the xhigh output was BIT-IDENTICAL to --reasoning-budget
+#      -1 — 6859 chars of reasoning, 1213 of content, 2829 completion tokens both times.
+#      The flag works by injecting an end-of-thinking tag, and this model has no <think>
+#      delimiters (reasoning rides the `assistant to=self` channel), so there is nothing
+#      to inject. r/LocalLLM independently found `--reasoning-budget 0` doesn't disable
+#      thinking either. ⇒ There is NO server-side cap on reasoning. The only defence
+#      against the truncation trap is a generous max_tokens (xhigh spends ~2.8K tokens
+#      on a hard prompt; budget >=4K, and the Reddit thread suggests 16K of headroom).
+#   ⚠️ card says "never stop on <|eom|>" (it ends a MESSAGE, not the turn). Boot logs
+#      "special_eot_id is not in special_eog_ids"; benign in practice here — every
+#      generation observed ended finish_reason=stop/eos with both reasoning_content AND
+#      content populated. If you ever see replies truncated at a channel boundary, this
+#      is the first thing to check.
+#
+# ===== MEASURED 2026-08-10, this rig (1x RTX 3090 sm_86, GPU1, PCIe x4) ============
+# Image club3090/llama.cpp:server-cuda-master-030ebb5-sm86 · 131072 ctx · q8_0 KV · -np 1
+#
+# DFLASH A/B — greedy, length-matched (ignore_eos, 800 code / 1000 prose tokens),
+# 2 warm + 3 measured per arm, run INTERLEAVED A/B/A/B across 4 boots so the flag is
+# separated from thermal position (GPU1 47 -> 67 C over the run):
+#
+#   prompt   DFlash ON (pass1 / pass2)     OFF (pass1 / pass2)      speedup  accept
+#   code     80.63±0.95 / 80.99±0.62       40.62±0.32 / 41.05±0.07   1.98x   22.4%
+#   prose    73.67±0.67 / 74.72±0.35       40.61±0.12 / 41.25±0.11   1.81x   20.0%
+#
+#   Pass-to-pass spread <=1.6% and same-signed in both arms, so it cancels — the
+#   speedup is real, not a thermal artifact. Greedy CV <=1.4%. Acceptance was
+#   BIT-IDENTICAL across passes (deterministic), a good drafter-sanity signal.
+#
+# ⚠ THE SPEEDUP SHRINKS WITH SAMPLING — greedy is the best case, and Meta's headline
+#   3.1x is a greedy 5090 figure. At temp=1.0 (Meta's OWN recommended sampling),
+#   2 warm + 5 measured:
+#
+#   prompt   DFlash ON            OFF          speedup  accept   ON CV
+#   code     78.32±3.98           41.27±0.08    1.90x   21.1%     5.1%
+#   prose    53.40±11.30          41.45±0.08    1.29x   11.7%    21.2%
+#
+#   Prose acceptance nearly HALVES (20.0% -> 11.7%) once you sample, taking the
+#   speedup from 1.81x to 1.29x and making it wildly unstable (CV 21%). Code barely
+#   moves. ⇒ If you run this lane for prose at temp 1.0, expect ~1.3x and jitter;
+#   for code/agentic work at low temp, expect ~1.9-2.0x. Both still beat OFF.
+#
+# ⚠️ THE DRAFTER ALSO COSTS PREFILL — measured on the sibling long.yml 2026-08-11 with
+#   an A/B/A (both ON arms agree within 2%): -19.2% at 8.5K, -16.4% at 68K, -13.9% at
+#   200K. So a community claim of -33% does NOT reproduce, but the cost is real, and it
+#   sets a BREAK-EVEN in output tokens below which the drafter loses: ~210 tok at 8.5K
+#   and ~1,410 tok at 68K (at the 1.29x prose ratio above; roughly half that at 1.90x).
+#   On THIS lane the +1.2 s TTFT at 8.5K is trivial and almost any real reply clears the
+#   bar — keep the drafter on. It matters on long.yml, where +32 s of TTFT at 200K needs
+#   a ~3.3K-token reply to earn back. Full table + method: long.yml.
+#
+# CANONICAL bench.sh (repo protocol: 3 warm + 5 measured, temp 0.6/top_p .95/top_k 20
+# — NOT Muse's recommended sampling, and a different essay prompt than the A/B above,
+# so compare it to other BENCHMARKS.md rows, not to the tables above):
+#   narrative 47.38 ± 2.48 TPS (CV 5.2%)   ·   code 81.53 ± 9.63 TPS (CV 11.8%)
+#   TTFT ~163 ms   ·   prefill 10K ~1195 tok/s   ·   prefill 90K ~1058 tok/s
+#   (prefill falls only ~11% from 10K to 90K — the [L,L,L,G] SWA pattern paying off)
+#
+# VRAM @131072 (measured, GPU1):
+#   DFlash ON   20.62 GiB idle  ·  21.36 GiB PEAK under a 90K-token prefill
+#   DFlash OFF  18.26 GiB  (--spec-type none does not load the drafter at all)
+#   ⇒ the drafter costs 2.51 GiB all-in (1.52 GiB file + ~1.0 GiB draft context)
+#   ⇒ ~2.6 GiB headroom at peak on a 24 GiB card. Fits, but do NOT also raise ctx
+#     or move to kquant-dynamic on this card. My pre-boot estimate was 20.5-21.0
+#     GiB idle, which was right; the 90K-prefill peak is the part an idle
+#     nvidia-smi reading would have missed.
+# ==================================================================================
+#
+# KV note — this arch is unusually cheap, which is why 131K needs under 1 GiB:
+#   GQA is 32 Q / 2 KV heads (16:1) and the attention pattern is
+#   [Local, Local, Local, Global] over 52 layers, so only 13 layers hold
+#   full-length KV; the other 39 are capped at the 2048 sliding window.
+#     13 * 131072 * 512 values (global) + 39 * 2048 * 512 (local) ~= 913M values
+#     -> ~0.95 GiB at q8_0, ~1.70 GiB at f16
+#   f16 KV is therefore genuinely affordable here (+0.75 GiB) if you want maximum
+#   fidelity for agentic work: set KV_TYPE_K=f16 KV_TYPE_V=f16.
+#   ⚠ NEVER pass --swa-full — it forces all 52 layers to full length
+#   (52 * 131072 * 512 = 3.49G values, ~6.5 GiB at f16) and blows the budget.
+#
+# Override defaults via .env or shell (shell env wins — serve.sh relies on that):
+#   MODEL_DIR          host dir mounted as /models  (default: ../../../../../../models-cache)
+#   GGUF_FILE          trunk path under /models
+#   MMPROJ_FILE        perception encoder under /models
+#   DFLASH_FILE        DFlash drafter under /models
+#   CTX_SIZE           KV pool size          (default: 131072 = the model's native window)
+#   KV_TYPE_K/_V       K / V quant           (defaults: q8_0 / q8_0; f16 fits, see above)
+#   REASONING_STRENGTH low|medium|high|xhigh (default: high — Meta advises high/xhigh
+#                      for coding + agentic work). THIS is the effort lever, not
+#                      --reasoning. No serve.sh flag maps to it yet, so use the env:
+#                        REASONING_STRENGTH=xhigh ./serve.sh muse
+#   DFLASH_N_MAX       drafted tokens        (default: 15 — block size is 16 = 1 anchor
+#                      + 15 proposals; anything higher is clamped to 15 upstream)
+#   FLASH_ATTN         -fa value             (default: on; try 'off' if the brand-new
+#                      gated-attention + SWA path misbehaves on sm_86)
+#   SERVED_NAME        --alias value         (default: muse-glimmer-30b)
+#   PORT               host port             (default: 8210)
+#
+# Quick start (from this directory):
+#   MODEL_DIR=/home/pawl/models CUDA_VISIBLE_DEVICES=1 docker compose -f dflash-vision.yml up -d
+#   curl http://localhost:8210/v1/models   # -> muse-glimmer-30b
+#
+# FIRST-BOOT CHECKLIST — ALL 8 PASSED 2026-08-10 (results inline):
+#   1. ✅ Arch loads            — no "unknown model architecture"; locally built image.
+#   2. ✅ Perception encoder    — "load_model: loaded multimodal model, mmproj-kquant.gguf".
+#   3. ✅ Drafter initialised   — "adding speculative implementation 'draft-dflash'",
+#         n_max=15 n_min=0 p_min=0.00, block_size=16, mask_token_id=201818,
+#         n_extract=5 — exactly the 16-token block / 5 hidden-layer spec on the card.
+#   4. ✅ Drafting actually runs — 22.4% acceptance on code, 20.0% on prose at greedy,
+#         and the OFF arm reports draft_n=0, so the counters are trustworthy.
+#   5. ✅ Image round-trip      — read a 1990px chart's EXACT title (em-dash, date and
+#         all) plus two correct bar pairs (32/33, 40/72) at temp 0, WITH the drafter
+#         active. Needed max_tokens=2000; see the reasoning-budget caveat.
+#   6. ✅ VRAM                  — 21.36 GiB peak on GPU1, ~2.6 GiB spare. See table.
+#   7. ✅ Tool call round-trip  — 2-turn atem: turn 1 finish_reason=tool_calls with
+#         get_gpu_temp{"index":1}; turn 2 fed the result back and it answered
+#         "GPU 1 is currently running at 62 °C". Hermes-shaped flow works.
+#   8. ✅ Benched               — see the MEASURED block above. Meta's 233 tok/s is a
+#         greedy 5090 figure; this rig does 80.8 code / 74.2 prose at greedy. Both
+#         real, neither transferable — do not quote a number this rig didn't produce.
+#
+# STILL REQUIRED before Status can go ✅ Production (none of these have run):
+#   verify-full.sh 8/8 · verify-stress.sh 7/7 · soak-test.sh SOAK_MODE=continuous
+#   · quality-test.sh --quick (then --medium for the Quality: schema field)
+# DFLASH IS *NOT* BIT-IDENTICAL TO NO-DRAFTER — measured, with controls (2026-08-10).
+#   Meta's card says DFlash produces "identical output quality", and verification-based
+#   spec-decode is lossless BY CONSTRUCTION in theory. Tested it: 3 prompts (code /
+#   prose / math), temp 0, ignore_eos, n_predict 500, SHA-256 over the completions.
+#     · ON  vs OFF  -> ALL THREE DIVERGE (earliest at char 83)
+#     · OFF vs OFF  -> bit-identical  (engine IS deterministic at temp 0)
+#     · ON  vs ON   -> bit-identical  (the drafter path is deterministic TOO)
+#   So this is NOT flakiness: each arm is stably reproducible, they just settle on
+#   DIFFERENT sequences. The likely mechanism is batch-shape numerics — verifying a
+#   16-token block runs different GEMM shapes than 1-token decode, GPU float
+#   reductions are not associative, so logits differ in the low bits and one
+#   near-tie argmax eventually flips. Quality is NOT visibly harmed: the ON math
+#   answer is fully correct (17x23=391 by two methods, first 12 primes right) and the
+#   prose is coherent.
+#   ⇒ Read Meta's claim as quality-equivalent, NOT bit-exact.
+#   ⇒ PRACTICAL CONSEQUENCE: the drafter is a reproducibility boundary. Golden-output
+#     tests, prompt-cache assumptions, or any A/B recorded with SPEC_TYPE=none will
+#     NOT reproduce with draft-dflash on (and vice versa). Pin SPEC_TYPE in anything
+#     determinism-sensitive; don't treat the drafter as a free, invisible speedup.
+#   ⇒ NOT a substitute for quality-test.sh — a 3-prompt spot check bounds nothing.
+#     The 8-pack still needs to run before this lane is trusted agentically.
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  llama-cpp-muse-glimmer-30b:
+    image: ${LLAMACPP_IMAGE:-club3090/llama.cpp:server-cuda-master-030ebb5-sm86}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-muse-glimmer-30b}"
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8210}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # WSL2: Docker device_ids does NOT isolate GPUs (the image bakes
+    # NVIDIA_VISIBLE_DEVICES=all) — pin via CUDA_VISIBLE_DEVICES inside the
+    # container. =1 → GPU1 only. Without this the model SPLITS across both cards
+    # and decode/prefill bounces over the PCIe x4 link (no NVLink) → minutes-long
+    # prefill that looks like a hang. Matches the other single-card lanes.
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-muse-glimmer-30b-gguf/meta-kquant/muse-glimmer-30B-kquant-17gb.gguf}
+      --mmproj /models/${MMPROJ_FILE:-muse-glimmer-30b-gguf/meta-kquant/mmproj-kquant.gguf}
+      --spec-draft-model /models/${DFLASH_FILE:-muse-glimmer-30b-gguf/meta-kquant/dflash-kquant.gguf}
+      --spec-type ${SPEC_TYPE:-draft-dflash}
+      --spec-draft-n-max ${DFLASH_N_MAX:-15}
+      --alias ${SERVED_NAME:-muse-glimmer-30b}
+      -c ${CTX_SIZE:-131072}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-1024}
+      -ngl 99
+      -fa ${FLASH_ATTN:-on}
+      -fit ${FIT:-on}
+      --cache-type-k ${KV_TYPE_K:-q8_0}
+      --cache-type-v ${KV_TYPE_V:-q8_0}
+      -np ${NP:-1}
+      --cache-ram ${CACHE_RAM:-0}
+      --jinja
+      --reasoning-budget ${REASONING_BUDGET:--1}
+      --chat-template-kwargs '{"reasoning_strength":"${REASONING_STRENGTH:-high}"}'
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-64}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-1}}"]
+              capabilities: [gpu]
