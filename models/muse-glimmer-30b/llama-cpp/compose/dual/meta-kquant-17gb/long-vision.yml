@@ -1,0 +1,190 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Muse-Glimmer-30B (Meta official K-Quant-17GB GGUF, 4.81 bpw) + official mmproj
+#   Engine:    llama.cpp (LOCALLY BUILT from master 030ebb5, sm_86) — see the pin caveat
+#              in ../../single/meta-kquant-17gb/dflash-vision.yml; same image, same reason.
+#   Topology:  Dual 3090 PCIe, NO NVLink (layer-split via -ts; NOT tensor-parallel)
+#   Drafter:   DFlash n=15 (--spec-type draft-dflash + official dflash-kquant.gguf)
+#   KV:        q8_0 K + q8_0 V (f16 is affordable here for the first time — see below)
+#   Vision:    YES — official mmproj-kquant (~1.30 GiB). THE POINT OF THIS VARIANT:
+#              262K *and* vision together, which does not fit on one card.
+#   Template:  GGUF-embedded (--jinja) — channel format, NOT <think>
+#   Max ctx:   262144 via --override-kv (the GGUF declares 131072)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - ⚠️ NEVER BOOTED. Every number below is PREDICTED, not measured. Written to be
+#       validated; do not trust a single figure in this header until the first-boot
+#       checklist at the bottom is filled in. The single-card siblings' headers are
+#       measured — this one is not yet.
+#     - ⚠️ USES BOTH CARDS ⇒ NOT COMPATIBLE WITH ComfyUI (or anything else) ON GPU0.
+#       That is the deliberate trade: boot this when GPU0 is free, boot
+#       ../../single/meta-kquant-17gb/dflash-vision.yml (131K + vision, GPU1 only) when
+#       it is not. GPU0 still carries the Windows desktop (~1.2 GiB), which is why the
+#       default split leans to GPU1 — see TENSOR_SPLIT in the co-located .env.
+#     - ⚠️ ABOVE THE VENDOR-VALIDATED WINDOW, same as the single long lane. Meta
+#       validated to 131072. 262144 is reachable because the 13 full-attention layers
+#       are NoPE (rope_theta=0) and the other 39 never see past their 2048 window, so
+#       there is no RoPE extrapolation to break — but quality >131K is ours to prove.
+#       The single-card long lane measured 9/9 needles at 151K/231K/255K; that is
+#       retrieval, NOT reasoning-at-depth.
+#     - ⚠️ VISION + 262K + DFLASH ALL AT ONCE IS UNPROVEN. Vision+DFlash is confirmed
+#       (single-card, 2026-08-10) and 262K+DFlash is confirmed (single-card long lane,
+#       2026-08-11), but the three together on a layer split are not. First boot must
+#       check all three, not just that the server answers.
+#     - BOTH --override-kv keys are REQUIRED (trunk AND drafter): llama-server hard-caps
+#       the slot to n_ctx_train, so `-c 262144` alone yields a 400 "exceeds the available
+#       context size". Overriding only the trunk leaves the drafter at 131072.
+#     - -np 1 is load-bearing: -c divides across slots, so NP>1 silently shrinks the
+#       window (model card).
+#   Best for:  One-box long-agentic work: 262K context WITH images, when GPU0 is free. ⭐
+# ---------------------------------------------------------------------------
+# WHY THIS VARIANT EXISTS
+#
+# The two single-card lanes each give up something, because 24 GiB cannot hold all of it:
+#
+#   single/dflash-vision.yml   131K + vision + DFlash    (gives up context)
+#   single/long.yml            262K + DFlash, TEXT ONLY  (gives up vision — dropping the
+#                                                         1.30 GiB mmproj is what pays
+#                                                         for the extra KV)
+#
+# 48 GiB across two cards removes the choice. Predicted footprint:
+#
+#   weights .............. 15.61 GiB
+#   DFlash drafter ........ 2.51 GiB  (1.52 file + ~1.0 draft context)
+#   mmproj (vision) ....... 1.30 GiB
+#   KV q8_0 @262144 ....... 1.73 GiB
+#   compute / graph ....... ~0.5-1.0 GiB
+#   ---------------------------------
+#   total ................ ~21.7-22.2 GiB across 48 GiB  →  ~11 GiB per card
+#
+# ⇒ ~12 GiB free per card. That headroom is the second reason for this variant, not just
+#   a nicety: high-resolution image input SPIKES VRAM (a single-3090 report on
+#   r/LocalLLaMA 1vkm42m had it "spike above 24GB", mitigated by capping input to ~3 Mpx).
+#   The single-card 262K lane has ~3.6 GiB of headroom and had to drop vision partly for
+#   that reason; here a hi-res image has ~12 GiB to spill into. Images should just work
+#   without a Mpx cap — VERIFY on first boot with a genuinely large image, not a thumbnail.
+#
+# f16 KV IS AFFORDABLE HERE, AND ONLY HERE (262144 f16 = 3.25 GiB, +1.52 over q8_0 —
+# it does NOT fit alongside the drafter on one card). The default is still q8_0 for two
+# deliberate reasons: (1) every measurement we have on this model is q8_0, so keeping it
+# means this lane's numbers are comparable to both single-card lanes instead of confounding
+# topology with KV precision, and (2) a sibling community thread measured q8_0 BEATING f16
+# on prefill (609 vs 567 tok/s) with 3/3 needles at 200K, so q8_0 is not a fidelity
+# compromise on this architecture. Flip both KV_TYPE_K/_V to f16 in the .env if you want
+# max fidelity for a long agentic run and are willing to re-measure.
+#
+# KV arithmetic (only 13 of 52 layers hold long-range state — GQA 32Q/2KV, [L,L,L,G] SWA):
+#   13 layers x 2 (K+V) x 2 KV heads x 128 head_dim = 6,656 values/token
+#     q8_0: 7,072 B/tok  -> 262144 tok = 1.73 GiB
+#     f16 : 13,312 B/tok -> 262144 tok = 3.25 GiB
+#   ⚠ NEVER --swa-full: it forces all 52 layers to full length (~4x the KV).
+#
+# LAYER SPLIT, NOT TENSOR PARALLEL — and on this rig that distinction matters a lot.
+# GPU1 sits in a PCIe 4.0 x4 slot. That cripples vLLM TP=2 (measured ~85 vs a reference
+# 178 TPS) because tensor-parallel all-reduce moves a large tensor every layer. llama.cpp's
+# default -sm layer does NOT do that: it passes the activation across the boundary once,
+# ~13 KB/token at decode (hidden 6656 x 2 B), which is nothing even on x4. Prefill passes
+# ~13.6 MB per ubatch boundary (1024 x 6656 x 2 B) ≈ 1.7 ms at x4 — also small next to the
+# compute. ⇒ Expect layer-split dual to be roughly single-card speed, NOT the vLLM cliff.
+# PREDICTION, NOT A MEASUREMENT: the one-time weight LOAD will be visibly slower (half the
+# bytes cross the x4 link), and decode may lose a little to the extra hop. Measure both.
+# Do NOT switch to -sm row on this rig without measuring: row split is the tensor-parallel
+# traffic pattern that the x4 slot punishes.
+#
+# Override defaults via .env (this directory) or shell (shell env wins):
+#   CTX_SIZE          KV pool size             (default: 262144)
+#                     ⚠ Safe to call CTX_SIZE here: this directory has its OWN .env. The
+#                     single-card dir needed LONG_CTX_SIZE only because its two composes
+#                     SHARE one .env that pins CTX_SIZE=131072.
+#   OVERRIDE_CTX      the int: value in BOTH --override-kv keys (default: 262144)
+#   TENSOR_SPLIT      layer split across cards (default: 0.9,1.1 — leans to GPU1 because
+#                     GPU0 carries the Windows desktop AND the main-GPU-pinned mmproj +
+#                     drafter). Ratio form, like the deckard/hauhau lanes.
+#   KV_TYPE_K/_V      K / V quant              (defaults: q8_0 / q8_0; f16 fits here)
+#   REASONING_STRENGTH low|medium|high|xhigh    (default: high — Meta advises high/xhigh
+#                     for coding + agentic. Measured on the single-card lane: xhigh buys a
+#                     reproducible +2/20 on hard agentic follow-through and NOTHING on
+#                     simple tool dispatch, because the setting is a ceiling, not a floor.)
+#   DFLASH_N_MAX      drafted tokens           (default: 15; upstream clamps above 15)
+#   SPEC_TYPE         draft-dflash | none      (none = drafter OFF, frees 2.51 GiB)
+#                     ⚠ The drafter COSTS prefill: measured -13.9% at 200K on the single
+#                     long lane, so it needs a ~3.3K-token reply to pay for itself there.
+#                     Same trade applies here. `none` for one short answer over a big dump.
+#   UBATCH_SIZE       microbatch               (default: 1024 — measured 4% faster than
+#                     512 on this rig, contra a community report)
+#   SERVED_NAME / PORT                         (defaults: muse-glimmer-30b-dual / 8212)
+#
+# Quick start (from this directory — GPU0 must be free of ComfyUI):
+#   MODEL_DIR=/home/pawl/models docker compose -f long-vision.yml up -d
+#   curl http://localhost:8212/v1/models   # -> muse-glimmer-30b-dual
+#
+# FIRST-BOOT CHECKLIST — fill this in; until then every number above is a guess:
+#   [ ] n_ctx_slot = 262144 in the boot log (NOT 131072 — proves --override-kv took)
+#   [ ] mmproj loaded (a "clip"/vision line in the log) AND an image round-trips
+#   [ ] a genuinely HI-RES image (not a thumbnail) does not OOM — the headroom claim
+#   [ ] "speculative" / draft lines present AND timings show draft_n > 0 in a response
+#       (⚠ the boot log prints "loading draft model" even under --spec-type none —
+#        trust draft_n in the response timings and VRAM, not that line)
+#   [ ] per-card VRAM from nvidia-smi (both cards) + the log's CUDA0/CUDA1 buffer sizes;
+#       rebalance TENSOR_SPLIT if one card is much tighter
+#   [ ] needle retrieval at ~255K (scratchpad needle.py) — confirm the single-card 3/3
+#   [ ] prefill + decode vs the single-card lanes: is the x4 layer-split penalty real?
+#   [ ] weight-load wall time (expected to be the WORST regression vs single card)
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 48
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 1
+services:
+  llama-cpp-muse-glimmer-30b-dual:
+    image: ${LLAMACPP_IMAGE:-club3090/llama.cpp:server-cuda-master-030ebb5-sm86}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-muse-glimmer-30b-dual}"
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8212}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # Pinned explicitly to BOTH cards so a stale CUDA_VISIBLE_DEVICES=1 exported by a
+      # shell (the single-card lanes set exactly that) cannot silently halve this lane.
+      - CUDA_VISIBLE_DEVICES=${DUAL_VISIBLE_DEVICES:-0,1}
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-muse-glimmer-30b-gguf/meta-kquant/muse-glimmer-30B-kquant-17gb.gguf}
+      --mmproj /models/${MMPROJ_FILE:-muse-glimmer-30b-gguf/meta-kquant/mmproj-kquant.gguf}
+      --spec-draft-model /models/${DFLASH_FILE:-muse-glimmer-30b-gguf/meta-kquant/dflash-kquant.gguf}
+      --spec-type ${SPEC_TYPE:-draft-dflash}
+      --spec-draft-n-max ${DFLASH_N_MAX:-15}
+      -ngld ${DRAFT_NGL:-99}
+      --override-kv muse-glimmer.context_length=int:${OVERRIDE_CTX:-262144},dflash.context_length=int:${OVERRIDE_CTX:-262144}
+      --alias ${SERVED_NAME:-muse-glimmer-30b-dual}
+      -c ${CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-1024}
+      -ngl 99
+      -sm ${SPLIT_MODE:-layer}
+      -ts ${TENSOR_SPLIT:-0.9,1.1}
+      -fa ${FLASH_ATTN:-on}
+      -fit ${FIT:-on}
+      --cache-type-k ${KV_TYPE_K:-q8_0}
+      --cache-type-v ${KV_TYPE_V:-q8_0}
+      -np ${NP:-1}
+      --cache-ram ${CACHE_RAM:-0}
+      --jinja
+      --reasoning-budget ${REASONING_BUDGET:--1}
+      --chat-template-kwargs '{"reasoning_strength":"${REASONING_STRENGTH:-high}"}'
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-64}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -98,6 +98,7 @@ declare -A COMPOSE=(
   [apex-yarn-1m]="models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml"
   [muse]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/dflash-vision.yml"
   [muse-long]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/long.yml"
+  [muse-dual]="models/muse-glimmer-30b/llama-cpp/compose/dual/meta-kquant-17gb/long-vision.yml"
 )
 
 declare -A GROUP=(
@@ -105,7 +106,7 @@ declare -A GROUP=(
   [carnice]=repo [deckard]=repo [hauhau]=repo [omni]=repo [agents-a1]=repo
   [apex-vision-ik]=ours [apex-vision-mainline]=ours [deckard-vision]=ours
   [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours [27b-vision]=ours
-  [ud-vision]=ours [muse]=ours [muse-long]=ours
+  [ud-vision]=ours [muse]=ours [muse-long]=ours [muse-dual]=ours
 )
 
 declare -A INFO=(
@@ -128,6 +129,7 @@ declare -A INFO=(
   [27b-single]=":8021  single GPU0 · 28K · vision · MTP — fast solo, tiny ctx"
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
   [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
+  [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · ⚠ NEVER BOOTED — needs the first-boot checklist · ⚠ uses GPU0, so NOT with ComfyUI"
   [muse]=":8210  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 131K · vision · DFlash n=15 · llama.cpp master 030ebb5 (local build) · 🧪 UNVALIDATED — effort via REASONING_STRENGTH=low|medium|high|xhigh, not --think"
 )
 
@@ -163,6 +165,7 @@ declare -A WEIGHTS=(
   [27b-vision]="$UBERGARM_27B_GGUF $QWEN_27B_MMPROJ"
   [muse]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [muse-long]="$MUSE_GGUF $MUSE_DFLASH"
+  [muse-dual]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [27b]="qwen3.6-27b-autoround-int4"
   [27b-single]="qwen3.6-27b-autoround-int4"
   [27b-minimal]="qwen3.6-27b-autoround-int4"
@@ -246,14 +249,23 @@ think_spec() {  # <compose> -> REASONING | ENABLE_THINKING | FIXED | NONE
   # REASONING → _effective found nothing → {think:?}, and --think would have exported
   # a var the compose ignores: a SILENT NO-OP, which this script exists to prevent.
   local c="$1"
-  if   grep -qE '\$\{ENABLE_THINKING' "$c"; then echo ENABLE_THINKING
-  elif grep -qE '\$\{REASONING[:}-]'  "$c"; then echo REASONING
-  elif grep -qiE 'enable_thinking|--reasoning[ =]' "$c"; then echo FIXED   # hardcoded, not env-togglable
+  if   _cmdlines "$c" | grep -qE '\$\{ENABLE_THINKING'; then echo ENABLE_THINKING
+  elif _cmdlines "$c" | grep -qE '\$\{REASONING[:}-]';  then echo REASONING
+  elif _cmdlines "$c" | grep -qiE 'enable_thinking|--reasoning[ =]'; then echo FIXED  # hardcoded
   else echo NONE                                                            # not a thinking model
   fi
 }
+# Every probe below reads the COMMAND, never the prose. Compose headers in this repo are
+# large and discuss the very flag names these greps look for, so scanning the whole file
+# makes DOCUMENTATION change DERIVED BEHAVIOUR. Caught 2026-08-11: adding an 8-pack caveat
+# to muse's header that mentions `chat_template_kwargs.enable_thinking` (explaining that
+# benchlocal's thinking gate is INERT on that template) flipped `muse` from think:n/a to
+# think:off·fixed — the compose command has no such flag. Same failure family as the
+# ${REASONING prefix-match above: a derive path believing the wrong text.
+# Only whole-line comments are dropped, not trailing `#`, so quoted values are untouched.
+_cmdlines() { grep -v '^[[:space:]]*#' "$1"; }
 _compose_default() {  # <compose> <VAR> -> value after ${VAR:-…}, else ""
-  grep -oE "\\\$\\{$2:-[^},\"' ]*" "$1" 2>/dev/null | head -1 | sed "s/.*:-//" || true
+  _cmdlines "$1" | grep -oE "\\\$\\{$2:-[^},\"' ]*" 2>/dev/null | head -1 | sed "s/.*:-//" || true
 }
 _env_override() {  # <compose> <VAR> -> value from the compose-dir .env (the one docker loads), else ""
   local e; e="$(dirname "$1")/.env"
@@ -267,21 +279,21 @@ think_state() {  # <compose> -> on | off | on·fixed | off·fixed | n/a
   local c="$1" s; s="$(think_spec "$c")"
   case "$s" in
     NONE)  echo "n/a"; return ;;
-    FIXED) grep -qiE 'enable_thinking"?:? *true' "$c" && echo "on·fixed" || echo "off·fixed"; return ;;
+    FIXED) _cmdlines "$c" | grep -qiE 'enable_thinking"?:? *true' && echo "on·fixed" || echo "off·fixed"; return ;;
   esac
   case "$(_effective "$c" "$s")" in on|true) echo on ;; off|false) echo off ;; *) echo "?" ;; esac
 }
 preserve_state() {  # <compose> -> keep | strip | n/a
   local c="$1"
-  grep -qE '\$\{PRESERVE_THINKING' "$c" || { echo "n/a"; return; }
+  _cmdlines "$c" | grep -qE '\$\{PRESERVE_THINKING' || { echo "n/a"; return; }
   case "$(_effective "$c" PRESERVE_THINKING)" in true) echo keep ;; false) echo strip ;; *) echo "?" ;; esac
 }
 ctx_spec() {  # <compose> -> which env var sets the context window (for --ctx to target)
   local c="$1"
-  if   grep -qE '\$\{LONG_CTX_SIZE'   "$c"; then echo LONG_CTX_SIZE     # muse long.yml (distinct var: shared .env pins CTX_SIZE)
-  elif grep -qE '\$\{VISION_CTX_SIZE' "$c"; then echo VISION_CTX_SIZE   # ik vision.yml (most specific first)
-  elif grep -qE '\$\{CTX_SIZE'        "$c"; then echo CTX_SIZE          # llama.cpp / ik text
-  elif grep -qE '\$\{MAX_MODEL_LEN'   "$c"; then echo MAX_MODEL_LEN     # vLLM
+  if   _cmdlines "$c" | grep -qE '\$\{LONG_CTX_SIZE';   then echo LONG_CTX_SIZE     # muse long.yml (distinct var: shared .env pins CTX_SIZE)
+  elif _cmdlines "$c" | grep -qE '\$\{VISION_CTX_SIZE';  then echo VISION_CTX_SIZE   # ik vision.yml (most specific first)
+  elif _cmdlines "$c" | grep -qE '\$\{CTX_SIZE';         then echo CTX_SIZE          # llama.cpp / ik text
+  elif _cmdlines "$c" | grep -qE '\$\{MAX_MODEL_LEN';    then echo MAX_MODEL_LEN     # vLLM
   else echo NONE
   fi
 }

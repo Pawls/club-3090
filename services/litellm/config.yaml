@@ -173,6 +173,18 @@ model_list:
       api_key: EMPTY
       timeout: 900
 
+  # Muse Glimmer DUAL lane — 262K *and* vision together, :8212. Needs BOTH cards, so it
+  # cannot coexist with ComfyUI on GPU0; the :8210 single lane (131K + vision) is the
+  # ComfyUI-compatible one. ⚠ NEVER BOOTED as of 2026-08-11 — first-boot checklist lives
+  # in the compose header. Same 900 s timeout as the other 262K lane: a cold 255K prefill
+  # is minutes, and a default client timeout reads that as a hang.
+  - model_name: muse-glimmer-30b-dual
+    litellm_params:
+      model: openai/muse-glimmer-30b-dual
+      api_base: http://host.docker.internal:8212/v1
+      api_key: EMPTY
+      timeout: 900
+
   # Reasoning-effort aliases — SAME backend, SAME served model, only the template's
   # `reasoning_strength` differs. custom_hooks.py §D reads the level off the alias suffix and
   # injects it per request, so switching effort is "pick another model in the dropdown"
