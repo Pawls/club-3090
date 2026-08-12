@@ -13,10 +13,10 @@
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
 #   Status:    🧪 Experimental
 #   Caveats:
-#     - ⚠️ NEVER BOOTED. Every number below is PREDICTED, not measured. Written to be
-#       validated; do not trust a single figure in this header until the first-boot
-#       checklist at the bottom is filled in. The single-card siblings' headers are
-#       measured — this one is not yet.
+#     - ✅ BOOTED AND MEASURED 2026-08-11. Vision + 262K + DFlash all confirmed running
+#       TOGETHER on a layer split (the combination that was unproven). Numbers below are
+#       measured unless labelled otherwise. Still unverified: hi-res image headroom and
+#       needle retrieval at depth — see the checklist at the bottom.
 #     - ⚠️ USES BOTH CARDS ⇒ NOT COMPATIBLE WITH ComfyUI (or anything else) ON GPU0.
 #       That is the deliberate trade: boot this when GPU0 is free, boot
 #       ../../single/meta-kquant-17gb/dflash-vision.yml (131K + vision, GPU1 only) when
@@ -35,8 +35,9 @@
 #     - BOTH --override-kv keys are REQUIRED (trunk AND drafter): llama-server hard-caps
 #       the slot to n_ctx_train, so `-c 262144` alone yields a 400 "exceeds the available
 #       context size". Overriding only the trunk leaves the drafter at 131072.
-#     - -np 1 is load-bearing: -c divides across slots, so NP>1 silently shrinks the
-#       window (model card).
+#     - -np 1 is load-bearing, and MEASURED so — see the concurrency section below.
+#       Do not raise it hoping for 35b-a3b-style fan-out: that model is an MoE on vLLM,
+#       this is a DENSE 30B on llama.cpp's static slots. -np 4 measured WORSE overall.
 #   Best for:  One-box long-agentic work: 262K context WITH images, when GPU0 is free. ⭐
 # ---------------------------------------------------------------------------
 # WHY THIS VARIANT EXISTS
@@ -48,22 +49,47 @@
 #                                                         1.30 GiB mmproj is what pays
 #                                                         for the extra KV)
 #
-# 48 GiB across two cards removes the choice. Predicted footprint:
+# 48 GiB across two cards removes the choice.
 #
-#   weights .............. 15.61 GiB
-#   DFlash drafter ........ 2.51 GiB  (1.52 file + ~1.0 draft context)
-#   mmproj (vision) ....... 1.30 GiB
-#   KV q8_0 @262144 ....... 1.73 GiB
-#   compute / graph ....... ~0.5-1.0 GiB
-#   ---------------------------------
-#   total ................ ~21.7-22.2 GiB across 48 GiB  →  ~11 GiB per card
+# ===== MEASURED 2026-08-11 (idle, -c 262144, vision + DFlash, -ts 0.9,1.1) ============
+#   GPU0  14937 MiB (14.59 GiB, INCLUDES ~1.5 GiB Windows desktop)  free  9.41 GiB
+#   GPU1  14268 MiB (13.93 GiB)                                     free 10.07 GiB
+#   TOTAL 28.52 GiB of 48 GiB                                       free 19.48 GiB
+#   Boot to serving: 26 s (see the x4 note below — this did NOT crawl).
 #
-# ⇒ ~12 GiB free per card. That headroom is the second reason for this variant, not just
-#   a nicety: high-resolution image input SPIKES VRAM (a single-3090 report on
+# ⚠️ THE PREDICTION IN THIS HEADER WAS WRONG BY ~6 GiB — it said ~22 GiB total. Kept as a
+#   correction, not deleted: the naive sum (weights 15.61 + drafter 2.51 + mmproj 1.30 +
+#   KV q8_0 1.73 + ~1 compute) UNDERCOUNTS a layer split, because compute/graph buffers
+#   are allocated PER CARD rather than divided. Do not size a future multi-GPU lane by
+#   halving a single-card footprint. (Probable explanation — this build does not print
+#   the usual `CUDA0/CUDA1 buffer size` lines, so it is not confirmed from the log.)
+#   The -ts 0.9,1.1 lean worked: excluding the desktop, GPU1 carries slightly more.
+#
+# ⇒ ~9.4 / ~10.1 GiB free per card (not the ~12 predicted). Still the second reason for
+#   this variant: high-resolution image input SPIKES VRAM (a single-3090 report on
 #   r/LocalLLaMA 1vkm42m had it "spike above 24GB", mitigated by capping input to ~3 Mpx).
 #   The single-card 262K lane has ~3.6 GiB of headroom and had to drop vision partly for
-#   that reason; here a hi-res image has ~12 GiB to spill into. Images should just work
-#   without a Mpx cap — VERIFY on first boot with a genuinely large image, not a thumbnail.
+#   that reason. ⚠ STILL UNVERIFIED HERE — test with a genuinely large image, not a
+#   thumbnail, before relying on it.
+#
+# ===== SPEED vs THE SINGLE-CARD LANE — same harness, same prompt sizes ================
+# (scratchpad ppd.py: /completion, cache_prompt=false, non-repeating filler, ignore_eos,
+#  warmup discarded. Single-card figures are long.yml's, recorded in its header.)
+#
+#   prompt tok   prefill single -> dual      decode single -> dual     TTFT single -> dual
+#     8,526      1278.6 -> 1655.5  (+29%)    163.8 -> 158.9  (-3%)      6.7 s ->   5.2 s
+#    68,250      1141.2 -> 1565.9  (+37%)    156.8 -> 146.4  (-7%)     59.8 s ->  43.6 s
+#   204,750       892.0 -> 1233.5  (+38%)    133.6 -> 124.5  (-7%)    229.5 s -> 166.0 s
+#
+# ⇒ PREFILL +30-38%, DECODE -3-7%. The decode dip is exactly what a layer split predicts:
+#   the cards run SEQUENTIALLY (GPU0's layers, then GPU1's), so there is no bandwidth win,
+#   only a per-token sync to pay. The headline win is TTFT at depth: 200K drops from
+#   3.8 min to 2.8 min.
+# ⚠ The prefill gain is LARGER than a sequential layer split should allow, so it probably
+#   is not the second card's compute at all: `-fit on` most likely shrank the effective
+#   microbatch under the single card's ~3.6 GiB headroom, while dual's ~10 GiB lets it run
+#   at the full -ub 1024. HYPOTHESIS, not established — confirm by comparing FIT=off arms
+#   before citing "dual prefills faster" as an architectural fact.
 #
 # f16 KV IS AFFORDABLE HERE, AND ONLY HERE (262144 f16 = 3.25 GiB, +1.52 over q8_0 —
 # it does NOT fit alongside the drafter on one card). The default is still q8_0 for two
@@ -91,6 +117,45 @@
 # bytes cross the x4 link), and decode may lose a little to the extra hop. Measure both.
 # Do NOT switch to -sm row on this rig without measuring: row split is the tensor-parallel
 # traffic pattern that the x4 slot punishes.
+#
+# ===== CONCURRENCY (-np): MEASURED 2026-08-11, AND THE ANSWER IS "DON'T" =============
+# The obvious idea on 48 GiB is 35b-a3b-style fan-out (that lane runs N=4). It does not
+# transfer, for two architectural reasons and one measured one.
+#
+#   boot   concurrent   per-stream decode   aggregate    draft acceptance
+#   -np 1       1           230.7 tok/s      230.7          94.4%
+#   -np 1       2           227.9 tok/s      ~231           94.1%   (SERIALISED: 1 slot)
+#   -np 4       1           174.0 tok/s      174.0          94.4%
+#   -np 4       4            57.4 tok/s      229.6          71.4%
+#
+# ⇒ FOUR CONCURRENT STREAMS ON -np 4 PRODUCE THE SAME TOTAL TOKEN RATE AS ONE STREAM ON
+#   -np 1 (229.6 vs 230.7 tok/s). You buy nothing in aggregate and pay 4x the per-request
+#   latency. On top of that:
+#     · -np 4 costs 25% of SINGLE-STREAM decode even when only one request is in flight
+#       (174.0 vs 230.7) — the slots are not free to have.
+#     · -c DIVIDES across slots: -np 4 -c 262144 gives n_ctx_slot=65536, CONFIRMED in the
+#       boot log. Full 262K per slot needs -c 1048576 (KV 6.91 GiB, still fits).
+#     · draft acceptance collapses 94.4% -> 71.4% under batching.
+#
+# WHY: DFlash and batching are SUBSTITUTES, not complements — both monetise the same idle
+# compute during bandwidth-bound decode. At batch 1 a dense 30B reads all ~15.6 GB of
+# weights per token, leaving spare FLOPs, which is exactly what the drafter converts into
+# 1.9x. Batching wants those same FLOPs to amortise one weight read across 4 tokens. With
+# the drafter already consuming them, there is nothing left for concurrency to harvest.
+# And 35b-a3b is not a counterexample: it is an MoE (~3B active of 35B) on vLLM with
+# CONTINUOUS batching and paged KV, whereas llama.cpp slots STATICALLY partition the pool.
+#
+# ⚠️ HONEST CAVEAT ON THIS TEST: it uses repetitive filler with ignore_eos, where draft
+# acceptance is an unrealistic 94% — i.e. the drafter is at its BEST, so concurrency looks
+# maximally pointless. On real prose acceptance is 11-22% (measured on the single-card
+# lane at temp 1.0), leaving more spare compute, so batching would likely scale better
+# than the table above. The single-stream -np 4 penalty and the -c division are NOT
+# workload-dependent, though — those stand regardless.
+#
+# ⇒ RECOMMENDATION: keep -np 1 here. If you genuinely need parallel fan-out, use the MoE
+#   lane (35b-a3b, vLLM, N=4) — it is the architecturally right tool. If you must batch
+#   THIS model, first set SPEC_TYPE=none (the drafter is what concurrency is fighting) and
+#   raise -c to 4x your real per-slot need, then re-measure before trusting it.
 #
 # Override defaults via .env (this directory) or shell (shell env wins):
 #   CTX_SIZE          KV pool size             (default: 262144)
@@ -120,17 +185,22 @@
 #   curl http://localhost:8212/v1/models   # -> muse-glimmer-30b-dual
 #
 # FIRST-BOOT CHECKLIST — fill this in; until then every number above is a guess:
-#   [ ] n_ctx_slot = 262144 in the boot log (NOT 131072 — proves --override-kv took)
-#   [ ] mmproj loaded (a "clip"/vision line in the log) AND an image round-trips
-#   [ ] a genuinely HI-RES image (not a thumbnail) does not OOM — the headroom claim
-#   [ ] "speculative" / draft lines present AND timings show draft_n > 0 in a response
-#       (⚠ the boot log prints "loading draft model" even under --spec-type none —
-#        trust draft_n in the response timings and VRAM, not that line)
-#   [ ] per-card VRAM from nvidia-smi (both cards) + the log's CUDA0/CUDA1 buffer sizes;
-#       rebalance TENSOR_SPLIT if one card is much tighter
-#   [ ] needle retrieval at ~255K (scratchpad needle.py) — confirm the single-card 3/3
-#   [ ] prefill + decode vs the single-card lanes: is the x4 layer-split penalty real?
-#   [ ] weight-load wall time (expected to be the WORST regression vs single card)
+#   [x] n_ctx_slot = 262144 in the boot log — CONFIRMED (--override-kv took)
+#   [x] mmproj loaded — CONFIRMED ("loaded multimodal model, mmproj-kquant.gguf")
+#   [ ] a genuinely HI-RES image (not a thumbnail) does not OOM — the headroom claim.
+#       ⚠ STILL THE BIGGEST UNVERIFIED CLAIM IN THIS HEADER, and headroom came in at
+#       ~9.4/10.1 GiB per card rather than the ~12 predicted.
+#   [x] drafting CONFIRMED — draft-dflash impl registered AND draft_n>0 with 59-94%
+#       acceptance in response timings (the boot log's "loading draft model" line is
+#       NOT proof: it prints under --spec-type none too)
+#   [x] per-card VRAM measured (see the block above). TENSOR_SPLIT 0.9,1.1 is balanced;
+#       no rebalance needed. This build does NOT print CUDA0/CUDA1 buffer sizes.
+#   [ ] needle retrieval at ~255K (scratchpad needle.py) — confirm the single-card 9/9
+#   [x] prefill + decode vs single card — MEASURED: prefill +30-38%, decode -3-7%.
+#       The x4 layer-split penalty did NOT materialise the way this header predicted.
+#   [x] weight-load wall time — 26 s to serving. The predicted "worst regression" was
+#       WRONG; loading was not a problem at all.
+#   [x] concurrency (-np) — measured, and the answer is "keep -np 1" (section above)
 # ===========================================================================
 # Hardware metadata (parsed by scripts/preflight.sh):
 # Requires-min-vram-gb: 48
