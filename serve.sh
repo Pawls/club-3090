@@ -131,7 +131,7 @@ declare -A INFO=(
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
   [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
   [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · prefill +30-38% vs single · ⚠ uses GPU0, so NOT with ComfyUI — prefer muse-max"
-  [muse-max]=":8213  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · VISION · DFlash · -ub 512 · 1056 MiB margin, flat with ctx depth · ⭐ leaves GPU0 free for ComfyUI"
+  [muse-max]=":8213  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · VISION · DFlash · needle 6/6 @259K · multi-image OK · -ub 512 (1024 hard-crashes the vision encoder) · ⭐ leaves GPU0 free for ComfyUI"
   [muse]=":8210  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 131K · vision · DFlash n=15 · llama.cpp master 030ebb5 (local build) · 🧪 UNVALIDATED — effort via REASONING_STRENGTH=low|medium|high|xhigh, not --think"
 )
 
