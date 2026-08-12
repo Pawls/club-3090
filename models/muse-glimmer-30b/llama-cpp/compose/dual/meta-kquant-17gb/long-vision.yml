@@ -15,8 +15,8 @@
 #   Caveats:
 #     - ✅ BOOTED AND MEASURED 2026-08-11. Vision + 262K + DFlash all confirmed running
 #       TOGETHER on a layer split (the combination that was unproven). Numbers below are
-#       measured unless labelled otherwise. Still unverified: hi-res image headroom and
-#       needle retrieval at depth — see the checklist at the bottom.
+#       measured unless labelled otherwise, INCLUDING hi-res images (verified to 48 Mpx).
+#       One item still open: needle retrieval at depth — see the checklist at the bottom.
 #     - ⚠️ USES BOTH CARDS ⇒ NOT COMPATIBLE WITH ComfyUI (or anything else) ON GPU0.
 #       That is the deliberate trade: boot this when GPU0 is free, boot
 #       ../../single/meta-kquant-17gb/dflash-vision.yml (131K + vision, GPU1 only) when
@@ -71,8 +71,32 @@
 #   this variant: high-resolution image input SPIKES VRAM (a single-3090 report on
 #   r/LocalLLaMA 1vkm42m had it "spike above 24GB", mitigated by capping input to ~3 Mpx).
 #   The single-card 262K lane has ~3.6 GiB of headroom and had to drop vision partly for
-#   that reason. ⚠ STILL UNVERIFIED HERE — test with a genuinely large image, not a
-#   thumbnail, before relying on it.
+#   that reason.
+#
+# ===== HI-RES IMAGES: VERIFIED 2026-08-11 (VRAM sampled at 100 ms DURING the request) ==
+#   image        payload   HTTP   GPU0 peak      GPU0 headroom left   described correctly
+#    1.6 Mpx      3.8 MB    200   15355 MiB          9.2 GiB                 yes
+#   12.5 Mpx      2.4 MB    200   16682 MiB          7.9 GiB                 yes
+#   48.4 Mpx     30.0 MB    200   16683 MiB          7.9 GiB                 yes
+#   (48.4 Mpx = 1920x25197, a full-page scroll capture. Sampled mid-flight on purpose: a
+#    transient spike is the whole failure mode, and an idle nvidia-smi afterwards misses it.)
+#
+# ⇒ NO ~3 Mpx INPUT CAP IS NEEDED ON THIS LANE. Even a 48 Mpx / 30 MB payload is accepted
+#   and described correctly, peaking ~7.9 GiB short of the card.
+#
+# ⚠️ TWO CAVEATS THAT MATTER MORE THAN THE HEADLINE:
+#   1. ALL VISION VRAM LANDS ON GPU0 — GPU1's delta was ZERO on every image. llama.cpp
+#      pins the mmproj to the main GPU, so the budget for an image spike is GPU0's ~9.2 GiB
+#      ALONE, not the 19.5 GiB combined. GPU0 is also the card carrying the Windows
+#      desktop. Rebalancing -ts does NOT move the vision tower.
+#   2. The 48 Mpx image cost only +1 MiB over the 12.5 Mpx one, which strongly suggests
+#      llama.cpp DOWNSCALES before the perception tower rather than absorbing native
+#      resolution. So "48 Mpx works" means "accepted and correctly described", NOT
+#      "processed at 48 Mpx". Do not infer detail-retention at extreme resolution from
+#      this test — an OCR-at-depth check would be a different experiment.
+#   ⇒ Cross-reference for the SINGLE-card lane: the measured spike is ~1.85 GiB above
+#     idle, which would nearly exhaust that lane's ~2.6 GiB headroom. That is the
+#     quantitative reason hi-res vision is riskier there than here.
 #
 # ===== SPEED vs THE SINGLE-CARD LANE — same harness, same prompt sizes ================
 # (scratchpad ppd.py: /completion, cache_prompt=false, non-repeating filler, ignore_eos,
@@ -189,9 +213,9 @@
 # FIRST-BOOT CHECKLIST — fill this in; until then every number above is a guess:
 #   [x] n_ctx_slot = 262144 in the boot log — CONFIRMED (--override-kv took)
 #   [x] mmproj loaded — CONFIRMED ("loaded multimodal model, mmproj-kquant.gguf")
-#   [ ] a genuinely HI-RES image (not a thumbnail) does not OOM — the headroom claim.
-#       ⚠ STILL THE BIGGEST UNVERIFIED CLAIM IN THIS HEADER, and headroom came in at
-#       ~9.4/10.1 GiB per card rather than the ~12 predicted.
+#   [x] hi-res image does not OOM — VERIFIED to 48.4 Mpx / 30 MB payload, peaking
+#       ~7.9 GiB short of GPU0. See the caveats: all vision VRAM lands on GPU0, and
+#       llama.cpp appears to downscale before the tower.
 #   [x] drafting CONFIRMED — draft-dflash impl registered AND draft_n>0 with 59-94%
 #       acceptance in response timings (the boot log's "loading draft model" line is
 #       NOT proof: it prints under --spec-type none too)
