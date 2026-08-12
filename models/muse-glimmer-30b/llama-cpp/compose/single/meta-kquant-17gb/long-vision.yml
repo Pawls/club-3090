@@ -1,0 +1,148 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Muse-Glimmer-30B (Meta official K-Quant-17GB GGUF, 4.81 bpw) + official mmproj
+#   Engine:    llama.cpp (LOCALLY BUILT from master 030ebb5, sm_86) — pin caveat in dflash-vision.yml
+#   Topology:  Single 3090 (GPU1, HEADLESS — the desktop lives on GPU0)
+#   Drafter:   DFlash n=15 (--spec-type draft-dflash + official dflash-kquant.gguf)
+#   KV:        q8_0 K + q8_0 V (f16 does NOT fit at this ctx alongside mmproj + drafter)
+#   Vision:    YES — official mmproj-kquant (~1.30 GiB)
+#   Template:  GGUF-embedded (--jinja) — channel format, NOT <think>
+#   Max ctx:   262144 via --override-kv (the GGUF declares 131072)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#   Caveats:
+#     - ✅ IT FITS — MEASURED 2026-08-11, including the case that was supposed to break it
+#       (a 14 MB image at 209K context). 21,578 MiB idle / 23,520 peak / 1,056 MiB free,
+#       and the peak is FLAT with context depth. This lane exists because the dual-card
+#       variant was built on the untested assumption that 262K + vision does not fit on
+#       24 GiB. It does.
+#     - ⚠️ 1,056 MiB free is ~4% of the card: STABLE, not generous. Nothing else may live
+#       on GPU1. If it ever OOMs, SPEC_TYPE=none frees 2.51 GiB (cost ~1.6x decode).
+#     - Only viable because GPU1 is HEADLESS. The ~1.5 GiB Windows desktop sits on GPU0.
+#       Do not run this pinned to GPU0.
+#     - ⚠️ ABOVE THE VENDOR-VALIDATED WINDOW (Meta validated to 131072) — same NoPE
+#       reasoning as the siblings: the 13 full-attention layers have rope_theta=0 and the
+#       other 39 never see past their 2048 window, so there is no RoPE extrapolation to
+#       break. Retrieval was 9/9 on the text-only sibling; reasoning at depth is unproven.
+#     - BOTH --override-kv keys are REQUIRED (trunk AND drafter).
+#     - -np 1 is load-bearing: -c divides across slots, and the dual sibling MEASURED that
+#       raising it is a net loss on this model anyway (see dual/.../long-vision.yml).
+#     - Distinct LV_* env vars: the .env in THIS directory is SHARED with dflash-vision.yml
+#       and long.yml, and pins CTX_SIZE=131072 / PORT=8210 / UBATCH_SIZE=1024. A directory
+#       .env BEATS a compose default, so plain CTX_SIZE here would silently boot at 131072
+#       — and plain UBATCH_SIZE would inherit 1024, which is the WRONG default for this
+#       lane (see the ubatch measurement below). Hence LV_CTX_SIZE / LV_UBATCH_SIZE /
+#       LV_PORT / LV_SERVED_NAME.
+#     - ⚠️ -ub 512 IS THE DEFAULT HERE, DELIBERATELY INVERTING THE SIBLINGS' 1024.
+#       MEASURED on this lane: 1024 leaves only 304 MiB free at image peak, 512 leaves
+#       1,056 MiB — and 512 was also ~40% FASTER on image requests (11.0-12.3 s vs
+#       18.0-19.1 s). The siblings' "1024 beats 512 by 4%" was TEXT prefill with plenty
+#       of headroom; at 262K + vision on one card the memory pressure appears to cost
+#       more than the bigger microbatch wins. Do not "fix" this back to 1024.
+#   Best for:  262K + vision on ONE card, leaving GPU0 free for ComfyUI/Boxel. ⭐ daily driver
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS — it makes the dual lane unnecessary for most work.
+#
+# The dual lane (dual/meta-kquant-17gb/long-vision.yml) was built on the ASSUMPTION that
+# 262K + vision does not fit on 24 GiB. Nobody tested it. It does fit, so this lane keeps
+# the capability while leaving GPU0 entirely free for ComfyUI / Boxel Builder — which is
+# what the dual lane costs you.
+#
+# The dual lane's remaining value is therefore NOT "262K + vision". It is:
+#   · prefill +30-38% (200K TTFT 166 s vs 230 s) — real, and single-card cannot match it
+#   · ~7.9 GiB of image headroom vs ~1.0 GiB here — comfort, not capability
+# Boot dual for a huge-prompt batch job when GPU0 is idle; otherwise boot this.
+#
+# ===== MEASURED 2026-08-11 — IT FITS, AND THE MARGIN IS STABLE =======================
+# Prediction above said ~21,994 MiB idle; measured 22,310 at -ub 1024 (off by 316 MiB).
+#
+#   arm         idle        peak after images   free at peak   image wall
+#   -ub 1024    22,310 MiB      24,272 MiB          304 MiB     18.0-19.1 s
+#   -ub  512    21,578 MiB      23,520 MiB        1,056 MiB     11.0-12.3 s   <- DEFAULT
+#
+# ⇒ -ub 512 wins on BOTH axes: 3.5x the margin AND ~40% faster on image requests. The
+#   siblings' "1024 beats 512 by 4%" was TEXT prefill with headroom to spare; here the
+#   memory pressure at 1024 appears to cost more than the larger microbatch wins.
+#
+# IMAGES — all HTTP 200, all described correctly (VRAM sampled at 100 ms DURING each):
+#   0.3 MB · 14 MB · 16 MB · 30 MB payload · and a 48.4 Mpx (1920x25197) scroll capture.
+#   The allocator PLATEAUS: it grows to 23,520 on the first big image and then serves
+#   every later one with ZERO further allocation. It takes what is available rather than
+#   what it needs — which is why lowering -ub lowers the plateau instead of causing OOM.
+#
+# ⭐ THE DAILY-DRIVER TEST — a 14 MB image while the context is DEEP (the real agent
+#    shape: long trace, then a screenshot). This is the case that could have OOM'd:
+#
+#   prompt tokens   HTTP   GPU1 peak   free at peak   wall
+#      38,292        200   23,520 MiB    1,056 MiB     38.1 s
+#     132,142        200   23,520 MiB    1,056 MiB    141.3 s
+#     208,917        200   23,520 MiB    1,056 MiB    246.9 s
+#
+# ⇒ PEAK IS FLAT WITH CONTEXT DEPTH. A big image at 209K costs exactly what it costs at
+#   38K, because the KV pool is preallocated at -c and does not grow. The margin is a
+#   STABLE 1,056 MiB, not a shrinking one — which is what makes this safe to leave an
+#   agent pointed at. (Consistent with the text-only sibling, where a filled 255K context
+#   cost only ~200 MiB over idle.)
+#
+# ⚠️ STILL TRUE / STILL UNPROVEN:
+#   - 1,056 MiB is ~4% of the card. It is stable, not generous. If you add anything else
+#     to GPU1 this is the first thing that breaks.
+#   - If it ever does OOM, SPEC_TYPE=none frees 2.51 GiB (cost: ~1.6x decode). That is
+#     the fallback — do NOT step down to 131K, which gives up the whole point.
+#   - Needle retrieval / reasoning quality at 262K on THIS lane is unproven (the
+#     text-only sibling measured 9/9 needles at 151K/231K/255K).
+#   - Multiple images in one request is untested; the plateau suggests it is fine, but
+#     that is an inference, not a measurement.
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: llama-cpp-local
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  llama-cpp-muse-glimmer-30b-longvision:
+    image: ${LLAMACPP_IMAGE:-club3090/llama.cpp:server-cuda-master-030ebb5-sm86}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-muse-glimmer-30b-longvision}"
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${LV_PORT:-8213}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-muse-glimmer-30b-gguf/meta-kquant/muse-glimmer-30B-kquant-17gb.gguf}
+      --mmproj /models/${MMPROJ_FILE:-muse-glimmer-30b-gguf/meta-kquant/mmproj-kquant.gguf}
+      --spec-draft-model /models/${DFLASH_FILE:-muse-glimmer-30b-gguf/meta-kquant/dflash-kquant.gguf}
+      --spec-type ${SPEC_TYPE:-draft-dflash}
+      --spec-draft-n-max ${DFLASH_N_MAX:-15}
+      -ngld ${DRAFT_NGL:-99}
+      --override-kv muse-glimmer.context_length=int:${OVERRIDE_CTX:-262144},dflash.context_length=int:${OVERRIDE_CTX:-262144}
+      --alias ${LV_SERVED_NAME:-muse-glimmer-30b-longvision}
+      -c ${LV_CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${LV_UBATCH_SIZE:-512}
+      -ngl 99
+      -fa ${FLASH_ATTN:-on}
+      -fit ${FIT:-on}
+      --cache-type-k ${KV_TYPE_K:-q8_0}
+      --cache-type-v ${KV_TYPE_V:-q8_0}
+      -np ${NP:-1}
+      --cache-ram ${CACHE_RAM:-0}
+      --jinja
+      --reasoning-budget ${REASONING_BUDGET:--1}
+      --chat-template-kwargs '{"reasoning_strength":"${REASONING_STRENGTH:-high}"}'
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-64}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-1}}"]
+              capabilities: [gpu]

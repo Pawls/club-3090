@@ -185,6 +185,20 @@ model_list:
       api_key: EMPTY
       timeout: 900
 
+  # Muse Glimmer MAX lane — 262K AND vision on ONE card (GPU1), :8213. The dual lane was
+  # built on the untested assumption this could not fit; it can. Leaves GPU0 entirely free
+  # for ComfyUI / Boxel Builder, which is why this is the intended daily driver.
+  # MEASURED: 21,578 MiB idle / 23,520 peak with images / 1,056 MiB free, and the peak is
+  # FLAT with context depth (a 14 MB image at 209K tokens costs what it costs at 38K).
+  # 900 s timeout: a cold 200K+image prefill is ~4 min and a default client timeout reads
+  # that as a hang.
+  - model_name: muse-glimmer-30b-max
+    litellm_params:
+      model: openai/muse-glimmer-30b-longvision
+      api_base: http://host.docker.internal:8213/v1
+      api_key: EMPTY
+      timeout: 900
+
   # Reasoning-effort aliases — SAME backend, SAME served model, only the template's
   # `reasoning_strength` differs. custom_hooks.py §D reads the level off the alias suffix and
   # injects it per request, so switching effort is "pick another model in the dropdown"

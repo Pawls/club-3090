@@ -181,6 +181,31 @@ _AUX_LOW = os.environ.get("CLUB3090_MUSE_AUX_LOW", "1").strip().lower() not in (
 _AUX_MAX_TOKENS_CEILING = 2048
 
 
+def _image_stats(data):
+    """(image_part_count, total_decoded_MB) for the request's inline images.
+
+    Exists to answer one recurring question: DID THE CLIENT DOWNSCALE BEFORE SENDING?
+    A 30 MB file that arrives as 1.2 MB has been resized by the app, which means any
+    "hi-res vision" conclusion drawn from that request is about the CLIENT, not the model.
+    Measured directly from the base64 payload because the pre-call hook cannot see
+    usage.prompt_tokens (that is a response field, and there is no post-call hook here).
+    base64 inflates by 4/3, hence the * 3 / 4.
+    """
+    n, b = 0, 0
+    for m in data.get("messages") or []:
+        c = m.get("content")
+        if not isinstance(c, list):
+            continue
+        for part in c:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            url = ((part.get("image_url") or {}).get("url")) or ""
+            n += 1
+            if "base64," in url:
+                b += len(url.split("base64,", 1)[1]) * 3 // 4
+    return n, round(b / 2**20, 2)
+
+
 def _is_aux_title_shaped(data):
     """True for a small, single-message, non-streaming bookkeeping call (title generation).
 
@@ -321,11 +346,13 @@ def _apply_muse_effort(data, model):
         # and "which of the two is the visible answer?" is unanswerable without this.
         # The visible chat turn is the streaming, many-message, big-max_tokens one.
         _msgs = data.get("messages") or []
+        _nimg, _imgmb = _image_stats(data)
         _hook_log(f"[club3090][muse-effort] model={model} strength={chosen or '(server default)'} "
                   f"via={source or 'none'} request_keys={_seen} "
                   f"think={thinking!r} "
                   f"msgs={len(_msgs)} stream={bool(data.get('stream'))} "
-                  f"max_tokens={data.get('max_tokens')}")
+                  f"max_tokens={data.get('max_tokens')} "
+                  f"imgs={_nimg} img_mb={_imgmb}")
 
 # serve.sh writes the ACTIVE model's cross-turn preserve mode here on every launch (GPU-mutex
 # → one live model, so a single global file is unambiguous). Mounted read-only into the

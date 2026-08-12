@@ -99,6 +99,7 @@ declare -A COMPOSE=(
   [muse]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/dflash-vision.yml"
   [muse-long]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/long.yml"
   [muse-dual]="models/muse-glimmer-30b/llama-cpp/compose/dual/meta-kquant-17gb/long-vision.yml"
+  [muse-max]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/long-vision.yml"
 )
 
 declare -A GROUP=(
@@ -106,7 +107,7 @@ declare -A GROUP=(
   [carnice]=repo [deckard]=repo [hauhau]=repo [omni]=repo [agents-a1]=repo
   [apex-vision-ik]=ours [apex-vision-mainline]=ours [deckard-vision]=ours
   [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours [27b-vision]=ours
-  [ud-vision]=ours [muse]=ours [muse-long]=ours [muse-dual]=ours
+  [ud-vision]=ours [muse]=ours [muse-long]=ours [muse-dual]=ours [muse-max]=ours
 )
 
 declare -A INFO=(
@@ -129,7 +130,8 @@ declare -A INFO=(
   [27b-single]=":8021  single GPU0 · 28K · vision · MTP — fast solo, tiny ctx"
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
   [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
-  [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · ⚠ NEVER BOOTED — needs the first-boot checklist · ⚠ uses GPU0, so NOT with ComfyUI"
+  [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · prefill +30-38% vs single · ⚠ uses GPU0, so NOT with ComfyUI — prefer muse-max"
+  [muse-max]=":8213  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · VISION · DFlash · -ub 512 · 1056 MiB margin, flat with ctx depth · ⭐ leaves GPU0 free for ComfyUI"
   [muse]=":8210  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 131K · vision · DFlash n=15 · llama.cpp master 030ebb5 (local build) · 🧪 UNVALIDATED — effort via REASONING_STRENGTH=low|medium|high|xhigh, not --think"
 )
 
@@ -166,6 +168,7 @@ declare -A WEIGHTS=(
   [muse]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [muse-long]="$MUSE_GGUF $MUSE_DFLASH"
   [muse-dual]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
+  [muse-max]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [27b]="qwen3.6-27b-autoround-int4"
   [27b-single]="qwen3.6-27b-autoround-int4"
   [27b-minimal]="qwen3.6-27b-autoround-int4"
