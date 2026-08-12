@@ -28,10 +28,12 @@
 #       there is no RoPE extrapolation to break — but quality >131K is ours to prove.
 #       The single-card long lane measured 9/9 needles at 151K/231K/255K; that is
 #       retrieval, NOT reasoning-at-depth.
-#     - ⚠️ VISION + 262K + DFLASH ALL AT ONCE IS UNPROVEN. Vision+DFlash is confirmed
-#       (single-card, 2026-08-10) and 262K+DFlash is confirmed (single-card long lane,
-#       2026-08-11), but the three together on a layer split are not. First boot must
-#       check all three, not just that the server answers.
+#     - ✅ VISION + 262K + DFLASH ALL AT ONCE: CONFIRMED 2026-08-11 on first boot, on a
+#       layer split. Each pair was already known (vision+DFlash single-card 2026-08-10,
+#       262K+DFlash single-card 2026-08-11); the trio was the open question and it works.
+#       ⚠ Verify all three individually after any engine bump — "the server answers" does
+#       NOT prove the drafter is live (the boot log says "loading draft model" even under
+#       --spec-type none; trust draft_n in the response timings).
 #     - BOTH --override-kv keys are REQUIRED (trunk AND drafter): llama-server hard-caps
 #       the slot to n_ctx_train, so `-c 262144` alone yields a 400 "exceeds the available
 #       context size". Overriding only the trunk leaves the drafter at 131072.
