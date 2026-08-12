@@ -91,6 +91,29 @@
 #   prefill (784 tok/s at depth); the other five reused 259K cached tokens, re-prefilled
 #   ~20, and answered in 1.4-1.8 s. A long trace prefills ONCE, not once per turn.
 #
+# REASONING AT DEPTH (not retrieval) — RULER-style probe, 6/6. Retrieval and reasoning
+# are DIFFERENT CLAIMS: 6/6 needles says the model can FIND a fact at 259K, not that it
+# can THINK over facts at 259K. Three of RULER's harder families, each also run at ~9K as
+# a CONTROL — without the control a long-arm failure cannot be distinguished from "cannot
+# do this task at all", and the claim "degrades at depth" would be unlicensed:
+#
+#   task                                        ~9K control      259K
+#   variable tracking (4-link chain, 3 decoys)   ✅ 4/4, 0 stray  ✅ 4/4, 0 stray  (258,963)
+#   frequent-word aggregation (30/20/10 vs 12)   ✅ right order   ✅ right order   (258,280)
+#   multi-hop arithmetic (needles at 8% + 88%)   ✅ 110750        ✅ 83582         (259,059)
+#
+#   The aggregation pass is the surprising one — counting occurrences across the whole
+#   258K context is the classic long-context failure mode, and the ordering was right.
+#   Chain-walking with decoy chains present also held, which retrieval alone cannot do.
+#
+# ⚠️ SCOPE: three tasks is a PROBE, not RULER. This licenses "no degradation detected on
+#   these three", NOT "reasoning is unaffected at 262K". Long-arm wall was ~333-341 s each
+#   (uncached 259K prefill dominates).
+# ⚠️ HARNESS TRAP worth remembering: the first run used max_tokens=600 and the aggregation
+#   task returned EMPTY content with 1,383 chars of reasoning — budget spent thinking, and
+#   a truncated answer scores IDENTICALLY to a wrong one. It read as a task failure that
+#   the model never committed. Sized to 3,000 for the worst task, not the average one.
+#
 # ⭐ THE DAILY-DRIVER TEST — a 14 MB image while the context is DEEP (the real agent
 #    shape: long trace, then a screenshot). This is the case that could have OOM'd:
 #
@@ -161,8 +184,8 @@
 #     to GPU1 this is the first thing that breaks.
 #   - If it ever does OOM, SPEC_TYPE=none frees 2.51 GiB (cost: ~1.6x decode). That is
 #     the fallback — do NOT step down to 131K, which gives up the whole point.
-#   - Reasoning QUALITY at 262K is still unproven. RETRIEVAL is now 6/6 (above); those
-#     are different claims and only the second one has been measured.
+#   - Reasoning at depth: NO DEGRADATION DETECTED on a 3-task RULER-style probe (below).
+#     That licenses "nothing broke on these three", NOT "reasoning is unaffected at 262K".
 #   - The 1024 crash is arguably an upstream llama.cpp robustness bug (a vision-encode
 #     OOM should surface as an HTTP 500, not ggml_abort the process), but we work around
 #     it rather than chase it: this project contributes to noonghunna/club-3090, not to
