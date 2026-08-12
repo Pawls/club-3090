@@ -164,8 +164,10 @@
 #   - Reasoning QUALITY at 262K is still unproven. RETRIEVAL is now 6/6 (above); those
 #     are different claims and only the second one has been measured.
 #   - The 1024 crash is arguably an upstream robustness bug (a vision-encode OOM should
-#     surface as an HTTP 500, not ggml_abort the process). NOT filed upstream — read
-#     docs/UPSTREAM.md and add the row there first if you decide to file it.
+#     surface as an HTTP 500, not ggml_abort the process). Tracked in docs/UPSTREAM.md
+#     → llama.cpp table, top row. NOT FILED, and filing is MAINTAINER-ONLY: upstream's
+#     AGENTS.md bans agent-initiated issues and AI-written descriptions outright. Prior
+#     art is llama.cpp#24232 (same class, MTP instead of DFlash, closed not_planned).
 # ===========================================================================
 # Hardware metadata (parsed by scripts/preflight.sh):
 # Requires-min-vram-gb: 24
