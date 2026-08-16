@@ -41,7 +41,11 @@ When filing a fresh upstream issue from this work:
 ## Conventions on this repo
 
 ### Bench protocol
-3 warm + 5 measured runs. Canonical prompts: 800-word essay (narrative, max_tokens=1000) + quicksort code (max_tokens=800). `temperature=0.6, top_p=0.95, top_k=20`. Capture both wall-time TPS and engine-internal `gen throughput` from logs. **Always capture per-card peak VRAM** alongside TPS.
+3 warm + 5 measured runs. Canonical prompts: 800-word essay (narrative, max_tokens=1000) + quicksort code (max_tokens=800). Sampler: **`temperature=0.6, top_p=0.95, top_k=20, min_p=0.0`** — all four are sent EXPLICITLY by `bench.sh`, and it prints them at start (`[bench] sampler: …`).
+
+> ⚠️ **Why all four, explicitly (#962):** until 2026-08-12 only `temperature` and `top_p` were sent, so `top_k`/`min_p` fell through to **per-engine defaults** — llama.cpp applies `top_k 40 / min_p 0.05`, vLLM `top_k` off / `min_p 0`. The "canonical" protocol therefore resolved *differently on each engine*, which defeats the cross-engine `BENCHMARKS.md` table it exists for, and matched its own documentation on neither. Throughput is essentially sampler-insensitive at fixed `max_tokens`, so historical TPS rows remain comparable — but **quality-shaped results measured before this change were taken under different sampling** and should not be diffed against post-change runs. Override for sampler A/Bs with `BENCH_TEMP` / `BENCH_TOP_P` / `BENCH_TOP_K` / `BENCH_MIN_P`.
+
+Capture both wall-time TPS and engine-internal `gen throughput` from logs. **Always capture per-card peak VRAM** alongside TPS.
 
 ### Genesis opt-in env vars
 **Status (2026-07-06): no shipped compose currently enables Genesis** — the Genesis-pinned production paths were retired (their composes live under `compose/_archive/`). The guidance below stays because it applies verbatim if a Genesis-pinned compose is reintroduced, and the incident it encodes is the canonical example of why behavioral patches need repro-gating.
@@ -299,7 +303,7 @@ bash benchlocal-cli/tools/build-sandboxes.sh   # ~30 GB free; `docker system pru
    bash scripts/quality-test.sh --full --no-thinking       # reasoning OFF
    bash scripts/quality-test.sh --full --enable-thinking   # reasoning ON
    ```
-   ⚠️ For the reasoning-ON leg on a thinking model, boot the compose with reasoning parsing on (`REASONING=on` for llama.cpp composes, `--reasoning-parser` for vLLM) so `<think>` lands in `reasoning_content`, not the graded answer.
+   ⚠️ **Match the reasoning mode to the leg — in both directions.** Reasoning-ON leg: boot the compose with reasoning parsing on (`REASONING=on` for llama.cpp composes, `--reasoning-parser` for vLLM) so `<think>` lands in `reasoning_content`, not the graded answer. Reasoning-OFF leg: boot with reasoning parsing off — leaving `REASONING=on` up makes the server force reasoning on every request, so the "no-thinking" leg silently becomes a second thinking leg (both arms score alike and the A/B reads as a clean, legitimate null). benchlocal-cli flags both failure modes automatically: per-pack `thinking_validity` in the saved JSON, and `--strict-thinking` for a CI exit code.
 2. **Operational health:** `bash scripts/report.sh --full` (~43 min; redacted, paste-ready bundle — verify + stress + soak + bench + agentic).
 
 **Don't pair `rebench-full.sh` with `report.sh --full`** — rebench re-runs the same operational gates (verify/bench/agentic/concurrency/stress/soak), so it *replaces* `report.sh --full` rather than complementing it. Pick by goal: `rebench-full --with-8pack-thinking=both` when you want one synthesized `REPORT.md` (quant A/B, BENCHMARKS row); the two-pass split above when you want the paste-ready cross-rig bundle. Since #805, rebench runs the **agentic curve and the concurrency rungs itself** (steps 1b/1c), so there is nothing left to top up with `report.sh --agentic` — it would just re-measure. The same guidance ships user-facing in [`docs/ANNOUNCEMENT_TEMPLATE.md`](docs/ANNOUNCEMENT_TEMPLATE.md) §7 "Run the evals".
