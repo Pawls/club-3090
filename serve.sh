@@ -133,7 +133,7 @@ declare -A INFO=(
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
   [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
   [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · prefill +30-38% vs single · ⚠ uses GPU0, so NOT with ComfyUI — prefer muse-max"
-  [38b-dual]=":8101  qwen3.8-27b (Unsloth UD-Q5_K_XL) · dual · 262K alloc / 240K FILLED (91%, ladder 6/6) · ⭐ VISION · MTP n=2 (accept 0.686) · verify-full 9/9 + verify-stress green · 🧪 no soak/bench/8-pack yet · per-request dials: enable_thinking / preserve_thinking / reasoning_effort"
+  [38b-dual]=":8101  qwen3.8-27b (Unsloth UD-Q5_K_XL) · dual · 262K alloc / 240K FILLED (91%, ladder 6/6) · ⭐ VISION · MTP n=2 (accept 0.686) · verify-full 9/9 + verify-stress green · 🧪 no soak/bench/8-pack yet · ⚠ thinking ON + effort xhigh by DEFAULT (diverges from stack policy; unmeasured on 3.8) · INSTRUCT=1 for the instruct arm · per-request dials: enable_thinking / preserve_thinking / reasoning_effort"
   [muse-max]=":8213  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · VISION · DFlash · needle 6/6 @259K · multi-image OK · -ub 512 (1024 hard-crashes the vision encoder) · ⭐ leaves GPU0 free for ComfyUI"
   [muse]=":8210  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 131K · vision · DFlash n=15 · llama.cpp master 030ebb5 (local build) · 🧪 UNVALIDATED — effort via REASONING_STRENGTH=low|medium|high|xhigh, not --think"
 )
