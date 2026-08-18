@@ -199,10 +199,7 @@ model_list:
       api_key: EMPTY
 
   # Qwen3.8-27B — dual-3090 llama.cpp lane WITH VISION at 262K, :8101.
-  # Started by hand for now (no serve.sh lane yet — that is plan step 6):
-  #   cd models/qwen3.8-27b/llama-cpp/compose/dual/unsloth-ud-q5kxl \
-  #     && MODEL_DIR="$MODEL_DIR" docker compose -f mtp-vision.yml up -d
-  #   (MODEL_DIR = wherever your GGUFs live; serve.sh exports it for you.)
+  # Started by `./serve.sh 38b-dual` (lane added 2026-08-18).
   # 🧪 Experimental: booted + verify-full 9/9 + vision verified, but no soak/bench/8-pack. This is the only Qwen3.8 lane in the estate that serves IMAGES —
   # every upstream qwen3.8 slug is text-only.
   #

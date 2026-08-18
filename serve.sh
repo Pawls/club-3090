@@ -96,6 +96,7 @@ declare -A COMPOSE=(
   [hauhau-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/vision.yml"
   [27b-single]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/fp8-mtp.yml"
   [apex-yarn-1m]="models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml"
+  [38b-dual]="models/qwen3.8-27b/llama-cpp/compose/dual/unsloth-ud-q5kxl/mtp-vision.yml"
   [muse]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/dflash-vision.yml"
   [muse-long]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/long.yml"
   [muse-dual]="models/muse-glimmer-30b/llama-cpp/compose/dual/meta-kquant-17gb/long-vision.yml"
@@ -108,6 +109,7 @@ declare -A GROUP=(
   [apex-vision-ik]=ours [apex-vision-mainline]=ours [deckard-vision]=ours
   [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours [27b-vision]=ours
   [ud-vision]=ours [muse]=ours [muse-long]=ours [muse-dual]=ours [muse-max]=ours
+  [38b-dual]=ours
 )
 
 declare -A INFO=(
@@ -131,6 +133,7 @@ declare -A INFO=(
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
   [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
   [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · prefill +30-38% vs single · ⚠ uses GPU0, so NOT with ComfyUI — prefer muse-max"
+  [38b-dual]=":8101  qwen3.8-27b (Unsloth UD-Q5_K_XL) · dual · 262K alloc / 240K FILLED (91%, ladder 6/6) · ⭐ VISION · MTP n=2 (accept 0.686) · verify-full 9/9 + verify-stress green · 🧪 no soak/bench/8-pack yet · per-request dials: enable_thinking / preserve_thinking / reasoning_effort"
   [muse-max]=":8213  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · VISION · DFlash · needle 6/6 @259K · multi-image OK · -ub 512 (1024 hard-crashes the vision encoder) · ⭐ leaves GPU0 free for ComfyUI"
   [muse]=":8210  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 131K · vision · DFlash n=15 · llama.cpp master 030ebb5 (local build) · 🧪 UNVALIDATED — effort via REASONING_STRENGTH=low|medium|high|xhigh, not --think"
 )
@@ -143,6 +146,8 @@ DECKARD_MMPROJ="qwen3.6-40b-deckard-gguf/mmproj/Qwen3.5-40B-Claude-4.6-Opus-Deck
 HAUHAU_GGUF="qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP-Q6_K_P.gguf"
 CARNICE_GGUF="carnice-v2-27b-gguf/stuchapin-q8/Carnice-V2-27B-Q8_0-mtp.gguf"
 UBERGARM_27B_GGUF="qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf"
+QWEN38_GGUF="qwen3.8-27b-gguf/unsloth-ud-q5kxl/Qwen3.8-27B-UD-Q5_K_XL.gguf"
+QWEN38_MMPROJ="qwen3.8-27b-gguf/mmproj-F16.gguf"
 QWEN_27B_MMPROJ="qwen3.6-27b-gguf/mmproj-F16.gguf"
 UD_GGUF="qwen3.6-35b-a3b-gguf/unsloth-ud-iq4xs/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
 # Muse Glimmer: trunk + perception encoder + DFlash drafter, all three from Meta's
@@ -165,6 +170,7 @@ declare -A WEIGHTS=(
   [carnice]="$CARNICE_GGUF"
   [ud-vision]="$UD_GGUF $QWEN_MMPROJ"
   [27b-vision]="$UBERGARM_27B_GGUF $QWEN_27B_MMPROJ"
+  [38b-dual]="$QWEN38_GGUF $QWEN38_MMPROJ"
   [muse]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [muse-long]="$MUSE_GGUF $MUSE_DFLASH"
   [muse-dual]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
@@ -181,6 +187,8 @@ declare -A HFREPO=(
   ["$APEX_GGUF"]="mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF"
   ["$APEX_Q_GGUF"]="mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF"
   ["$QWEN_MMPROJ"]="unsloth/Qwen3.6-35B-A3B-GGUF"
+  ["$QWEN38_GGUF"]="unsloth/Qwen3.8-27B-GGUF"
+  ["$QWEN38_MMPROJ"]="unsloth/Qwen3.8-27B-GGUF"
   ["$DECKARD_GGUF"]="PiehSoft/Qwen3.6-40B-Deckard-MTP-Q6_K"
   ["$DECKARD_MMPROJ"]="mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF"
   ["$HAUHAU_GGUF"]="morikomorizz/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP"
