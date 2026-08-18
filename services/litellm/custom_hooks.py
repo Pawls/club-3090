@@ -128,6 +128,18 @@ QWEN_PRESERVE_MODELS = ("qwen3.6-27b", "qwen3.6-35b-a3b", "apex-35b")
 # ⚠️ `high` is NOT a distinct level here. The GGUF's embedded template silently remaps
 # high -> xhigh (measured: both render 53 tok), whereas the vLLM path RAISES on it. We map it
 # explicitly so the behaviour is visible in this table rather than surprising inside jinja.
+# ⚠️ THE SAME INERT-TOP-LEVEL TRAP APPLIES TO `preserve_thinking` (2026-08-18).
+# Hermes' local qwen-preserve-thinking patch sends it as a TOP-LEVEL body field via
+# `extra_body` — an x-unsloth extension that Unsloth Studio reads natively. llama.cpp does
+# NOT: it only reads chat_template_kwargs. MEASURED on this lane against a 3-turn body
+# carrying reasoning_content (server default preserve_thinking=true):
+#     no field                                  -> 403 prompt_tokens
+#     TOP-LEVEL preserve_thinking:false         -> 403  (INERT — silently ignored)
+#     chat_template_kwargs preserve_thinking:false -> 38 (honoured)
+# So Hermes' new toggle is a no-op here until translated, exactly like its effort picker.
+# Unlike reasoning_effort this one cannot 500 (the template does `is true` / `is undefined`
+# checks, never raise_exception), so the risk is silence, not failure — which is worse to
+# diagnose. Ref: hermes-agent agent/preserve_thinking.py (PRESERVE_THINKING_FIELD).
 QWEN38_MODELS = ("qwen3.8-27b",)
 QWEN38_LEVELS = ("low", "medium", "xhigh")   # what the template actually accepts post-remap
 
@@ -146,6 +158,25 @@ QWEN38_EFFORT_MAP = {
 
 def _norm_effort(v):
     return re.sub(r"[^a-z0-9]", "", str(v).lower())
+
+
+def _as_bool(v):
+    """Coerce a wire value to bool, or None if it is not recognisably boolean.
+
+    Hermes sends a real JSON bool, but curl/scripts/gateways stringify freely, and a
+    stray "false" string is truthy in Python — which would silently invert the toggle.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+    return None
 
 
 def _apply_qwen38_effort(data, model):
@@ -167,6 +198,9 @@ def _apply_qwen38_effort(data, model):
     """
     ck = dict(data.get("chat_template_kwargs") or {})
     raw_top = data.pop("reasoning_effort", None)
+    # preserve_thinking: same inert-top-level trap (see the header). Hermes' patch puts it
+    # top level via extra_body; llama.cpp only reads chat_template_kwargs. Translate it.
+    raw_preserve = data.pop("preserve_thinking", None)
     # `think` is Ollama heritage that Hermes emits alongside reasoning_effort:"none".
     # llama.cpp ignores it; popped as hygiene so a future engine bump cannot start 400ing.
     data.pop("think", None)
@@ -191,9 +225,35 @@ def _apply_qwen38_effort(data, model):
 
     if chosen is not None:
         ck["reasoning_effort"] = chosen
+
+    # preserve_thinking — an explicit client chat_template_kwargs value always wins; a
+    # top-level field is translated into it; otherwise the server default stands.
+    preserve = psource = None
+    if "preserve_thinking" in ck:
+        coerced = _as_bool(ck["preserve_thinking"])
+        if coerced is None:
+            print(f"[club3090/qwen38] WARN non-boolean chat_template_kwargs.preserve_thinking="
+                  f"{ck['preserve_thinking']!r}; dropping it so the server default applies",
+                  file=sys.stdout, flush=True)
+            ck.pop("preserve_thinking", None)
+        else:
+            preserve, psource = coerced, f"chat_template_kwargs={ck['preserve_thinking']}"
+            ck["preserve_thinking"] = coerced
+    elif raw_preserve is not None:
+        coerced = _as_bool(raw_preserve)
+        if coerced is None:
+            print(f"[club3090/qwen38] WARN non-boolean top-level preserve_thinking="
+                  f"{raw_preserve!r}; ignoring (server default applies)",
+                  file=sys.stdout, flush=True)
+        else:
+            preserve, psource = coerced, f"top-level={raw_preserve}"
+            ck["preserve_thinking"] = coerced
+
+    if ck:
         data["chat_template_kwargs"] = ck
     print(f"[club3090/qwen38] model={model} effort={chosen or '(server default)'} "
-          f"via={source or 'none'}", file=sys.stdout, flush=True)
+          f"via={source or 'none'} | preserve={preserve if preserve is not None else '(server default)'} "
+          f"via={psource or 'none'}", file=sys.stdout, flush=True)
     return data
 
 
