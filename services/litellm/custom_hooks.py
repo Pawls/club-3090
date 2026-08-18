@@ -112,6 +112,91 @@ QWEN_PRESERVE_MODELS = ("qwen3.6-27b", "qwen3.6-35b-a3b", "apex-35b")
 # the existing (B) path reaches it. Verified this hop end-to-end through the proxy:
 # chat_template_kwargs passes through LiteLLM untouched (low → 104 chars of
 # reasoning_content / 55 completion tokens; xhigh → 398 / 137).
+# (E) Qwen3.8-27B reasoning effort (2026-08-18) — the llama.cpp lane at :8101.
+# Qwen3.8's effort knob is the chat-template variable `reasoning_effort`. MEASURED against
+# the running lane (prompt_tokens on a fixed 1-message body, thinking forced on):
+#     low -> 41 tok · medium -> 11 tok (injects NOTHING) · xhigh -> 53 · high -> 53
+# ⚠️⚠️ TWO measured facts drive everything here:
+#  (1) A TOP-LEVEL OpenAI `reasoning_effort` IS INERT on this engine. low/minimal/none all
+#      returned 200 at 13 prompt_tokens — byte-identical to sending nothing. llama.cpp does
+#      NOT forward it into the template. So Hermes' global effort knob, which it sends on
+#      every request, currently does NOTHING on this lane. Translating it here is what makes
+#      the dial work AT ALL — this hook is not defensive polish, it is the feature.
+#  (2) The template RAISES on an out-of-set value reaching it via chat_template_kwargs:
+#      `minimal` / `none` -> HTTP 500 (jinja raise_exception). So the translation MUST clamp;
+#      forwarding a client's raw string would convert an inert no-op into a hard failure.
+# ⚠️ `high` is NOT a distinct level here. The GGUF's embedded template silently remaps
+# high -> xhigh (measured: both render 53 tok), whereas the vLLM path RAISES on it. We map it
+# explicitly so the behaviour is visible in this table rather than surprising inside jinja.
+QWEN38_MODELS = ("qwen3.8-27b",)
+QWEN38_LEVELS = ("low", "medium", "xhigh")   # what the template actually accepts post-remap
+
+# Normalised (lowercased, non-alphanumerics stripped) so "extra high" / "extra_high" /
+# "x-high" all land together. Collapses at BOTH ends, like the Muse table: Qwen3.8 has no
+# reasoning-off, so none/minimal floor to `low` — a user picking "thinking off" gets low
+# thinking, not none. Turning thinking OFF is a different control (enable_thinking), not an
+# effort level, and is left to the client.
+QWEN38_EFFORT_MAP = {
+    "none": "low", "minimal": "low", "low": "low",
+    "medium": "medium", "normal": "medium",
+    "high": "xhigh",          # ⚠️ no distinct 'high' on this template — see above
+    "extrahigh": "xhigh", "xhigh": "xhigh", "max": "xhigh", "ultra": "xhigh",
+}
+
+
+def _norm_effort(v):
+    return re.sub(r"[^a-z0-9]", "", str(v).lower())
+
+
+def _apply_qwen38_effort(data, model):
+    """Translate an OpenAI-style reasoning_effort into chat_template_kwargs.reasoning_effort.
+
+    Precedence (first match wins) — SPECIFIC beats GLOBAL, same rule as Muse §D:
+      1. explicit chat_template_kwargs.reasoning_effort from the client — VALIDATED, never
+         silently overridden. An out-of-set value is clamped rather than forwarded, because
+         forwarding it is a 500 (measured), and a 500 is a worse answer than a clamp.
+      2. top-level OpenAI reasoning_effort — mapped, then POPPED so the raw value can never
+         reach the engine as an unknown field.
+      3. nothing — leave the body alone so the server default from
+         LLAMA_ARG_CHAT_TEMPLATE_KWARGS (REASONING_EFFORT, currently 'low') applies.
+
+    ⚠️ Server-side kwargs MERGE per-key with request kwargs on llama.cpp b10236 (measured:
+    a request sending only {enable_thinking:true} still inherited the server's
+    reasoning_effort='low' — 41 tok, not the template-default xhigh's 53). So setting only
+    the key we resolved is safe; we do NOT need to restate the server's other defaults.
+    """
+    ck = dict(data.get("chat_template_kwargs") or {})
+    raw_top = data.pop("reasoning_effort", None)
+    # `think` is Ollama heritage that Hermes emits alongside reasoning_effort:"none".
+    # llama.cpp ignores it; popped as hygiene so a future engine bump cannot start 400ing.
+    data.pop("think", None)
+
+    chosen = source = None
+    client_ck = ck.get("reasoning_effort")
+    if client_ck is not None:
+        mapped = QWEN38_EFFORT_MAP.get(_norm_effort(client_ck))
+        if mapped is None:
+            print(f"[club3090/qwen38] WARN unrecognised chat_template_kwargs.reasoning_effort="
+                  f"{client_ck!r}; clamping to 'low' (template raises on unknown values)",
+                  file=sys.stdout, flush=True)
+            mapped = "low"
+        chosen, source = mapped, f"chat_template_kwargs={client_ck}"
+    elif raw_top is not None:
+        mapped = QWEN38_EFFORT_MAP.get(_norm_effort(raw_top))
+        if mapped is None:
+            print(f"[club3090/qwen38] WARN unrecognised reasoning_effort={raw_top!r}; "
+                  f"clamping to 'low'", file=sys.stdout, flush=True)
+            mapped = "low"
+        chosen, source = mapped, f"reasoning_effort={raw_top}"
+
+    if chosen is not None:
+        ck["reasoning_effort"] = chosen
+        data["chat_template_kwargs"] = ck
+    print(f"[club3090/qwen38] model={model} effort={chosen or '(server default)'} "
+          f"via={source or 'none'}", file=sys.stdout, flush=True)
+    return data
+
+
 MUSE_MODELS = ("muse-glimmer",)
 MUSE_LEVELS = ("low", "medium", "high", "xhigh")   # ALL the template accepts — only four
 
@@ -461,6 +546,10 @@ class MaxTokensCap(CustomLogger):
             ck.setdefault("enable_thinking", True)
             ck.setdefault("preserve_thinking", False)
             data["chat_template_kwargs"] = ck
+        elif any(tag in model for tag in QWEN38_MODELS):
+            # (E) Qwen3.8's effort knob only responds to chat_template_kwargs; a top-level
+            # reasoning_effort is inert on llama.cpp. Translate + clamp so the dial works.
+            _apply_qwen38_effort(data, model)
         elif any(tag in model for tag in MUSE_MODELS):
             # (D) Resolve Muse's reasoning_strength template var per request, so effort is
             # switchable from the client instead of needing a compose reboot.

@@ -197,6 +197,42 @@ model_list:
       model: openai/muse-glimmer-30b-longvision
       api_base: http://host.docker.internal:8213/v1
       api_key: EMPTY
+
+  # Qwen3.8-27B — dual-3090 llama.cpp lane WITH VISION at 262K, :8101.
+  # Started by hand for now (no serve.sh lane yet — that is plan step 6):
+  #   cd models/qwen3.8-27b/llama-cpp/compose/dual/unsloth-ud-q5kxl \
+  #     && MODEL_DIR="$MODEL_DIR" docker compose -f mtp-vision.yml up -d
+  #   (MODEL_DIR = wherever your GGUFs live; serve.sh exports it for you.)
+  # 🧪 Experimental: booted + verify-full 9/9 + vision verified, but no soak/bench/8-pack. This is the only Qwen3.8 lane in the estate that serves IMAGES —
+  # every upstream qwen3.8 slug is text-only.
+  #
+  # ⚠️ TIMEOUT: 900 s like the other 262K lanes. A cold deep-prefill is minutes, not seconds,
+  # and a default client timeout reads that as a hang.
+  #
+  # ⭐ PER-REQUEST DIALS (this is why the lane exists for BoxelBuilder):
+  #   chat_template_kwargs: {"enable_thinking": true|false,
+  #                          "preserve_thinking": true|false,
+  #                          "reasoning_effort": "low"|"medium"|"xhigh"}
+  # All three are switchable per request with no reboot; server-side defaults MERGE per-key,
+  # so a client may send only the dial it wants to change (measured 2026-08-18).
+  # Server defaults: enable_thinking=false (--reasoning off), preserve_thinking=true,
+  # reasoning_effort=low.
+  #
+  # ⚠️ A TOP-LEVEL `reasoning_effort` IS INERT on llama.cpp — it never reaches the template.
+  # custom_hooks.py §E translates it into chat_template_kwargs and CLAMPS it, because an
+  # out-of-set value (`minimal`/`none`) reaching the template is an HTTP 500, not a no-op.
+  # Without that hook Hermes' effort picker does nothing here.
+  #
+  # ⚠️ The model_name must NOT contain the substring `qwen3.6-27b` — that would match
+  # QWEN_PRESERVE_MODELS in custom_hooks.py and trigger the (C) re-inline path, which exists
+  # for a vLLM field-drop bug that does NOT apply to llama.cpp. This template consumes the
+  # reasoning_content FIELD directly, so re-inlining would double the thinking.
+  - model_name: qwen3.8-27b-vision
+    litellm_params:
+      model: openai/qwen3.8-27b-vision
+      api_base: http://host.docker.internal:8101/v1
+      api_key: EMPTY
+      timeout: 900
       timeout: 900
 
   # Reasoning-effort aliases — SAME backend, SAME served model, only the template's
