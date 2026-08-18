@@ -229,8 +229,20 @@ model_list:
       model: openai/qwen3.8-27b-vision
       api_base: http://host.docker.internal:8101/v1
       api_key: EMPTY
-      timeout: 900
-      timeout: 900
+      # ⚠️ 5400 s, NOT the 900 s the other long-ctx lanes use — and the size is derived, not
+      # picked. xhigh on this model is designed for an UNBOUNDED thinking budget (Qwen's card
+      # asks for up to 262,144 reasoning tokens), and BoxelBuilder's "Auto" thinking budget
+      # OMITS max_tokens entirely so the model runs to end-of-context. The engine imposes no
+      # cap of its own (/props n_predict = -1) and neither does this proxy, so the request
+      # TIMEOUT is the only remaining ceiling — i.e. it silently becomes the thinking budget.
+      # MEASURED end-to-end through this proxy: 17,129 tokens in 384 s = 44.6 tok/s (incl.
+      # prefill), finish_reason=stop, on an unbounded xhigh request.
+      #     900 s -> ~40K tokens   (would truncate a routine 60K-thinking turn)
+      #    3600 s -> ~161K tokens
+      #    5400 s -> ~241K tokens  <- covers a turn that fills the 262,144 context
+      # ⚠️ -np 1: one decode stream, so a long turn blocks the lane for its duration. That is
+      # the accepted trade here; lower this if you would rather fail fast than wait.
+      timeout: 5400
 
   # Reasoning-effort aliases — SAME backend, SAME served model, only the template's
   # `reasoning_strength` differs. custom_hooks.py §D reads the level off the alias suffix and
