@@ -6,8 +6,18 @@
 #              activations ON by default (W4A8=0 for W4A16).
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink; NVLINK_MODE=auto detects)
 #   Drafter:   MTP n=4 built-in (SPEC_N override; SPEC_N=0 disables)
+#              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
 #   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
-#   Vision:    tower present + unquantized — UNTESTED, ships text-only
+#   Vision:    ✅ WORKING — image + video INPUT, no extra flags (measured 2026-08-16).
+#              INPUT ONLY: it consumes media and emits TEXT. No image/video
+#              generation — the arch has no VAE/UNet/diffusion head.
+#              Image: colour+layout described correctly at temp 0 (red/blue/green
+#              discriminated, ~66-70 prompt tokens). Video: 3.25s clip, correct
+#              temporal order + the blended transition frame. Smoke test only —
+#              no vision quality gate, no resolution/duration limits explored.
+#              Video cost ~72.7 tok/s @256x256 (36 tok/frame at default fps=2),
+#              scaling with pixel count: 23 @128px, 263 @512px, 583 @768px.
+#              So ~61 min of 256x256 video fits the 262144 window; ~17 min @512px.
 #   Template:  native — the repo's own chat_template.jinja. NOT froggeric.
 #   Max ctx:   262144 — architectural ceiling, NOT measured on this checkpoint
 #   Genesis:   none
@@ -98,8 +108,12 @@
 #      (vLLM #43562 / TRT-LLM #10241).
 #   4. 32 GB and mem_util_safe 0.96 mean the memory values here are conservative
 #      on that class — they are calibrated to 24 GB Ampere.
-# ⚠️ MTP is exposed to OPEN vllm#50021 (GDN spec-decode wild write, live in the
-#    v0.25.1 pin). Mitigate with SPEC_N=0. See docs/UPSTREAM.md.
+# ⚠️ MTP is exposed to OPEN vllm#50021 (GDN spec-decode wild write) — RE-VERIFIED
+#    LIVE IN THE v0.27.1 PIN 2026-08-16. ⚠️ The old check path is now a FALSE
+#    NEGATIVE: v0.27.1 vendored flash-linear-attention into vllm, so
+#    `fla/ops/fused_sigmoid_gating.py` returns NOT FOUND — which reads as "fixed".
+#    The kernel moved to vllm/third_party/flash_linear_attention/ops/ and Site 1 is
+#    byte-identical at the same line 106. Mitigate with SPEC_N=0. docs/UPSTREAM.md.
 # WHAT IS AND IS NOT VALIDATED HERE (TP=2, this checkpoint, 2026-08-15/16):
 #   ✅ verify-full 9/9 on BOTH W4A16 and W4A8 · full MTP depth curve n=0..6 ·
 #      prefill/decode at 32K and 262K · a concurrency sweep to N=64.
@@ -111,7 +125,7 @@
 # ===========================================================================
 services:
   vllm-qwen38-27b-dual-fast:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.25.1}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-dual-fast}"
     # Repo contract (test-compose-restart-policy): every shipped vLLM compose uses
     # the reboot-surviving knob so launch.sh-as-a-service returns after a reboot.
@@ -142,6 +156,10 @@ services:
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
     environment:
+      # Drafter toggle — docker only forwards what is declared here. The DEFAULT
+      # lives in the entrypoint, not in these lines, so it cannot drift.
+      - SPEC_N=${SPEC_N:-}
+      - SPEC=${SPEC:-}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - CUDA_VISIBLE_DEVICES
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -156,7 +174,6 @@ services:
       - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
       - OMP_NUM_THREADS=1
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-      - SPEC_N=${SPEC_N:-4}
       # ⭐ W4A8 (int8 activations) SHIPS ON — set W4A8=0 for the W4A16 path.
       - W4A8=${W4A8:-1}
       # ⚠️⚠️ WHY A SEPARATE BOOLEAN INSTEAD OF `${VLLM_MARLIN_INPUT_DTYPE:-int8}`:
@@ -188,16 +205,29 @@ services:
         bash /etc/club3090/w4a8/install.sh
         bash /etc/club3090/pr48375/install.sh || exit 1
         echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE:-<unset -> W4A16>} (W4A8=$${W4A8:-1})"
-        SPEC=""
-        if [ "$${SPEC_N:-4}" -gt 0 ] 2>/dev/null; then
-          SPEC="--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":$${SPEC_N:-4}}"
-          echo "[mtp] SPEC_N=$${SPEC_N:-4}"
-        else
-          echo "[mtp] SPEC_N=0 -> no speculative decoding"
-        fi
         AR=""
         [ "$${_NVLINK_ENABLED:-0}" = "1" ] || AR="--disable-custom-all-reduce"
-        exec vllm serve $$AR $$SPEC "$$@"
+        # -- Drafter toggle: the same contract on every club-3090 compose --------
+        #   SPEC_N=<n>  drafter depth (this compose defaults to 4); SPEC_N=0 disables
+        #   SPEC=off    back-compat alias for SPEC_N=0
+        # Turning the drafter off is the documented mitigation for vllm#50021 and must
+        # never require editing this file. A non-numeric SPEC_N is a hard error, so a
+        # typo can never masquerade as a silent "drafter off".
+        _spec_n="$${SPEC_N:-4}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        SPEC_ARGS=()
+        if [ "$$_spec_n" -gt 0 ]; then
+          SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$$_spec_n}")
+          echo "[spec] drafter ON - mtp n=$$_spec_n" >&2
+        else
+          echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2
+        fi
+        exec vllm serve $$AR "$$@" "$${SPEC_ARGS[@]}"
       - --
     command:
       - --model
@@ -232,7 +262,22 @@ services:
       - --tool-call-parser
       - qwen3_coder
       - --default-chat-template-kwargs
-      - '{"enable_thinking": ${ENABLE_THINKING:-false}}'
+      # ⭐ reasoning_effort default = low (2026-08-16). It is a PER-REQUEST OpenAI
+      # control, so this is only the fallback for callers that send nothing — any
+      # agent still picks its own level per request.
+      # ⚠️ INERT while enable_thinking is false (the shipped default): the template
+      # only reads reasoning_effort inside `if enable_thinking is undefined or true`.
+      # It takes effect the moment ENABLE_THINKING=true.
+      # ⚠️ low is an ACTIVE instruction, not "less of medium" — it injects
+      # "Keep your thinking brief and focused, moving directly to the conclusion
+      # without unnecessary elaboration." The three levels are NOT a scale with a
+      # middle: medium has NO branch and injects nothing (the un-nudged baseline),
+      # xhigh adds "think carefully, validate assumptions, consider alternatives"
+      # which is what makes it slow and timeout-prone. REASONING_EFFORT=medium if
+      # you want the model un-nudged rather than pushed toward brevity.
+      # ⚠️ Valid values are xhigh | medium | low. Anything else RAISES at template
+      # render (`high` included — it does NOT silently remap).
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
       # Sampler follows the Qwen3.8 MODEL CARD Instruct row (thinking ships off).
       - --override-generation-config
       - '{"temperature":${TEMP:-0.7},"top_p":${TOP_P:-0.80},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"presence_penalty":${PRESENCE_PENALTY:-1.5}}'

@@ -5,6 +5,7 @@
 #   Topology:  8x 3090 PCIe (TP=8, no NVLink; NVLink/PCIe-P2P auto-detected via NVLINK_MODE)
 #   Drafter:   MTP n=3 (built-in — the checkpoint ships mtp.safetensors and
 #              text_config.mtp_num_hidden_layers=1). SPEC=off disables it.
+#              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
 #   KV:        bf16 (unquantized — `--kv-cache-dtype auto` inherits the pinned
 #              `--dtype bfloat16`). ⚠️ DIVERGES FROM THE DUAL SIBLING, which stays
 #              fp8 e4m3. Deliberate, not drift: KV bytes/token DOUBLE (32,768 ->
@@ -19,8 +20,16 @@
 #              (vLLM has no literal `fp16` value for --kv-cache-dtype; `auto`
 #              following a bf16 model dtype IS the 16-bit KV path, and matches
 #              `kv_format="bf16"` in the registry.)
-#   Vision:    base is a full VLM (vision tower + preprocessors ship in the repo,
-#              and the FP8 quant SKIPS the vision tower) — UNTESTED on this serve.
+#   Vision:    ✅ WORKING — image + video INPUT, no extra flags (measured 2026-08-16).
+#              INPUT ONLY: it consumes media and emits TEXT. No image/video
+#              generation — the arch has no VAE/UNet/diffusion head.
+#              Image: colour+layout described correctly at temp 0 (red/blue/green
+#              discriminated, ~66-70 prompt tokens). Video: 3.25s clip, correct
+#              temporal order + the blended transition frame. Smoke test only —
+#              no vision quality gate, no resolution/duration limits explored.
+#              Video cost ~72.7 tok/s @256x256 (36 tok/frame at default fps=2),
+#              scaling with pixel count: 23 @128px, 263 @512px, 583 @768px.
+#              So ~61 min of 256x256 video fits the 262144 window; ~17 min @512px.
 #   Template:  native — the repo's own chat_template.jinja. NOT froggeric.
 #              See the dual sibling's "Chat template" section for the full diff.
 #   Max ctx:   262144 — the architectural ceiling. COMPUTED + inherited, never
@@ -36,7 +45,7 @@
 #                  claimed anywhere — and no 8-pack, so there is deliberately no
 #                  `Quality:` field. Max ctx 262144 is arithmetic plus a sibling
 #                  analogy, never filled; allocating a context is not filling it.
-#                  Engine compatibility is likewise an inference: the v0.25.1 pin
+#                  Engine compatibility is NO LONGER an inference: the v0.27.1 pin
 #                  predates this model, though it does serve the same
 #                  Qwen3_5ForConditionalGeneration arch (qwen3.6-27b FP8, Tess-4-27B).
 #              (2) ⛔ 8-CARD IS COMMUNITY-VALIDATED BY DESIGN — a PERMANENT property
@@ -75,24 +84,11 @@
 #              and concurrency, not single-stream decode. NOT yet recommendable for
 #              anything; see Caveats.
 # ---------------------------------------------------------------------------
-# Sibling composes for this model:
-#
-#   | Slug                             | Cards | Engine    | Weights          | KV   | Max ctx | Drafter   |
-#   |----------------------------------|-------|-----------|------------------|------|---------|-----------|
-#   | llamacpp/qwen38-27b-single-iq4nl | 1     | llama.cpp | IQ4_NL 16.3 GB   | q8_0 | 131072  | draft-mtp |
-#   | llamacpp/qwen38-27b-dual-q8kxl   | 2     | llama.cpp | UD-Q8_K_XL 31.5G | q8_0 | 262144  | draft-mtp |
-#   | vllm/qwen38-27b-dual-max         | 2     | vLLM      | official FP8 31G | fp8  | 262144  | MTP n=3   |
-#   | vllm/qwen38-27b-multi4-max       | 4     | vLLM      | official FP8 31G | bf16 | 262144  | MTP n=3   |
-#   | vllm/qwen38-27b-multi8-max (THIS)| 8     | vLLM      | official FP8 31G | bf16 | 262144  | MTP n=3   |
-#
-# All FIVE are 🐣 Incubating. THIS FILE IS THE multi4/fp8/mtp.yml SIBLING WITH THREE
-# LINES CHANGED — `--tensor-parallel-size`, the required gpu-count, and the port. Keep them
-# in lockstep: a change to one that is not mirrored is a bug, not a variant.
-# ⚠️ KV is NOT one of the three: multi4 and multi8 BOTH run bf16, so they stay
-# mirrored on that line. It is the DUAL that differs (fp8 e4m3) — deliberately, on
-# headroom grounds. Mirror KV changes between the two multis; do not propagate
-# either one to the dual without redoing its per-card budget.
-#
+# Siblings: 5 slugs for this model (2 llama.cpp, 3 vLLM) — see
+# `switch.sh --list --all` or the registry. ⚠️ This dual is NOT a clean proxy
+# for the multis: since 2026-08-15 they run bf16 KV and this runs fp8 e4m3, so
+# pool size / concurrency / KV-sensitive results do not transfer. Rationale in
+# the registry status_note (not duplicated here).
 # ---------------------------------------------------------------------------
 # WHAT 8 CARDS ACTUALLY BUY (structural, NOT measured here):
 #   The weights are ~28.8 GiB total whatever the split, so TP=8 does not unlock
@@ -194,7 +190,7 @@ services:
     # nightlies; the #407 pin-drift fix). The launchers resolve the real image
     # from the `vllm-stable` engine profile and inject it over this default,
     # so this literal only bites a raw `docker compose` invocation (#254).
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.25.1}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-multi8-max}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
@@ -216,6 +212,10 @@ services:
       # than half-wiring it. See patches.yml.
       - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
     environment:
+      # Drafter toggle — docker only forwards what is declared here. The DEFAULT
+      # lives in the entrypoint, not in these lines, so it cannot drift.
+      - SPEC_N=${SPEC_N:-}
+      - SPEC=${SPEC:-}
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       # CUDA-level GPU mask — the runtime-agnostic half of GPU selection (#610).
       # CDI runtimes (NixOS, nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so
@@ -254,7 +254,6 @@ services:
       # SPEC=off drops the built-in MTP drafter at boot — the documented
       # mitigation for vllm#50021 (see Caveats / Upstream-risk) and the fallback
       # if the head proves net-negative. Bare passthrough; default on.
-      - SPEC
       # expandable_segments:True crashes boot on some setups (cuMemMap path):
       # known on NVLink rigs and WSL2/WDDM. Override via .env:
       # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
@@ -275,18 +274,31 @@ services:
         # VLLM_ENFORCE_EAGER=1 in .env disables CUDA graphs — the mitigation if
         # you see mid-generation hangs at depth on this hybrid family. Costs
         # ~20-30% TPS in exchange for stability. UNTESTED on this model.
-        # SPEC=off drops the built-in MTP drafter — the vllm#50021 mitigation.
-        SPEC_ARGS=()
-        if [ "$${SPEC:-on}" != "off" ]; then
-          SPEC_ARGS=(--speculative-config '{"method":"mtp","num_speculative_tokens":3}')
-        else
-          echo "[qwen38] SPEC=off — built-in MTP drafter disabled (no spec-dec)" >&2
-        fi
         # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
         # Without NVLink, custom all-reduce is DISABLED: its NVLink-assumed
         # paths break on PCIe-only multi-GPU, and that matters most at TP=8.
         source /etc/club3090/detect_nvlink.sh
         bash /etc/club3090/pr48375/install.sh || exit 1
+        # -- Drafter toggle: the same contract on every club-3090 compose --------
+        #   SPEC_N=<n>  drafter depth (this compose defaults to 3); SPEC_N=0 disables
+        #   SPEC=off    back-compat alias for SPEC_N=0
+        # Turning the drafter off is the documented mitigation for vllm#50021 and must
+        # never require editing this file. A non-numeric SPEC_N is a hard error, so a
+        # typo can never masquerade as a silent "drafter off".
+        _spec_n="$${SPEC_N:-3}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        SPEC_ARGS=()
+        if [ "$$_spec_n" -gt 0 ]; then
+          SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$$_spec_n}")
+          echo "[spec] drafter ON - mtp n=$$_spec_n" >&2
+        else
+          echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2
+        fi
         if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
           exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}"
         else
@@ -349,7 +361,22 @@ services:
       #   Pair it with the card's thinking sampler (see the header); the two are
       #   independent and mismatching them is SILENT.
       - --default-chat-template-kwargs
-      - '{"enable_thinking": ${ENABLE_THINKING:-false}}'
+      # ⭐ reasoning_effort default = low (2026-08-16). It is a PER-REQUEST OpenAI
+      # control, so this is only the fallback for callers that send nothing — any
+      # agent still picks its own level per request.
+      # ⚠️ INERT while enable_thinking is false (the shipped default): the template
+      # only reads reasoning_effort inside `if enable_thinking is undefined or true`.
+      # It takes effect the moment ENABLE_THINKING=true.
+      # ⚠️ low is an ACTIVE instruction, not "less of medium" — it injects
+      # "Keep your thinking brief and focused, moving directly to the conclusion
+      # without unnecessary elaboration." The three levels are NOT a scale with a
+      # middle: medium has NO branch and injects nothing (the un-nudged baseline),
+      # xhigh adds "think carefully, validate assumptions, consider alternatives"
+      # which is what makes it slow and timeout-prone. REASONING_EFFORT=medium if
+      # you want the model un-nudged rather than pushed toward brevity.
+      # ⚠️ Valid values are xhigh | medium | low. Anything else RAISES at template
+      # render (`high` included — it does NOT silently remap).
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder
