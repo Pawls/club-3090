@@ -4,7 +4,13 @@ services:
     container_name: litellm
     restart: unless-stopped
     ports:
-      - "4000:4000"
+      # Loopback only. The single credential on this proxy is LITELLM_MASTER_KEY,
+      # whose value is a well-known placeholder committed a few lines below - and with
+      # no DATABASE_URL there are no scoped virtual keys to fall back on, so that one
+      # string is the entire perimeter, and it grants admin (/key/generate, /model/*).
+      # A bare "4000:4000" published that to the whole LAN. Containers reach the host
+      # engines through host.docker.internal (outbound), so nothing needs 0.0.0.0.
+      - "127.0.0.1:4000:4000"
     volumes:
       - ./config.yaml:/app/config.yaml
       - ./custom_hooks.py:/app/custom_hooks.py
