@@ -1,0 +1,362 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.8-27B (Unsloth Dynamic UD-Q6_K_XL GGUF, 24.14 GiB measured)
+#   Engine:    llama.cpp (mainline server-cuda-b10236 — the shared llama-cpp-local pin)
+#   Topology:  Dual 3090 PCIe (layer-split, -sm layer — no NVLink, no all-reduce)
+#              -ts 0.49,0.51 — REBALANCED for text-only (measured). See TOPOLOGY.
+#   Drafter:   MTP n=2 built-in (--spec-type draft-mtp; head EMBEDDED in this GGUF)
+#   KV:        q8_0 K + q8_0 V (serving-grade KV floor)
+#   Vision:    no — mmproj NOT mounted. ⭐ That omission is the POINT of this file; see WHY.
+#   Template:  native (GGUF-embedded) via --jinja
+#   Max ctx:   262144 allocated · ⭐ FILLED + RECALLED to 261,037 tok (99.6%) —
+#              MEASURED 2026-08-18. Deeper than the Q5 vision lane's 240,635.
+#   Genesis:   N/A — llama.cpp engine; Genesis is vLLM/Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#   Caveats:   BOOTED AND DEEP-FILLED 2026-08-18. The context question is ANSWERED;
+#              the quality gate is NOT.
+#              ✅ MEASURED on this rig (2x 3090, GPU0 also drives the Windows desktop):
+#                - clean boot, ZERO "retrying without pipeline parallelism" across every
+#                  boot and the full fill ladder (the silent-degradation check)
+#                - ⭐ FILLED + RECALLED to 261,037 tok = 99.6% of n_ctx, needle correct.
+#                  That BEATS the Q5 vision lane (240,635 = 91.8%) and the qwen3.6
+#                  family's ~91% precedent. Rungs: 167,037 (63.7%) PASS · 253,987
+#                  (96.9%) PASS · 261,037 (99.6%) PASS. 296,287 correctly rejected.
+#                - prefill at depth: 891 t/s @167K -> 764 @254K -> 677 @261K
+#                - ⭐ ZERO PREFILL GROWTH. llama.cpp's footprint did not move on either
+#                  card across a 261K prefill (GPU1 pinned at 2661 MiB free for the
+#                  entire run, 692 samples @0.5s). Buffers are preallocated at load.
+#                - per-card free at load (desktop 2397 MiB): GPU0 3631 / GPU1 2679
+#                - weights byte-verified: 25,924,152,384 B = 24.14 GiB
+#                - MTP head verified in THIS file's tensor table (not inferred from the
+#                  Q5 sibling): blk.64.nextn.{eh_proj,enorm,hnorm,shared_head_norm},
+#                  qwen35.block_count=65, qwen35.nextn_predict_layers=1
+#              ⚠️ THE BINDING CONSTRAINT IS BOOT-TIME DESKTOP RESIDENCY, NOT PREFILL.
+#                Measured the desktop tenant growing 2397 -> 4705 MiB DURING one session
+#                — above the 3.9 GiB this repo documents elsewhere. A GPU0 drop that
+#                looks like a prefill transient is very likely Windows; isolate it by
+#                stopping the container and reading GPU0 used. Re-verified: the lane
+#                BOOTS CLEAN with the desktop at 4705 MiB, leaving GPU0 1274 MiB free.
+#                Because there is no prefill growth, that 1274 is stable headroom rather
+#                than a number that erodes at depth. A heavier desktop than ~4.7 GiB is
+#                the failure mode to watch — cut CTX_SIZE, not KV quant, if it bites.
+#              ⚠️ STILL UNVALIDATED — do NOT read the above as a full gate:
+#                - no verify-full, no verify-stress, no soak, no bench, no 8-pack
+#                - NO TPS NUMBER IS CLAIMED. The prefill figures above are from the fill
+#                  ladder, not bench.sh, and there is no decode measurement at all.
+#                - the fill ladder is a UNIFORM-HAYSTACK ADDRESSABILITY probe, NOT
+#                  retrieval quality. It proves the context is addressable to 261K. Do
+#                  NOT quote it beside NIAH or RULER scores.
+#                - ⚠️ Q6 vs Q5 QUALITY IS UNMEASURED. The whole point of spending the
+#                  headroom on heavier weights rests on an assumption; the 8-pack has
+#                  been run on NEITHER quant. 7.591 vs 5.920 bpw is a file fact, not a
+#                  quality result.
+#                - -ts 0.49,0.51 was derived in ONE rebalance step, not swept
+#                - MTP n=2 is the house default, UNSWEPT here (the vLLM tier swept the
+#                  SAME MODEL and found the knee at n=4, with n=1 worse than no drafter)
+#   Engine-profile: llama-cpp-local
+#   Best for:  text-only dual-3090 Qwen3.8-27B at maximum weight fidelity that still
+#              fits — the agent-harness lane, where vision is not needed.
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS — vision was not costing 0.86 GiB, it was costing the FLOOR.
+#
+#   | Slug                            | Weights          | Vision | ctx    | Fits this rig?  |
+#   |---------------------------------|------------------|--------|--------|-----------------|
+#   | llamacpp/qwen38-27b-dual-q8kxl  | UD-Q8_K_XL 29.3G | no     | 262144 | ❌ NO           |
+#   | THIS file (unsloth-ud-q6kxl)    | UD-Q6_K_XL 24.1G | no     | 262144 | ✅ 261K MEASURED |
+#   | unsloth-ud-q5kxl/mtp-vision.yml | UD-Q5_K_XL 18.8G | ⭐ yes | 262144 | ✅ MEASURED 240K |
+#
+# Q6_K_XL @262K WITH the projector was REJECTED 2026-08-18: GPU0 measured 2722 MiB free
+# at load and fell to 2119 MiB during deep prefill. Against the vision-lane floor that
+# is a fail. Dropping vision relaxes it on THREE independent axes, only one of which is
+# the projector file:
+#
+#   (1) mmproj-F16 weights            927,607,488 B = 884.6 MiB, freed on GPU0
+#   (2) the image-encode peak headroom  ~1,050 MiB that had to stay UNUSED at all times
+#   (3) the -ub 512 crash constraint    lifted (see UBATCH) — -ub is a tuning lever again
+#
+#   ⚠️ (2) IS THE BIG ONE AND IT IS EASY TO MISS. The vision lane's ">=4 GiB free on
+#   GPU0" floor is not a general safety margin — it is desktop swing (2.4->3.9 GiB,
+#   and it GROWS) PLUS the image-encode spike, which must both fit simultaneously.
+#   Text-only, the image half of that floor simply does not exist, so the floor drops
+#   to roughly the desktop swing alone (~2 GiB). Q6 was not rejected for being 5.3 GiB
+#   heavier than Q5 — it was rejected for being 5.3 GiB heavier while ALSO having to
+#   reserve room for an image encode that this lane will never perform.
+#
+#   PROJECTED (arithmetic from the measured vision-lane numbers, NOT observed):
+#     Q6 @262K vision ON  : GPU0 2722 / GPU1 2679 MiB free, pooled 5401
+#     Q6 @262K text-only  : pooled ~6286 MiB -> ~3143/card at an even split
+#   ~3.1 GiB/card clears a ~2 GiB desktop-swing floor but NOT the old 4 GiB one. That
+#   is exactly why this needs measuring rather than asserting: the margin is real but
+#   thin, and the deep-prefill transient (~600 MiB, observed on the vision run) eats
+#   into it.
+#
+# ⚠️ UD-Q8_K_XL STILL DOES NOT FIT AT 262K, text-only or not. Q8 is ~29.3 GiB, i.e.
+# ~5.2 GiB above Q6 — which is more than the entire ~6.3 GiB pooled free projected
+# above, leaving ~1 GiB across both cards. Dropping vision does NOT unlock upstream's
+# q8kxl slug on this rig; it only puts Q6 in play. Q8 would need a context cut.
+#
+# ---------------------------------------------------------------------------
+# TOPOLOGY — the split was REBALANCED for text-only, and it was not a wash.
+#
+# 0.45,0.55 was derived for the VISION lane, where GPU0 carried the 884.6 MiB projector
+# and needed layers taken off it. That reason is gone. Measured here, both values booting
+# clean with no pipeline fallback:
+#
+#     -ts 0.45,0.55 (inherited) -> GPU0 3631 / GPU1 1085 MiB free   pooled 4513
+#     -ts 0.49,0.51 (SHIPPED)   -> GPU0 3631 / GPU1 2679 MiB free   pooled 6310
+#
+# ⚠️ NOTE THE POOLED COLUMN. Rebalancing did not merely move 1.6 GiB from one card to the
+# other — it added ~1.8 GiB of TOTAL free. Squeezing card1 (which also hosts the pinned,
+# unsplittable MTP draft context) evidently costs allocator overhead somewhere, and that
+# overhead is NOT visible as an error. ⇒ Read the POOLED number when tuning a split, not
+# just the per-card one; a split can be quietly wasteful while booting perfectly cleanly.
+# The shipped 6310 lands on the pre-boot arithmetic (6286) almost exactly.
+#
+# Two constraints still pull in opposite directions:
+#   (a) GPU0 hosts the Windows display + WSL2 and must retain real growth room.
+#   (b) THE MTP DRAFT CONTEXT IS NOT SPLITTABLE — pinned to card1, loading the card
+#       (a) wants to lean on.
+# ⚠️ Do NOT copy upstream's 0.55,0.45 — both of ITS cards are clear.
+# ⚠️ 0.49,0.51 came from ONE rebalance step, not a sweep. It is measured, not optimal.
+#
+# ⚠️⚠️ THE FAILURE MODE HERE IS SILENT, NOT LOUD.
+# If card1 runs out while allocating the pinned draft context, llama.cpp does NOT fail —
+# it retries WITHOUT pipeline parallelism and serves degraded, passing health and
+# verify-full while doing so. AFTER ANY CHANGE to split / ctx / quant / drafter:
+#     docker logs llama-cpp-qwen38-27b-q6 2>&1 | grep -i "retrying without pipeline"
+# A hit invalidates every VRAM and TPS number from that boot.
+#
+# ---------------------------------------------------------------------------
+# KV BUDGET (docs/KV_MATH.md — 16 GROWING layers of 64, NOT all 64):
+#   per_token_bytes = num_growing_layers x num_kv_heads x head_dim x k_v x bpe
+#                   = 16 x 4 x 256 x 2 x bpe = 32,768 x bpe
+#   q8_0 (34 B per 32-elem block = 1.0625 B/elem) -> 34,816 B/token
+#     -> 262,144 ctx = 8.50 GiB total
+#
+#   Pooled budget (weights MEASURED from the file on disk; the rest computed):
+#     UD-Q6_K_XL weights   25,924,152,384 B =  24.14 GiB
+#     mmproj                          none =   0.00 GiB   <- the delta vs the Q5 lane
+#     q8_0 K+V @262,144                     =   8.50 GiB
+#     compute/graph buffers @ -ub 512       =  ~2.50 GiB
+#     MTP draft context (pinned card1)      =  ~1.20 GiB
+#     ---------------------------------------------------
+#     projected total                       =  ~36.34 GiB
+#   against ~45 GiB pooled free (GPU0 ~21.3 with the desktop live + GPU1 ~23.75). The
+#   binding constraint is PER-CARD placement, not the pool. 262144 is the architectural
+#   ceiling, so leftover headroom buys fill-depth safety, not more tokens.
+#
+#   ⚠️ UNIT TRAP: the HF page says "27.8 GB" for these weights. That is DECIMAL. The
+#   real footprint is 24.14 GiB. Budget from the byte count (`stat -c%s`), never the
+#   model-page string.
+#
+# ---------------------------------------------------------------------------
+# UBATCH — ⚠️ 512 IS INHERITED CAUTION HERE, NOT A CRASH FIX. THIS LANE MAY RAISE IT.
+#
+# On the VISION lane -ub 512 is load-bearing: `--spec-type draft-*` + `--mmproj` both
+# loaded is a known GGML_ABORT (cuMemSetAccess fails in ggml_cuda_pool_vmm::alloc under
+# clip_encode <- mtmd_batch_encode; every VMM-pool alloc failure reaches an
+# unconditional GGML_ABORT, so the PROCESS DIES rather than the request failing).
+# That combination requires BOTH halves. With no mmproj loaded, the abort path is not
+# reachable and -ub returns to being an ordinary prefill/VRAM trade.
+#
+# It is left at 512 for the FIRST boot so this lane's numbers are directly comparable
+# to the vision lane's. Raising it costs VRAM (larger compute buffers) and buys prefill
+# throughput — a legitimate sweep once the baseline is measured, and one the vision
+# lane cannot run. ⚠️ Do not raise it and change the quant in the same measurement.
+#
+# ---------------------------------------------------------------------------
+# MTP: the head is EMBEDDED in this GGUF (same family fact as the Q5 sibling; the tensor
+# table there showed blk.64.nextn.*, qwen35.block_count=65, nextn_predict_layers=1).
+# ⚠️ VERIFY IT ON THIS FILE before trusting it — repo naming is not evidence, and neither
+# is a sibling quant. No separate drafter file is fetched or mounted.
+# n=2 is the house default and is UNMEASURED here. The vLLM tier swept the SAME MODEL and
+# found the knee at n=4, with n=1 WORSE than no drafter. SPEC_N=0 disables cleanly.
+#
+# ---------------------------------------------------------------------------
+# THINKING / PRESERVE / EFFORT — identical contract to the Q5 lane (same embedded
+# template; see unsloth-ud-q5kxl/mtp-vision.yml for the full measured breakdown).
+#
+#   preserve_thinking   supported, template default ON  (undefined => keep)
+#   enable_thinking     supported, template default ON
+#   reasoning_effort    default 'xhigh'; valid low|medium|xhigh ('high' remaps to
+#                       'xhigh'); ⚠️ ANY OTHER VALUE raises inside the template -> 500
+#   preserve_window     ⚠️ ABSENT — not implemented. Deliberately NOT threaded, so
+#                       serve.sh --preserve-window keeps erroring honestly.
+#
+# ⚠️ BOTH dials are INERT as top-level OpenAI fields on b10236 — they only take effect
+# via chat_template_kwargs. services/litellm/custom_hooks.py §E translates and clamps
+# both. A bad reasoning_effort is an HTTP 500; a bad preserve_thinking fails SILENTLY.
+#
+# ⭐ THINKING DEFAULT = ON, diverging from stack policy, for the same three reasons as
+# the Q5 lane (Qwen's template defaults it on; Qwen's team recommends it; BoxelBuilder
+# ships xhigh). ⚠️ STILL A PREFERENCE, NOT A MEASURED RESULT ON 3.8 — the 3.6 A/B that
+# set the stack policy found thinking-OFF winning on code and math. Plan step 7.
+# ⚠️ The sampler moves WITH the mode; the base row is THINKING and INSTRUCT=1 is the
+# opt-out. `serve.sh --no-think` flips ONLY REASONING, not the sampler.
+#
+# ---------------------------------------------------------------------------
+# Override defaults via .env or shell:
+#   MODEL_DIR        host dir mounted as /models (serve.sh exports /home/pawl/models)
+#   GGUF_FILE        path under /models
+#   CTX_SIZE         KV pool size        (default: 262144 — the architectural max)
+#   BATCH_SIZE       llama.cpp -b        (default: 4096)
+#   UBATCH_SIZE      llama.cpp -ub       (default: 512 — inherited caution, see UBATCH;
+#                    NOT a crash fix on this text-only lane)
+#   KV_TYPE          BOTH caches         (default: q8_0)
+#   KV_TYPE_K/_V     per-cache override  (default: KV_TYPE). Split them for an ASYMMETRIC
+#                    cache. ⚠️ K IS THE SENSITIVE ONE — keep K high and starve V, never the
+#                    reverse (docs/FAQ.md "Which KV-cache quant"): q5_0/q4_1 beats a SYMMETRIC
+#                    q4_1 of the same size. This build accepts f32/f16/bf16/q8_0/q5_1/q5_0/
+#                    q4_1/q4_0/iq4_nl for either cache (q6_0 is ik-only, NOT available here).
+#                    Tail precision on Qwen3.6-27B/3090 (Anbeeld, 99.9th-pct KLD):
+#                      q8_0/q6_0 94.3% · q5_0/q5_0 93.2% · q5_0/q4_1 92.7% · q4_0/q4_0 88.9%
+#                    Symmetric q8_0/q8_0 (shipped) sits at or above the top row.
+#                    ⚠️ q8_0/q5_0 saves only 1.50 GiB @262K — measured-adjacent arithmetic,
+#                    NOT enough to have rescued Q6 on the vision lane. Do not reach for it
+#                    as a fitting lever; cut context instead.
+#                    ⚠️ verify-stress passing does NOT certify KV tail-safety — synthetic
+#                    needle retrieval is blind to this drift, and the gap GROWS with context.
+#   NP               parallel slots      (default: 1 — one decode stream. Extra slots divide
+#                    throughput AND each takes its own slice of the KV pool.)
+#   TENSOR_SPLIT     manual tensor split (default: 0.49,0.51 — MEASURED. The vision lane's
+#                    0.45,0.55 left GPU1 at 1085 MiB here; rebalancing reclaimed 1.8 GiB
+#                    of POOLED free, not just moved it. See TOPOLOGY.)
+#   SPLIT_MODE       llama.cpp -sm       (default: layer — do NOT use `row` on PCIe-only 3090s)
+#   MTP_DRAFT_N_MAX  spec depth          (default: 2 — UNMEASURED here; SPEC_N=0 disables)
+#   SERVED_NAME      --alias value       (default: qwen3.8-27b)
+#   REASONING        thinking gate       (default: ON)
+#   INSTRUCT=1       ⭐ one knob: flips reasoning AND the sampler back to instruct
+#   PRESERVE_THINKING  prior-turn <think> (default: true — matches the template)
+#   PORT             host port           (default: 8102 — the Q5 vision lane owns 8101)
+#
+# Quick start:
+#   docker compose -f q8kv.yml up -d
+#   docker logs llama-cpp-qwen38-27b-q6 2>&1 | grep -i "retrying without pipeline"
+# ===========================================================================
+
+services:
+  llama-cpp-qwen38-27b-q6:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b10236}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-qwen38-27b-q6}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8102}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # Drafter toggle - docker forwards only what is declared here (repo-wide
+      # contract as of upstream #1050; this lane adopted it 2026-08-18).
+      - SPEC_N=${SPEC_N:-}
+      - SPEC=${SPEC:-}
+      # Server-side chat-template kwargs. Supplied as the env form (upstream's
+      # convention) rather than a --chat-template-kwargs CLI flag: llama.cpp lets a
+      # CLI arg OVERRIDE the env var, so using both would silently drop this default.
+      # serve.sh still detects ${PRESERVE_THINKING here — its _cmdlines grep covers
+      # the whole file, not just the command: block — so --preserve/--no-preserve work.
+      # ⚠️ reasoning_effort is INERT under the shipped `--reasoning off` (the template
+      # only reads it inside `if enable_thinking is undefined or true`). It is set so
+      # that a client flipping thinking ON per-request inherits a sane default.
+      # ⭐ Default `xhigh` — DELIBERATELY DIVERGES FROM UPSTREAM, which ships `low`.
+      # Three reasons: (1) it restores the model's OWN default — the template reads
+      # `reasoning_effort|default('xhigh')`, so upstream's `low` actively overrides
+      # what Qwen shipped; (2) Qwen's team recommends xhigh for this model, results
+      # materially better; (3) it matches the rest of this estate — BoxelBuilder's
+      # ai_config.json ships `reasoning: 'xhigh'`.
+      # ⚠️ Upstream's `low` is a BENCHMARK-HARNESS choice, not a quality one: their
+      # header says xhigh "collides with cli-40's flat 300s per-model-call cap on
+      # these sub-55 tok/s configs". That cap is a property of their test rig, not of
+      # serving. If you run cli-40 here, set REASONING_EFFORT=low FOR THAT RUN.
+      # ⚠️ `low` is an ACTIVE instruction ("keep your thinking brief"), NOT "less of
+      # medium" — medium has no branch and injects nothing at all.
+      # ⚠️⚠️ `high` SILENTLY becomes xhigh on this GGUF template (measured here:
+      # high and xhigh both render 53 prompt_tokens). The vLLM path RAISES on `high`
+      # instead. Setting REASONING_EFFORT=high gets the opposite of what it suggests.
+      - LLAMA_ARG_CHAT_TEMPLATE_KWARGS=${LLAMA_ARG_CHAT_TEMPLATE_KWARGS:-{"preserve_thinking":${PRESERVE_THINKING:-true},"reasoning_effort":"${REASONING_EFFORT:-xhigh}"}}
+      - CUDA_VISIBLE_DEVICES=${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0,1}}
+    # The image ENTRYPOINT is ["/app/llama-server"]. This wrapper is equivalent to it
+    # plus the drafter toggle. Disabling REMOVES the drafter flags rather than passing
+    # n=0: at --spec-draft-n-max 0 llama.cpp sets drafting=false but STILL builds the
+    # draft context, so the memory stays spent. Removing the flags is the only clean off.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        _spec_n="$${SPEC_N:-2}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        if [ "$$_spec_n" -gt 0 ]; then
+          echo "[spec] drafter ON (SPEC_N=$$_spec_n)" >&2
+          exec /app/llama-server "$$@"
+        fi
+        ARGS=(); _skip=0
+        for _a in "$$@"; do
+          if [ "$$_skip" = 1 ]; then _skip=0; continue; fi
+          case "$$_a" in
+            --spec-type|--spec-draft-model|--spec-draft-n-max|--spec-draft-n-min|-md|--model-draft) _skip=1; continue ;;
+          esac
+          ARGS+=("$$_a")
+        done
+        echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - drafter flags removed" >&2
+        exec /app/llama-server "$${ARGS[@]}"
+      - --
+    # ⚠ -np 1 is intentional — one decode stream. Extra slots divide throughput and
+    #   each takes its own slice of the KV pool, shrinking the per-slot ctx.
+    # ⚠️ Comments CANNOT live inside the `command: >-` folded scalar below — every line
+    #   there is part of one command string, and a `#` line becomes literal argv text
+    #   ('invalid command line string' at compose parse). Keep notes above this key.
+    # SAMPLER — from the Qwen3.8-27B model card. ⭐ THIS COMPOSE SHIPS THINKING (2026-08-18).
+    #   Thinking (SHIPPED) : temp 1.0, top_p 0.95, top_k 20, min_p 0.0, presence_penalty 0.0
+    #   Instruct           : temp 0.7, top_p 0.80, top_k 20, min_p 0.0, presence_penalty 1.5
+    #   ⚠️ presence_penalty moves in OPPOSITE directions between modes — never carry one
+    #   across. Under thinking it must be 0.0 or the reasoning trace's natural repetition
+    #   gets penalised.
+    # ⭐ INSTRUCT=1 flips reasoning AND the sampler back to the instruct row together, via the
+    #   trailing ${INSTRUCT:+...} line; llama.cpp takes the LAST value of a repeated flag. An
+    #   explicit TEMP/TOP_P still wins, because the appended values are themselves ${VAR:-default}.
+    #   (This is the old THINKING=1 knob INVERTED — the base row is now Thinking, so the opt-out
+    #   is what needs a switch. `serve.sh --no-think` still works: it exports REASONING=off, but
+    #   ⚠️ that flips ONLY the reasoning flag, NOT the sampler — use INSTRUCT=1 to move both.)
+    #   ⚠️⚠️ THIS RESTS ON DEPRECATED UPSTREAM BEHAVIOUR — b10236 warns that repeating a flag
+    #   is deprecated and only the last value is used. If a future pin DROPS last-wins, the
+    #   failure is SILENT: thinking mode would run the INSTRUCT sampler (presence_penalty 1.5),
+    #   which actively penalises the reasoning trace. ON EVERY PIN BUMP re-run:
+    #     docker run --rm --entrypoint /app/llama-server <new-image> \
+    #       -m /nonexistent.gguf --temp 0.11 --temp 0.99 2>&1 | grep -i 'multiple times'
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-qwen3.8-27b-gguf/unsloth-ud-q6kxl/Qwen3.8-27B-UD-Q6_K_XL.gguf}
+      --alias ${SERVED_NAME:-qwen3.8-27b}
+      -c ${CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-512}
+      -ngl 99
+      -sm ${SPLIT_MODE:-layer}
+      -ts ${TENSOR_SPLIT:-0.49,0.51}
+      -fa on
+      --cache-type-k ${KV_TYPE_K:-${KV_TYPE:-q8_0}}
+      --cache-type-v ${KV_TYPE_V:-${KV_TYPE:-q8_0}}
+      -np ${NP:-1}
+      --spec-type draft-mtp
+      --spec-draft-n-max ${SPEC_N:-${MTP_DRAFT_N_MAX:-2}}
+      --jinja
+      --reasoning ${REASONING:-on}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --presence-penalty ${PRESENCE_PENALTY:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+      ${INSTRUCT:+--reasoning ${REASONING:-off} --temp ${TEMP:-${TEMPERATURE:-0.7}} --top-p ${TOP_P:-0.80} --presence-penalty ${PRESENCE_PENALTY:-1.5}}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
