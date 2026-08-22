@@ -79,12 +79,15 @@
 #                Not quant-, topology- or depth-specific: hit on Ampere+Ada and on
 #                2× 5090 across NVFP4 AND W4A8 alike. The vendored pr48375 fixes
 #                vllm#43559 (corruption) and does NOT cover this fault.
-#                ⚠️ THIS MODEL HAS NEVER RUN, so it has never been OBSERVED to crash —
-#                that is absence of evidence, not evidence of absence. The exposure is
-#                structural (same hybrid-GDN kernel, MTP on) and carries over.
-#                MITIGATION: run the drafter off — SPEC=off. Lower n cuts frequency,
-#                NOT exposure (n=3 was called stable on one rig and crashed AT n=3 on
-#                another). Clears when #50021 merges and a pin bump inherits it;
+#                ⚠️ CONFIRMED IN PRODUCTION 2026-08-19 (@alexpolo1 #1059): crashed once
+#                on THIS slug (2× 3090, MTP n=3, 44 h uptime, from a HEALTHY state) —
+#                Xid 31 VIRT_WRITE both cards. Async scheduling is AUTO-ON for MTP here
+#                ('mtp' ∈ EagleModelTypes → the disable-guard doesn't fire, no warning),
+#                so the shipped default is MTP + prefix-cache + async — the #1052 combo.
+#                MITIGATIONS (two): (1) ASYNC_SCHED=off (--no-async-scheduling) —
+#                eliminates the crash at ~0% cost and KEEPS the drafter; (2) SPEC=off —
+#                drops the drafter. Lower n cuts frequency NOT exposure (crashed AT n=3).
+#                Clears when #50021 merges and a pin bump inherits it;
 #                v0.26.0 PREDATES the fix, so the queued bump inherits nothing here.
 #                Full detail, evidence stack + re-test trigger: docs/UPSTREAM.md.
 #   Best for:  max-weight-fidelity Qwen3.8-27B on 2 cards, and the on-rig proxy for
@@ -211,7 +214,7 @@
 #   - The vendored vllm#48375 install script, shared from the qwen3.6-27b tree
 #     (same hybrid family) — see the volumes block + patches.yml.
 #
-# PORT — 8091, NOT the 8088 you would expect from the 8086/8087 GGUF siblings.
+# PORT — 8091, NOT the 8088 you would expect from the 8087/8090 GGUF siblings.
 #   8088 is SearXNG and 8090 is the AI-Studio director: both are ALWAYS-ON
 #   support services on the reference rig (docs/ARCHITECTURE.md "Services"), so
 #   a slug parked there collides at boot with something that is already
@@ -287,6 +290,7 @@ services:
     # so this literal only bites a raw `docker compose` invocation (#254).
     image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-dual-max}"
+    user: "0:${DOCKER_GID:-1000}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8091}}:8000"
@@ -370,6 +374,7 @@ services:
       - bash
       - -c
       - |
+        umask 0002
         # VLLM_ENFORCE_EAGER=1 in .env disables CUDA graphs — the mitigation if
         # you see mid-generation hangs at depth on this hybrid family. Costs
         # ~20-30% TPS in exchange for stability. UNTESTED on this model.
@@ -424,6 +429,14 @@ services:
       - "${MAX_NUM_SEQS:-2}"
       - --max-num-batched-tokens
       - "${MAX_NUM_BATCHED_TOKENS:-8192}"
+      # Head-of-line-blocking mitigation (Zylone's vLLM tip; qwen3.6 dual-fast precedent).
+      # Interleaves a long prefill with concurrent decodes so a short/agentic request
+      # isn't starved. Valid range [block_size ~1600, max-num-batched-tokens 8192);
+      # 4096 = qwen3.6's measured 2.7x short-TTFT point (5.8x at 2048).
+      # ⚠️ INERT at max_num_seqs=1 (the shipped default) — preparatory for concurrency.
+      # LONG_PREFILL_TOKEN_THRESHOLD=0 disables.
+      - --long-prefill-token-threshold
+      - "${LONG_PREFILL_TOKEN_THRESHOLD:-4096}"
       # fp8 == e4m3 here. NOT fp8_e5m2 — hard-rejected with fp8 checkpoints.
       - --kv-cache-dtype
       - "${KV_CACHE_DTYPE:-fp8}"

@@ -243,7 +243,7 @@
 #     preserve_thinking true   (per-request override ✅ works)
 #     reasoning_effort  n/a while thinking is off (per-request ✅ works, clamp needed)
 #
-# ⚠️ All of the above is DIRECT-TO-ENGINE on :8101. This lane is NOT yet registered in
+# ⚠️ All of the above is DIRECT-TO-ENGINE on :8117. This lane is NOT yet registered in
 # services/litellm/config.yaml, so the harness -> LiteLLM -> engine path is UNPROVEN.
 #
 # ---------------------------------------------------------------------------
@@ -275,7 +275,7 @@
 #   REASONING        thinking gate       (default: ON — see THINKING DEFAULT below)
 #   INSTRUCT=1       ⭐ one knob: flips reasoning AND the sampler back to instruct
 #   PRESERVE_THINKING  prior-turn <think> (default: true — matches the template)
-#   PORT             host port           (default: 8101)
+#   PORT             host port           (default: 8117)
 #
 # Quick start:
 #   ./serve.sh 38b-dual
@@ -288,7 +288,7 @@ services:
     container_name: "${ESTATE_CONTAINER:-llama-cpp-qwen38-27b-vision}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8101}}:8080"
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8117}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     environment:

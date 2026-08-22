@@ -102,8 +102,9 @@ llamacpp-club3090 — despite each using a different drafter grammar underneath.
 On the llama.cpp side `SPEC_N=0` **removes** the drafter flags rather than setting
 the count to zero, and that distinction is worth real memory: llama.cpp at
 `--spec-draft-n-max 0` stops drafting but still builds the draft context (and still
-loads an external draft GGUF when one is named). Measured on
-`llamacpp/qwen38-27b-single-iq4nl`, 1× 3090: **21,444 MiB with the drafter on vs
+loads an external draft GGUF when one is named). Measured 2026-08-15 on Qwen3.8-27B
+at 131K / q8_0 KV (the then-shipped IQ4_NL artifact — the `llamacpp/qwen38-27b-single-iq4xs`
+slug now ships q4_0 / 262K / vision), 1× 3090: **21,444 MiB with the drafter on vs
 20,174 MiB with `SPEC_N=0`** — 1,270 MiB that zeroing the count would have left
 allocated.
 
@@ -362,7 +363,7 @@ Why: the A3B MoE has **3B active params** (cheap decode → the batching knee si
 
 Three caveats: aggregate numbers are **summed across streams** — a single request never sees them (per-stream *falls* as N rises); at long agent contexts throughput becomes **prefill-bound** (end-to-end generated tok/s is nearly flat in N — batching buys utilization/latency-hiding, not more generated tokens); and for agents run **thinking-OFF** (tool-call accuracy) and mind Cliff 2 on single-card vLLM (`docs/CLIFFS.md`).
 
-Measure your own rig: `SWEEP="2 4 8 16" SLUG=<slug> URL=http://localhost:<port> bash scripts/concurrency-probe.sh` — reboots per N, reports per-stream + aggregate + the knee.
+Measure your own rig (live server, no reboot): `bash scripts/concurrency-probe.sh --sweep`. That walks N × ctx (1K–32K, clipped to your KV pool and served slots), early-stops a ctx row when a rung fails, and prints a club-3090 card. The older reboot-per-N envelope knee is still `SWEEP="2 4 8 16" SLUG=<slug> URL=http://localhost:<port> bash scripts/concurrency-probe.sh`.
 
 ### Which KV-cache quant should I use? (`q4_0` / `q5_0` / `turbo3` / `fp8`)
 

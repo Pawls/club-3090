@@ -19,7 +19,7 @@ Run any of these with `bash scripts/switch.sh <slug>`, or `bash scripts/launch.s
 | Slug | Weights | KV | Max ctx | Narr / Code TPS | Port | State |
 |---|---|---|--:|---|--:|---|
 | `vllm/qwen38-27b-dual-max` ⭐ | official FP8 | fp8 e4m3 | 262144 | **67.4 / 85.8** | 8091 | 🧪 needs `--force` |
-| `vllm/qwen38-27b-dual-fast` | AutoRound INT4 + int8 act | fp8 e4m3 | 262144 | — | 8095 | 🧪 needs `--force` |
+| `vllm/qwen38-27b-dual-fast` | AutoRound INT4 + int8 act | fp8 e4m3 | 262144 | — | 8113 | 🧪 needs `--force` |
 | `vllm/qwen38-27b-dual-nvfp4` | NVFP4 | fp8 e4m3 | 262144 | — | 8100 | 🧪 needs `--force` |
 | `llamacpp/qwen38-27b-dual-q8kxl` | unsloth Q8_K_XL | q8_0 | 262144 | — | 8087 | 🐣 `--force`, `--list --all` |
 
@@ -47,7 +47,7 @@ Run any of these with `bash scripts/switch.sh <slug>`, or `bash scripts/launch.s
 |---|---|--:|--:|---|
 | **Gemma-4-31B** | `vllm/gemma-31b-dual` | 224K | 8032 | QAT-AWQ-int4 + bf16 KV, overlay-free. Dual-only on 24 GB — single-card OOMs regardless of KV format. |
 | **Qwen3.6-35B-A3B** ⭐ concurrency | `vllm/qwen-35b-a3b-dual` | 262K | 8051 | ✅ production. **The multi-agent pick** — flat to N=16 streams where the dense 27B knees at N=2. |
-| **Tess-4-27B** | `llamacpp/tess-dual-mtp` | 262K | 8020 | ✅ production. |
+| **Tess-4-27B** | `llamacpp/tess-dual-mtp` | 262K | 8115 | ✅ production. |
 | **Qwen-AgentWorld-35B-A3B** | `vllm/qwen-agentworld-35b-a3b-dual-awq-int4` | 262K | 8080 | ✅ production. |
 
 Everything launchable: `bash scripts/switch.sh --list` (`--all` includes retired).

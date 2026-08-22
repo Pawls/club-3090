@@ -1156,7 +1156,13 @@ class CockpitData:
             return {}
         import datetime as _dt
 
-        best: dict[str, tuple[float, LocalMeasured]] = {}
+        # Per-field NEWEST merge (slice 2c). bench.sh emits a TPS-only record and
+        # quality-test.sh a quality-only record, so a slug's newest TPS and newest
+        # 8pk can live in DIFFERENT records. Show the latest of EACH: running bench
+        # 3× → the 3rd run's TPS wins (older ones stay in the append-only corpus);
+        # a later quality-test run adds its 8pk without clobbering the TPS.
+        tps_best: dict[str, tuple[float, dict]] = {}
+        q_best: dict[str, tuple[float, dict]] = {}
         for f in sorted(base.glob("*.jsonl")):
             try:
                 mtime = f.stat().st_mtime
@@ -1179,17 +1185,47 @@ class CockpitData:
                 ext = r.get("measured_extensions") or {}
                 by_ctx = ext.get("decode_tps_by_ctx") or {}
                 decode = next(iter(by_ctx.values()), None)
-                lm = LocalMeasured(
-                    decode_tps=decode,
-                    quality_8pk=ext.get("quality_8pk"),
-                    quality_8pk_think_on=ext.get("quality_8pk_think_on"),
-                    engine_pin=r.get("engine_pin"),
-                    date=(stamp[:10] if stamp
-                          else _dt.date.fromtimestamp(mtime).isoformat()),
+                date = stamp[:10] if stamp else _dt.date.fromtimestamp(mtime).isoformat()
+                # Only a REAL user-facing bench (bench.sh / rebench-full →
+                # result_class "bench-measured") may drive the perf columns. The
+                # compose-optimizer writes `boot-fit-measured` boot-fit probes
+                # (degenerate ttft ~1ms, synthetic ~475 TPS) into the SAME dir;
+                # those are internal fit checks, not the rig's bench, and must
+                # never surface here (they were showing as the slug's TPS).
+                rc = (r.get("result_class") or "").strip().lower()
+                has_tps = (
+                    decode is not None
+                    or ext.get("narr_tps") is not None
+                    or ext.get("code_tps") is not None
                 )
-                if slug not in best or ts > best[slug][0]:
-                    best[slug] = (ts, lm)
-        return {s: lm for s, (ts, lm) in best.items()}
+                if rc == "bench-measured" and has_tps:
+                    if slug not in tps_best or ts > tps_best[slug][0]:
+                        tps_best[slug] = (ts, {
+                            "decode_tps": decode, "narr_tps": ext.get("narr_tps"),
+                            "code_tps": ext.get("code_tps"),
+                            "engine_pin": r.get("engine_pin"), "date": date,
+                        })
+                if ext.get("quality_8pk") or ext.get("quality_8pk_think_on"):
+                    if slug not in q_best or ts > q_best[slug][0]:
+                        q_best[slug] = (ts, {
+                            "quality_8pk": ext.get("quality_8pk"),
+                            "quality_8pk_think_on": ext.get("quality_8pk_think_on"),
+                            "engine_pin": r.get("engine_pin"), "date": date,
+                        })
+        out: dict[str, LocalMeasured] = {}
+        for slug in set(tps_best) | set(q_best):
+            t = tps_best.get(slug, (0.0, {}))[1]
+            q = q_best.get(slug, (0.0, {}))[1]
+            out[slug] = LocalMeasured(
+                decode_tps=t.get("decode_tps"),
+                narr_tps=t.get("narr_tps"),
+                code_tps=t.get("code_tps"),
+                quality_8pk=q.get("quality_8pk"),
+                quality_8pk_think_on=q.get("quality_8pk_think_on"),
+                engine_pin=t.get("engine_pin") or q.get("engine_pin"),
+                date=max(t.get("date", ""), q.get("date", "")),
+            )
+        return out
 
     def _read_benchmarks_md(self) -> str:
         path = self.repo_root / "BENCHMARKS.md"
@@ -3050,27 +3086,34 @@ class CockpitData:
                         out[var] = m.group(1).strip().strip('"')
                 # Real drafter for the SPEC label ("on" is uninformative): parse the
                 # sibling's --speculative-config method + num_speculative_tokens.
-                sm = _re.search(r'"method"\s*:\s*"([a-z0-9_]+)"', txt)
+                sm = _re.search(r'\\?"method\\?"\s*:\s*\\?"([a-z0-9_]+)\\?"', txt)
                 if sm:
                     method = sm.group(1)
-                    # num_speculative_tokens is written EITHER as a literal
-                    #   "num_speculative_tokens":3
-                    # or parameterized behind an env default
-                    #   "num_speculative_tokens":${SPEC_N:-4}
-                    # Both ship today (13 composes use the second form, under five
-                    # different var names: SPEC_N, SPEC_N_MAX, NUM_SPEC_TOKENS,
-                    # MTP_SPEC_TOKENS, …), so match the optional ${VAR:- prefix and
-                    # read the DEFAULT — that is what the compose serves unless the
-                    # operator overrides it, which is exactly what this editor
+                    # num_speculative_tokens is written three ways across the
+                    # estate, and each of these was a real miss at some point:
+                    #   "num_speculative_tokens":3            literal
+                    #   "num_speculative_tokens":${SPEC_N:-4} parameterized default
+                    #   \"num_speculative_tokens\":3          escaped, inside an
+                    #                                         entrypoint-built shell
+                    #                                         heredoc
+                    # So: tolerate the escaped quotes (symmetric with the "method"
+                    # regex above), then optionally consume a ${VAR:- prefix under
+                    # ANY var name — 13 composes parameterize this under five names
+                    # (SPEC_N, SPEC_N_MAX, NUM_SPEC_TOKENS, MTP_SPEC_TOKENS, …) —
+                    # and read the DEFAULT, which is what the compose serves unless
+                    # the operator overrides it, i.e. exactly what this editor
                     # pre-fills.  A literal-only regex silently yielded SPEC_N=""
                     # and dropped the "n=N" from the drafter label.
-                    # ("method" is a quoted literal in every shipped compose — mtp
-                    # or dflash — so it needs no such handling yet.)
                     nm = _re.search(
-                        r'"num_speculative_tokens"\s*:\s*'
+                        r'\\?"num_speculative_tokens\\?"\s*:\s*'
                         r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*:-)?(\d+)',
                         txt,
                     )
+                    if not nm:
+                        # Entrypoint-built configs interpolate a $$_spec_n shell var
+                        # at the key, so the key and the number are not adjacent —
+                        # the real default lives in a detached ${SPEC_N:-<n>}.
+                        nm = _re.search(r'\$\{SPEC_N:-(\d+)\}', txt)
                     out["SPEC_METHOD"] = method                    # raw, e.g. "mtp"
                     out["SPEC_N"] = nm.group(1) if nm else ""
                     out["SPEC_DRAFTER"] = (

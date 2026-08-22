@@ -227,7 +227,7 @@
 #   REASONING        thinking gate       (default: ON)
 #   INSTRUCT=1       ⭐ one knob: flips reasoning AND the sampler back to instruct
 #   PRESERVE_THINKING  prior-turn <think> (default: true — matches the template)
-#   PORT             host port           (default: 8102 — the Q5 vision lane owns 8101)
+#   PORT             host port           (default: 8118 — the Q5 vision lane owns 8117)
 #
 # Quick start:
 #   docker compose -f q8kv.yml up -d
@@ -240,7 +240,7 @@ services:
     container_name: "${ESTATE_CONTAINER:-llama-cpp-qwen38-27b-q6}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8102}}:8080"
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8118}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     environment:

@@ -1,8 +1,13 @@
 # ===========================================================================
 # Profile (at-a-glance):
-#   Model:     Qwen3.8-27B (Avuja AutoRound INT4 — 4-bit, group 128, sym,
-#              packing auto_round:auto_gptq; 18.23 GiB. Vision tower and MTP
-#              head both ship UNQUANTIZED at bf16.) Served **W4A8** — int8
+#   Model:     Qwen3.8-27B (Frozenlock AutoRound INT4 — 4-bit, group 128, sym,
+#              packing auto_round:auto_gptq; ~18 GiB. Vision tower is bf16;
+#              the MTP head is QUANTIZED. ⭐ Replaced the Avuja export
+#              2026-08-20 (club-3090#1052) — Avuja's built-in MTP drafter
+#              collapsed to 0% acceptance at ~14.5k gen; Frozenlock runs
+#              clean past 22-24k (verify-full 8/9, bench narr ~75 / code
+#              ~103 ≈ Avuja, MTP accept-len 3.48-5.0). Avuja preserved on
+#              disk as qwen3.8-27b-autoround-int4-avuja.) Served **W4A8** — int8
 #              activations ON by default (W4A8=0 for W4A16).
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink; NVLINK_MODE=auto detects)
 #   Drafter:   MTP n=4 built-in (SPEC_N override; SPEC_N=0 disables)
@@ -127,6 +132,7 @@ services:
   vllm-qwen38-27b-dual-fast:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-dual-fast}"
+    user: "0:${DOCKER_GID:-1000}"
     # Repo contract (test-compose-restart-policy): every shipped vLLM compose uses
     # the reboot-surviving knob so launch.sh-as-a-service returns after a reboot.
     # ⚠️ WHEN DEBUGGING A BOOT FAILURE SET CLUB3090_RESTART=no. Under
@@ -138,7 +144,7 @@ services:
     shm_size: "16gb"
     ipc: host
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${PORT:-8095}:8000"
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-8113}:8000"
     deploy:
       resources:
         reservations:
@@ -152,6 +158,10 @@ services:
       - ../../../../../qwen3.6-27b/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
       # Lets the MTP drafter attach on this hybrid (mamba/eagle block drop).
       - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
+      # club-3090 GDN+MTP async spec-order fix — closes the async wild-write race
+      # (our #1052 / upstream #52873 + #50021 thread). Ours, not an upstream PR;
+      # validated 3/3 boots on the reference 2×3090. Anchor drift → boot refused.
+      - ../../../../../qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
@@ -192,6 +202,7 @@ services:
       - bash
       - -c
       - |
+        umask 0002
         set -e
         source /etc/club3090/detect_nvlink.sh
         # ⚠️ THIS MUST RUN BEFORE install.sh, NOT AFTER. install.sh only hard-FAILS
@@ -204,6 +215,7 @@ services:
         fi
         bash /etc/club3090/w4a8/install.sh
         bash /etc/club3090/pr48375/install.sh || exit 1
+        bash /etc/club3090/gdn-async-order/install.sh || exit 1
         echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE:-<unset -> W4A16>} (W4A8=$${W4A8:-1})"
         AR=""
         [ "$${_NVLINK_ENABLED:-0}" = "1" ] || AR="--disable-custom-all-reduce"
@@ -251,6 +263,14 @@ services:
       - "${MAX_NUM_SEQS:-1}"
       - --max-num-batched-tokens
       - "${MAX_NUM_BATCHED_TOKENS:-8192}"
+      # Head-of-line-blocking mitigation (Zylone's vLLM tip; qwen3.6 dual-fast precedent).
+      # Interleaves a long prefill with concurrent decodes so a short/agentic request
+      # isn't starved. Valid range [block_size ~1600, max-num-batched-tokens 8192);
+      # 4096 = qwen3.6's measured 2.7x short-TTFT point (5.8x at 2048).
+      # ⚠️ INERT at max_num_seqs=1 (the shipped default) — preparatory for concurrency.
+      # LONG_PREFILL_TOKEN_THRESHOLD=0 disables.
+      - --long-prefill-token-threshold
+      - "${LONG_PREFILL_TOKEN_THRESHOLD:-4096}"
       - --kv-cache-dtype
       - "${KV_CACHE_DTYPE:-fp8_e4m3}"
       - --trust-remote-code

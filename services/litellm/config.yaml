@@ -198,7 +198,7 @@ model_list:
       api_base: http://host.docker.internal:8213/v1
       api_key: EMPTY
 
-  # Qwen3.8-27B — dual-3090 llama.cpp lane WITH VISION at 262K, :8101.
+  # Qwen3.8-27B — dual-3090 llama.cpp lane WITH VISION at 262K, :8117.
   # Started by `./serve.sh 38b-dual` (lane added 2026-08-18).
   # 🧪 Experimental: booted + verify-full 9/9 + vision verified, but no soak/bench/8-pack. This is the only Qwen3.8 lane in the estate that serves IMAGES —
   # every upstream qwen3.8 slug is text-only.
@@ -227,7 +227,7 @@ model_list:
   - model_name: qwen3.8-27b-vision
     litellm_params:
       model: openai/qwen3.8-27b-vision
-      api_base: http://host.docker.internal:8101/v1
+      api_base: http://host.docker.internal:8117/v1
       api_key: EMPTY
       # ⚠️ 5400 s, NOT the 900 s the other long-ctx lanes use — and the size is derived, not
       # picked. xhigh on this model is designed for an UNBOUNDED thinking budget (Qwen's card
@@ -317,6 +317,22 @@ model_list:
     litellm_params:
       model: "openai//models/qwen3-omni-30b-a3b-instruct-int4-autoround"
       api_base: http://host.docker.internal:8042/v1
+      api_key: EMPTY
+
+  # Local qwen3.8-27b (#1062) — the dual-max scene on :8091 serves BOTH served-names.
+  # ⚠️ Scene-dependent port: :8091 is the dual-max slug; other qwen3.8 slugs serve on their
+  # own registry default_port (dual-fast 8113, iq4xs 8090, …). The gateway lists one canonical
+  # port per model, same as every other local backend here.
+  - model_name: qwen3.8-27b
+    litellm_params:
+      model: openai/qwen3.8-27b
+      api_base: http://host.docker.internal:8091/v1
+      api_key: EMPTY
+
+  - model_name: qwen3.8-27b-fp8
+    litellm_params:
+      model: openai/qwen3.8-27b-fp8
+      api_base: http://host.docker.internal:8091/v1
       api_key: EMPTY
 
   # === Cloud reference endpoint (DashScope MaaS workspace, OpenAI-compatible) ===
