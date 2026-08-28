@@ -273,6 +273,7 @@ OTHER_TOOL_OK = {
     "--in-place",                        # benchlocal-cli rescore
     "--dry-run",                         # quality-baseline.sh / report.sh
     "--clear-default", "--set-default", "--profile-like",       # switch.sh
+    "--env-file",                        # docker compose (AGENTS.md wsl2-env section)
 }
 allowed = known | PASS_THROUGH_OK | OTHER_TOOL_OK
 
