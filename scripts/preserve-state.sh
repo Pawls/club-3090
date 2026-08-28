@@ -120,7 +120,13 @@ fi
 #   _compose_default  <compose> <VAR> -> value after ${VAR:-…}
 #   _env_override     <compose> <VAR> -> value from the compose-dir .env (the
 #                                        ONLY .env docker compose auto-loads)
-_compose_default() { grep -oE "\\\$\\{$2:-[^},\"' ]*" "$1" 2>/dev/null | head -1 | sed "s/.*:-//" || true; }
+# Comment lines are stripped FIRST -- serve.sh's twin does this via _cmdlines and
+# this port originally lost it.  A compose whose prose mentions the OPPOSITE default
+# (qwen3.8-27b mtp-vision.yml documents ${PRESERVE_THINKING:-false} above threading
+# ${PRESERVE_THINKING:-true}) otherwise resolves off the COMMENT, because head -1
+# takes the first match in file order.  Silent, and the wrong way round.
+_cmdlines() { grep -v '^[[:space:]]*#' "$1"; }
+_compose_default() { _cmdlines "$1" | grep -oE "\\\$\\{$2:-[^},\"' ]*" 2>/dev/null | head -1 | sed "s/.*:-//" || true; }
 _env_override() {
   local e; e="$(dirname "$1")/.env"
   [[ -f "$e" ]] || return 0
@@ -144,7 +150,7 @@ elif [[ -n "$COMPOSE" ]]; then
   [[ -f "$COMPOSE" ]] || die "compose not found: $COMPOSE"
   # Only composes that actually interpolate ${PRESERVE_THINKING…} have a mode to
   # resolve; everything else is correctly 'off'.
-  if grep -qE '\$\{PRESERVE_THINKING' "$COMPOSE"; then
+  if _cmdlines "$COMPOSE" | grep -qE '\$\{PRESERVE_THINKING'; then
     _w="$(_effective "$COMPOSE" PRESERVE_THINKING_WINDOW)"
     if   [[ "$_w" =~ ^[0-9]+$ && "$_w" -gt 0 ]]; then ps_mode=window; ps_window="$_w"
     elif [[ "$(_effective "$COMPOSE" PRESERVE_THINKING)" == true ]]; then ps_mode=full
