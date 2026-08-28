@@ -26,14 +26,19 @@
 #   bash scripts/concurrency-probe.sh --sweep         # live N×ctx matrix + card
 #   SWEEP="4 8 12 16" SLUG=vllm/minimal TPS_FLOOR=15 bash scripts/concurrency-probe.sh
 #
-# Env: URL (default http://localhost:8010) · MODEL (auto) · CONTAINER (auto for
-#   VRAM) · CONCURRENCY (default: served max-num-seqs, else 2) · ROUNDS (5;
-#   --sweep defaults to 3) · PROMPT_TOKENS (16000) · GEN_TOKENS (256) ·
+# Env: URL (default registry-derived for qwen3.6-27b, currently :8020) · MODEL
+#   (auto) · CONTAINER (auto for VRAM) · CONCURRENCY (default: served
+#   max-num-seqs, else 2) · ROUNDS (5; --sweep defaults to 3) ·
+#   PROMPT_TOKENS (16000) · GEN_TOKENS (256) ·
 #   VRAM_GROWTH_MB (200) · REQ_TIMEOUT (600).
 #   Validation knobs: VALIDATE (0) · TARGET_CTX (auto from --max-model-len) ·
 #   TPS_FLOOR (0 = report-only) · RETENTION_MIN (0.98) ·
 #   SWEEP ("" = single-N) · SLUG (required for SWEEP) · SWEEP_DRY (0) ·
 #   BOOT_TIMEOUT (360).
+#   Live --sweep warm-up gate (opt-in): WARMUP (0) — when 1, wait for the
+#   server + fire warm-up gens before the ladder (a rung fired at a cold /
+#   not-ready engine reads as a spurious crash); WARMUP_TIMEOUT (900) ·
+#   WARMUP_REQS (3).
 #   --sweep knobs: CTX_SWEEP (1k 4k 8k 16k 32k) · N_LIST (1 2 4 8 16 32) ·
 #   KV_TOKENS (0 = auto from vLLM logs) · N_MAX · CTX_MAX · WALL_BUDGET (15m) ·
 #   EARLY_STOP (1) · CACHE (shared) · SHARE_FRAC (0.75).
@@ -62,7 +67,7 @@ concurrency-probe.sh — concurrent-stream fit + throughput matrix
                                                  reboot-per-N envelope knee
 
 --sweep flags (all optional; clipped to the live server):
-  --url URL          default http://localhost:8010
+  --url URL          default registry-derived for qwen3.6-27b (currently :8020)
   --ctx 1k,4k,8k,16k,32k
   --n 1,2,4,8,16,32
   --budget 15m       stop the matrix and print a partial card
@@ -76,9 +81,29 @@ EOF
 
 MATRIX=0
 N_LIST_EXPLICIT=0
-URL="${URL:-http://localhost:8010}"
+# Default endpoint follows the registry's curated DEFAULTS walk for qwen3.6-27b
+# — the SAME source bench/verify derive their defaults from — instead of this
+# probe's lone :8010 literal. The trailing literal is only a last resort when
+# the registry can't be consulted.
+_DEFAULT_ENDPOINT_PORT=""
+if [[ -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
+  # shellcheck source=lib/registry-lookup.sh
+  source "${ROOT_DIR}/scripts/lib/registry-lookup.sh"
+  REGISTRY_LOOKUP_ROOT="${ROOT_DIR}"
+  _DEFAULT_ENDPOINT_PORT="$(registry_lookup_default_port qwen3.6-27b 2>/dev/null || true)"
+fi
+URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
 PROMPT_TOKENS="${PROMPT_TOKENS:-16000}"
 GEN_TOKENS="${GEN_TOKENS:-256}"
+# Sampler, names matching bench.sh. Default GREEDY -- unchanged probe behaviour and
+# what knee-finding wants (determinism). Set to bench.sh's canonical
+# 0.6 / 0.95 / 20 / 0.0 to make per-stream tok/s comparable with a bench.sh run;
+# greedy roughly doubles draft acceptance on a spec-dec model, so by default the
+# two are NOT comparable.
+BENCH_TEMP="${BENCH_TEMP:-0.0}"
+BENCH_TOP_P="${BENCH_TOP_P:-1.0}"
+BENCH_TOP_K="${BENCH_TOP_K:-0}"
+BENCH_MIN_P="${BENCH_MIN_P:-0.0}"
 VRAM_GROWTH_MB="${VRAM_GROWTH_MB:-200}"
 REQ_TIMEOUT="${REQ_TIMEOUT:-600}"
 TPS_FLOOR="${TPS_FLOOR:-0}"
@@ -314,11 +339,58 @@ run_probe() {
   VRAM_GROWTH_MB="$VRAM_GROWTH_MB" REQ_TIMEOUT="$REQ_TIMEOUT" \
   TPS_FLOOR="$TPS_FLOOR" RETENTION_MIN="$RETENTION_MIN" VALIDATE="$VALIDATE" \
   CACHE="$CACHE" SHARE_FRAC="$SHARE_FRAC" UNIQUE_MIN="$UNIQUE_MIN" \
+    BENCH_TEMP="$BENCH_TEMP" BENCH_TOP_P="$BENCH_TOP_P" \
+    BENCH_TOP_K="$BENCH_TOP_K" BENCH_MIN_P="$BENCH_MIN_P" \
   python3 "$PROBE_PY"
+}
+
+# --- opt-in readiness + warm-up gate for the live --sweep path ----------------
+# OFF by default (WARMUP=0) so CI / runs against an already-warm server aren't
+# slowed. Set WARMUP=1 when you boot an engine and immediately sweep: cold vLLM
+# needs minutes to load weights + capture CUDA graphs, and a rung fired before
+# it is ready reads as a spurious crash. Waits for /v1/models, re-resolves the
+# served model (the top-of-script autodetect may have fallen back to the default
+# when nothing was serving yet), then fires a few warm-up generations. Returns
+# non-zero only if the server never comes up within WARMUP_TIMEOUT.
+warmup_gate() {
+  [[ "${WARMUP:-0}" == "1" ]] || return 0
+  local timeout="${WARMUP_TIMEOUT:-900}" reqs="${WARMUP_REQS:-3}"
+  echo "[sweep] WARMUP: waiting up to ${timeout}s for ${URL} ..." >&2
+  local ready=0 waited=0
+  for _ in $(seq 1 $(( timeout / 2 )) ); do
+    if curl -s -m 3 "${URL}/v1/models" >/dev/null 2>&1; then ready=1; break; fi
+    sleep 2; waited=$(( waited + 2 ))
+  done
+  if [[ "$ready" != "1" ]]; then
+    echo "[sweep] WARMUP: not ready in ${timeout}s — aborting sweep" >&2
+    return 1
+  fi
+  echo "[sweep] WARMUP: server up after ~${waited}s" >&2
+  # Re-resolve the served model now that the server answers (skip if pinned).
+  if [[ -z "$MODEL_PINNED" ]]; then
+    local det
+    det="$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || true)"
+    if [[ -n "$det" && "$det" != "$MODEL" ]]; then
+      echo "[sweep] WARMUP: served model re-resolved: $det (was: $MODEL)" >&2
+      MODEL="$det"
+    fi
+  fi
+  # Fire warm-up generations to trigger CUDA-graph capture before timing starts.
+  local ok=0 i
+  for i in $(seq 1 "$reqs"); do
+    if curl -s -m 120 "${URL}/v1/chat/completions" \
+         -H 'content-type: application/json' \
+         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"max_tokens\":8}" \
+         >/dev/null 2>&1; then ok=$(( ok + 1 )); fi
+  done
+  echo "[sweep] WARMUP: ${ok}/${reqs} warm-up requests ok" >&2
+  return 0
 }
 
 # --- --sweep: live N×ctx matrix, no reboot ------------------------------------
 if [[ "$MATRIX" == "1" ]]; then
+  if [[ "$SWEEP_DRY" != "1" ]]; then warmup_gate || exit 1; fi
   slots="$(_detect_slots || true)"
   slots_src="undetected"
   if [[ -n "$(_served_seqs || true)" ]]; then slots_src="container max-num-seqs"

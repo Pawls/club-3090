@@ -30,11 +30,12 @@ from typing import Any, Optional
 
 import pytest
 
-from textual.widgets import Button, DataTable, Input, Select, Static, Switch, TabbedContent, TabPane, Label, Tabs
+from textual.widgets import Button, DataTable, Input, RichLog, Select, Static, Switch, TabbedContent, TabPane, Label, Tabs
 from textual.widgets._footer import FooterKey
 from textual.widgets._tabbed_content import ContentTabs
 
 from club3090_tui_core.detect import GpuInfo, ServingTarget
+from club3090_tui_core.widgets.live_pane import LivePane
 
 from club3090_cockpit.app import (
     CockpitApp,
@@ -250,6 +251,20 @@ REGISTRY_JSON = json.dumps(
 
 FIT_JSON = json.dumps(
     {"verdict": "fits-clean", "vram_est_gb": 19.881, "band_gb": 1.5, "max_ctx": 262144}
+)
+
+# kv-calc --solve-max-ctx per-dtype pricing (the Optimize brain's option
+# calls) — REAL output shape, verified live on qwen3.6-27b dual.
+SOLVE_JSON = json.dumps(
+    {
+        "model": "qwen3.6-27b", "weights_gb": 8.75,
+        "kv_pool_requested_gb": 8.68, "kv_pool_actual_gb": 8.68,
+        "kv_pool_sliding_fixed_gb": 0.0, "activation_gb": 0.82,
+        "cudagraph_overhead_gb": 1.75, "drafter_gb": 0.0,
+        "total_gb": 19.997, "vram_gb": 24.0, "budget_gb": 22.8,
+        "pct_of_vram": 87.7, "verdict": "PASS", "notes": [],
+        "solved_max_ctx": 262144,
+    }
 )
 
 # kv-calc --fit-all batch (one call enriches the whole catalog's fit column).
@@ -616,6 +631,8 @@ def fake_responses(**overrides) -> dict[str, RunResult]:
         "docker images -q": ok("sha256:abc123\n"),
         # Phase-4 reads:
         "diagnose-estate.sh --json": ok(DIAGNOSE_ESTATE_JSON),
+        # The Optimize brain's per-dtype pricing (one solve per legal format).
+        "--solve-max-ctx": ok(SOLVE_JSON),
         "diagnose-profile.sh": ok(DIAGNOSE_PROFILE_TEXT),
         "power-cap status": ok(POWER_CAP_STATUS),
         "docker top": ok(DOCKER_TOP),
@@ -679,6 +696,26 @@ def make_app(
     runner (e.g. FakeGenComposeRunner for the ② Serve generate path).
     """
     root = repo_root or FAKE_REPO_ROOT
+    # The Optimize brain reads engine/hardware KV-legality lists off the repo
+    # tree (stdlib yml scan) — seed the two tiny profile files it needs so the
+    # option table renders in tests.  (Idempotent; nothing else reads these.)
+    try:
+        eng = root / "scripts" / "lib" / "profiles" / "engines"
+        eng.mkdir(parents=True, exist_ok=True)
+        (eng / "vllm-stable.yml").write_text(
+            "supported_kv_formats:\n"
+            "  - bf16\n  - fp16\n  - fp8_e4m3\n  - fp8_e5m2\n"
+            "  - int8_per_token_head\n", encoding="utf-8")
+        hw = root / "scripts" / "lib" / "profiles" / "hardware"
+        hw.mkdir(parents=True, exist_ok=True)
+        # Ampere card: fp8_e4m3 NOT hardware-legal → dropped from the options.
+        (hw / "rtx-3090.yml").write_text(
+            "sm: 8.6\nvram_gb: 24\n"
+            "supported_kv_formats:\n"
+            "  - bf16\n  - fp16\n  - fp8_e5m2\n  - int8_per_token_head\n",
+            encoding="utf-8")
+    except OSError:
+        pass
     runner = runner or FakeRunner(responses or fake_responses())
     gpus = gpus if gpus is not None else [GpuInfo(index=0, mem_used_mib=1), GpuInfo(index=1, mem_used_mib=1)]
     target = target if target is not None else ServingTarget(gpus=gpus)
@@ -996,46 +1033,367 @@ class TestNavNodesExist:
         saved = M.load_settings().get("catalog_columns")
         assert saved == {"order": default, "hidden": []}
 
-    def test_act8_serve_toggle(self):
-        """#609: the W4A8 int8-activation opt-in on the serve-confirm modal —
-        shown + wired only for act8-capable START slugs, injects the env, hidden
-        elsewhere. Tests the modal's logic directly (no app mount needed)."""
+    def test_act8_serve_toggle(self, tmp_path):
+        """#609/#1010: the W4A8 int8-activation knob on the serve-confirm modal —
+        shown + wired only where [a] is bound (classic opt-in OR inverted
+        ship-int8), injects the right env per slug class, hidden elsewhere.
+        Tests the modal's logic directly (no app mount needed)."""
         from club3090_cockpit.app import ConfirmActionScreen, ServeContext
         from club3090_cockpit.data import ActionPlan, CatalogEntry
         from club3090_cockpit.services import _variant_row_from_dict
 
-        def modal(act8, mode="start"):
-            row = _variant_row_from_dict({"slug": "vllm/dual", "port": 8010, "act8_capable": act8})
+        def modal(act8, act_format="", mode="start"):
+            row = _variant_row_from_dict({
+                "slug": "vllm/x", "port": 8010, "act8_capable": act8,
+                "act_format": act_format,
+            })
             ctx = ServeContext(mode=mode, entry=CatalogEntry(row=row))
             m = ConfirmActionScreen.__new__(ConfirmActionScreen)
-            m._plan = ActionPlan(kind="serve", cmd=["bash", "scripts/switch.sh", "vllm/dual"])
+            m._plan = ActionPlan(kind="serve", cmd=["bash", "scripts/switch.sh", "vllm/x"])
             m._serve_ctx = ctx
+            m._repo_root = tmp_path
+            m._act8_gate = None
             m._act8_on = False
             m._reconcile = None
             return m
 
-        # capable START slug → toggle available + gated ON
+        # ── opt-in class (#609, unchanged): 16bit + capable ──────────────────
         cap = modal(True)
-        assert cap._act8_capable() is True
+        assert cap._act8_mode() == "optin"
         assert cap.check_action("toggle_act8", ()) is True
-        # env attaches (idempotent, prepended before switch.sh)
+        # env attaches only when ON (idempotent, prepended before switch.sh)
+        assert cap._act8_env_prefix() == []
         cap._act8_on = True
-        inj = cap._with_act8_env(cap._plan.cmd)
+        inj = cap._with_act8_env(cap._plan.cmd, cap._act8_env_prefix())
         assert inj[:2] == ["env", "VLLM_MARLIN_INPUT_DTYPE=int8"]
-        assert cap._with_act8_env(inj) == inj  # idempotent
+        assert cap._with_act8_env(inj, cap._act8_env_prefix()) == inj  # idempotent
 
-        # NON-capable slug → toggle hidden, capability False
+        # NON-capable slug → no knob at all
         nocap = modal(False)
-        assert nocap._act8_capable() is False
+        assert nocap._act8_mode() == "none"
         assert nocap.check_action("toggle_act8", ()) is False
-
         # capable but STOP mode (not a launch) → not offered
         stop = modal(True, mode="stop")
         assert stop._act8_capable() is False
 
-        # row facet plumbs through from the emit contract
-        assert getattr(_variant_row_from_dict({"slug": "x", "port": 1, "act8_capable": True}), "act8_capable") is True
-        assert getattr(_variant_row_from_dict({"slug": "x", "port": 1}), "act8_capable") is False
+        # row facets plumb through from the emit contract
+        r = _variant_row_from_dict({"slug": "x", "port": 1, "act8_capable": True})
+        assert getattr(r, "act8_capable") is True and getattr(r, "act_format") == ""
+        r2 = _variant_row_from_dict({"slug": "x", "port": 1, "act_format": "int8"})
+        assert getattr(r2, "act_format") == "int8"
+
+    def test_act8_ship_int8_toggle(self, tmp_path):
+        """#1010: slugs that SHIP int8 (act_format == "int8") must not offer the
+        backwards 'enable' opt-in. With the #1008 W4A8 gate in the compose the
+        toggle renders INVERTED (ON default, [a] disable → env W4A8=0); with a
+        hardcoded dtype it renders as a FIXED property line (no [a] binding)."""
+        from club3090_cockpit.app import ConfirmActionScreen, ServeContext
+        from club3090_cockpit.data import ActionPlan, CatalogEntry
+        from club3090_cockpit.services import _variant_row_from_dict
+
+        GATED = "# comment\n- W4A8=${W4A8:-1}\n- VLLM_MARLIN_INPUT_DTYPE\n"
+        HARDCODED = "- VLLM_MARLIN_INPUT_DTYPE=int8\n"
+
+        def modal(compose):
+            d = tmp_path / "models" / "m"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "compose.yml").write_text(compose)
+            row = _variant_row_from_dict({
+                "slug": "vllm/ship-int8", "port": 8010,
+                "act8_capable": True, "act_format": "int8",
+                "compose_path": "models/m/compose.yml",
+            })
+            m = ConfirmActionScreen.__new__(ConfirmActionScreen)
+            m._plan = ActionPlan(kind="serve", cmd=["bash", "scripts/switch.sh", "vllm/ship-int8"])
+            m._serve_ctx = ServeContext(mode="start", entry=CatalogEntry(row=row))
+            m._repo_root = tmp_path
+            m._act8_gate = None
+            m._act8_on = True   # the shipped-default state
+            m._reconcile = None
+            return m
+
+        # gated compose → inverted toggle: ON by default, [a] offered,
+        # OFF injects W4A8=0, ON injects nothing (the slug already ships int8)
+        inv = modal(GATED)
+        assert inv._act8_mode() == "inverted"
+        assert inv.check_action("toggle_act8", ()) is True
+        assert inv._act8_env_prefix() == []
+        inv._act8_on = False
+        assert inv._act8_env_prefix() == ["W4A8=0"]
+        off = inv._with_act8_env(inv._plan.cmd, inv._act8_env_prefix())
+        assert off[:3] == ["env", "W4A8=0", "bash"]
+
+        # hardcoded compose → FIXED property: no [a], never any env injected
+        fix = modal(HARDCODED)
+        assert fix._act8_mode() == "fixed"
+        assert fix.check_action("toggle_act8", ()) is False
+        fix._act8_on = False
+        assert fix._act8_env_prefix() == []
+
+        # unreadable compose degrades to FIXED (conservative: no broken toggle)
+        broken = modal(GATED)
+        broken._repo_root = tmp_path / "nonexistent"
+        broken._act8_gate = None
+        assert broken._act8_gate_capable() is False
+        assert broken._act8_mode() == "fixed"
+
+    # ── #1014 Layer 3: the tri-state thinking toggle ─────────────────────────────
+
+    _THINKING_PROFILES = {
+        "instruct": {"temperature": 0.7, "top_p": 0.80, "top_k": 20,
+                     "min_p": 0.0, "presence_penalty": 1.5,
+                     "repetition_penalty": 1.0},
+        "thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                     "min_p": 0.0, "presence_penalty": 0.0,
+                     "repetition_penalty": 1.0},
+    }
+
+    def _thinking_modal(self, profiles="yes", mode="start", tmp_path=None):
+        """A ConfirmActionScreen built without mounting (the proven act8-test
+        pattern). ``profiles``: "yes" → thinking row present, None → absent."""
+        from club3090_cockpit.app import ConfirmActionScreen, ServeContext
+        from club3090_cockpit.data import ActionPlan, CatalogEntry
+        from club3090_cockpit.services import _variant_row_from_dict
+
+        d = {"slug": "vllm/qwen38-27b-dual-max", "port": 8010,
+             "model": "qwen3.8-27b"}
+        if profiles == "yes":
+            d["sampler_profiles"] = self._THINKING_PROFILES
+        row = _variant_row_from_dict(d)
+        m = ConfirmActionScreen.__new__(ConfirmActionScreen)
+        m._plan = ActionPlan(kind="serve", cmd=["bash", "scripts/switch.sh", d["slug"]])
+        m._serve_ctx = ServeContext(mode=mode, entry=CatalogEntry(row=row))
+        m._repo_root = tmp_path
+        m._act8_gate = None
+        m._act8_on = False
+        m._thinking = "inherit"
+        m._sampler_reset = False
+        m._reconcile = None
+        return m
+
+    def test_thinking_tri_state_cycle_and_env_per_state(self, tmp_path):
+        """#1014 L3: [t] cycles inherit → on → off → inherit; each state injects
+        exactly its env (inherit → NOTHING, on/off → EXPLICIT true/false per the
+        #1010 lesson), and the commit-composed cmd prepends it before switch.sh."""
+        from club3090_cockpit.app import ConfirmActionScreen
+
+        m = self._thinking_modal(tmp_path=tmp_path)
+        assert ConfirmActionScreen._THINKING_CYCLE == ("inherit", "on", "off")
+        assert m.check_action("cycle_thinking", ()) is True
+        assert m.check_action("reset_sampler", ()) is False   # inherit ≠ resolved-on
+
+        # inherit → no env at all (entrypoint's ENABLE_THINKING=false default)
+        assert m._thinking_env_pairs() == []
+
+        m.action_cycle_thinking()                              # → on
+        assert m._thinking == "on"
+        assert m._thinking_env_pairs() == ["ENABLE_THINKING=true"]
+        assert m.check_action("reset_sampler", ()) is True     # resolved-on offers [r]
+        cmd = m._with_act8_env(m._plan.cmd, m._thinking_env_pairs())
+        assert cmd[:3] == ["env", "ENABLE_THINKING=true", "bash"], cmd
+
+        m.action_cycle_thinking()                              # → off
+        assert m._thinking == "off" and m._sampler_reset is False
+        assert m._thinking_env_pairs() == ["ENABLE_THINKING=false"]
+        cmd2 = m._with_act8_env(m._plan.cmd, m._thinking_env_pairs())
+        assert cmd2[:3] == ["env", "ENABLE_THINKING=false", "bash"]
+
+        m.action_cycle_thinking()                              # → inherit
+        assert m._thinking == "inherit" and m._thinking_env_pairs() == []
+
+    def test_thinking_card_shows_resolved_sampler_row_when_on(self, tmp_path):
+        """#1014 L3: while the resolved mode is thinking, the card shows the
+        registry 'thinking' row (temp/top_p/presence) near the toggle; inherit
+        shows no sampler row; force-off pins the instruct row explicitly."""
+        m = self._thinking_modal(tmp_path=tmp_path)
+        inherit_lines = m._thinking_card_lines()
+        assert any("inherit" in ln and "[t]" in ln for ln in inherit_lines)
+        assert not any("temp" in ln for ln in inherit_lines)
+
+        m.action_cycle_thinking()   # → on
+        on_lines = "\n".join(m._thinking_card_lines())
+        assert "FORCE-ON" in on_lines and "ENABLE_THINKING=true" in on_lines
+        assert "temp 1 · top_p 0.95 · presence 0" in on_lines, on_lines
+        assert "model card" in on_lines and "[r] reset to card defaults" in on_lines
+
+        m.action_cycle_thinking()   # → off
+        off_lines = "\n".join(m._thinking_card_lines())
+        assert "FORCE-OFF" in off_lines and "ENABLE_THINKING=false" in off_lines
+
+    def test_thinking_no_toggle_without_profile_or_off_start(self, tmp_path):
+        """#1014 L3: slugs WITHOUT sampler_profiles render NO toggle (unchanged
+        behaviour); a profile slug in STOP mode offers no launch knob either.
+        Env stays empty even if the internal state were somehow left non-inherit."""
+        bare = self._thinking_modal(profiles=None, tmp_path=tmp_path)
+        assert bare._thinking_capable() is False
+        assert bare.check_action("cycle_thinking", ()) is False
+        assert bare.check_action("reset_sampler", ()) is False
+        bare.action_cycle_thinking()          # must be a no-op
+        assert bare._thinking == "inherit"
+        assert bare._thinking_env_pairs() == []
+        assert bare._sampler_overrides() == {}
+        assert bare._thinking_card_lines() == []
+
+        stop = self._thinking_modal(mode="stop", tmp_path=tmp_path)
+        assert stop._thinking_capable() is False
+        assert stop.check_action("cycle_thinking", ()) is False
+        assert stop._thinking_env_pairs() == []
+
+        # legacy (non-serve) modal never offers the thinking keys
+        legacy = ConfirmActionScreen.__new__(ConfirmActionScreen)
+        legacy._serve_ctx = None
+        legacy._reconcile = None
+        legacy._plan = None
+        legacy._thinking_capable = lambda: False
+        legacy._thinking_resolved_on = lambda: False
+        assert legacy.check_action("toggle_act8", ()) is False
+
+    def test_thinking_reset_to_card_defaults_clears_overrides(
+        self, tmp_path, monkeypatch
+    ):
+        """#1014 L3: inherited shell TEMP/TOP_P/PRESENCE overrides beat the card
+        rows (`:=` only fills unset/null); [r] pins them EMPTY for this launch —
+        compose passes '' through and the entrypoint treats empty as null, so
+        the card row applies.  With nothing inherited, [r] injects nothing."""
+        monkeypatch.setenv("TEMP", "0.33")
+        monkeypatch.setenv("PRESENCE_PENALTY", "0.9")
+        monkeypatch.delenv("TOP_P", raising=False)
+        monkeypatch.delenv("TOP_K", raising=False)
+        monkeypatch.delenv("TEMPERATURE", raising=False)
+        m = self._thinking_modal(tmp_path=tmp_path)
+        m.action_cycle_thinking()   # → on
+
+        ovr = m._sampler_overrides()
+        assert ovr == {"TEMP": "0.33", "PRESENCE_PENALTY": "0.9"}, ovr
+        warn = "\n".join(m._thinking_card_lines())
+        assert "shell overrides beat the card row" in warn and "TEMP=0.33" in warn
+
+        m.action_reset_sampler()
+        assert m._sampler_reset is True
+        assert sorted(m._sampler_reset_pairs()) == [
+            "PRESENCE_PENALTY=", "TEMP="
+        ], m._sampler_reset_pairs()
+        clear = "\n".join(m._thinking_card_lines())
+        assert "card defaults apply" in clear and "inherited overrides cleared" in clear
+
+        # cycling away from ON disarms both the reset and its pairs
+        m.action_cycle_thinking()   # → off
+        assert m._sampler_reset is False and m._sampler_reset_pairs() == []
+
+        # nothing inherited → reset armed but emits NO pairs (no noise)
+        monkeypatch.delenv("TEMP", raising=False)
+        monkeypatch.delenv("PRESENCE_PENALTY", raising=False)
+        clean = self._thinking_modal(tmp_path=tmp_path)
+        clean.action_cycle_thinking()
+        clean.action_reset_sampler()
+        assert clean._sampler_reset is True and clean._sampler_reset_pairs() == []
+
+    def test_thinking_persist_writes_pin_and_upserts(self, tmp_path):
+        """#1014 follow-up: [T] persists the CURRENT choice as
+        CLUB3090_THINKING_<MODEL> in <repo>/.env through the --set-default
+        write semantics (upsert — any existing assignment for the key, with or
+        without an `export` prefix, is replaced; every other line survives),
+        and the card's persisted line reads the value back."""
+        m = self._thinking_modal(tmp_path=tmp_path)
+        (tmp_path / ".env").write_text("FOO=bar\nKEEP=1\n", encoding="utf-8")
+        assert m.check_action("persist_thinking", ()) is False   # inherit: nothing to save
+        m.action_cycle_thinking()                                # → on
+        assert m.check_action("persist_thinking", ()) is True
+        m.action_persist_thinking()
+        text = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "FOO=bar\n" in text and "KEEP=1\n" in text
+        assert "CLUB3090_THINKING_QWEN3_8_27B=on\n" in text, text
+        assert "persisted default: on (CLUB3090_THINKING_QWEN3_8_27B)" \
+            in "\n".join(m._thinking_card_lines())
+
+        # Re-persist at a different state → upsert, never duplicate lines.
+        m.action_cycle_thinking()                                # → off
+        m.action_persist_thinking()
+        text = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert text.count("CLUB3090_THINKING_QWEN3_8_27B=") == 1
+        assert "CLUB3090_THINKING_QWEN3_8_27B=off\n" in text, text
+
+        # An `export `-prefixed pin (switch.sh loader tolerance) is replaced too.
+        (tmp_path / ".env").write_text(
+            "export CLUB3090_THINKING_QWEN3_8_27B=on\nKEEP=1\n", encoding="utf-8"
+        )
+        m.action_persist_thinking()                              # still off
+        text = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "export CLUB3090_THINKING" not in text
+        assert "CLUB3090_THINKING_QWEN3_8_27B=off" in text and "KEEP=1" in text
+
+    def test_thinking_persist_inherit_neither_writes_nor_removes(self, tmp_path):
+        """#1014 follow-up acceptance: at inherit the persist action writes
+        nothing AND removes nothing — .env stays byte-identical."""
+        m = self._thinking_modal(tmp_path=tmp_path)
+        envf = tmp_path / ".env"
+        envf.write_text("export CLUB3090_THINKING_QWEN3_8_27B=on\nKEEP=1\n", encoding="utf-8")
+        before = envf.read_text(encoding="utf-8")
+        assert m._thinking == "inherit"
+        assert m.check_action("persist_thinking", ()) is False
+        m.action_persist_thinking()          # gated no-op
+        assert envf.read_text(encoding="utf-8") == before
+
+    def test_thinking_persist_gates_and_card_surfaces_pin(self, tmp_path):
+        """[T] is offered only where [t] is AND a choice exists (start + profile
+        + non-inherit); the card shows the persisted value when .env is
+        readable ('none' when absent) and degrades silently when it is not."""
+        bare = self._thinking_modal(profiles=None, tmp_path=tmp_path)
+        assert bare.check_action("persist_thinking", ()) is False
+        stop = self._thinking_modal(mode="stop", tmp_path=tmp_path)
+        assert stop.check_action("persist_thinking", ()) is False
+
+        m = self._thinking_modal(tmp_path=tmp_path)
+        lines = "\n".join(m._thinking_card_lines())
+        assert "persisted default: none (CLUB3090_THINKING_QWEN3_8_27B)" in lines
+        (tmp_path / ".env").write_text(
+            "CLUB3090_THINKING_QWEN3_8_27B=on\n", encoding="utf-8"
+        )
+        assert "persisted default: on (CLUB3090_THINKING_QWEN3_8_27B)" \
+            in "\n".join(m._thinking_card_lines())
+
+        # Unreadable/absent repo root → treated as none; persist is a safe no-op.
+        noroot = self._thinking_modal()
+        assert noroot._thinking_persisted() == ""
+        noroot.action_cycle_thinking()
+        noroot.action_persist_thinking()     # must not raise, must not write
+        # The legacy (non-serve) modal never offers the persist key either.
+        from club3090_cockpit.app import ConfirmActionScreen
+
+        legacy = ConfirmActionScreen.__new__(ConfirmActionScreen)
+        legacy._serve_ctx = None
+        legacy._reconcile = None
+        legacy._plan = None
+        assert legacy.check_action("persist_thinking", ()) is False
+
+    def test_thinking_row_plumbs_through_emit_contract(self):
+        """The L2 registry data reaches the modal through the REAL emit contract:
+        qwen38-27b vLLM slugs carry a numeric thinking row; single-row models
+        emit null.  Skips cleanly when the emitter isn't present."""
+        import subprocess
+        from pathlib import Path
+
+        from club3090_cockpit.services import _variant_row_from_dict
+
+        emitter = (
+            Path(__file__).resolve().parents[3] / "scripts" / "lib" / "registry-emit.sh"
+        )
+        if not emitter.exists():
+            pytest.skip("registry-emit.sh not present")
+        proc = subprocess.run(
+            ["bash", str(emitter), "--json"], capture_output=True, text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr[-500:]
+        payload = json.loads(proc.stdout)
+        by_slug = {d["slug"]: _variant_row_from_dict(d) for d in payload["variants"]}
+        prof = getattr(by_slug["vllm/qwen38-27b-dual-max"], "sampler_profiles")
+        assert isinstance(prof, dict) and "thinking" in prof
+        trow = prof["thinking"]
+        for k in ("temperature", "top_p", "presence_penalty"):
+            assert isinstance(trow.get(k), (int, float)), (k, trow)
+        bare = getattr(by_slug["vllm/minimal"], "sampler_profiles")
+        assert bare is None
 
     @pytest.mark.asyncio
     async def test_benchmarks_tab_is_gone(self):
@@ -1802,6 +2160,148 @@ class TestCatalogWired:
             assert isinstance(app.screen, ExplainScreen)
 
 
+class TestRigPerfColumns:
+    """c3 — the TPS (rig) / 8pk (rig) columns render THIS RIG's own measured
+    numbers with the shipped baseline demoted to a dim reference tail, and the
+    ⏵ run bench nudge when the rig hasn't measured the slug."""
+
+    # -- pure cell-render rules (no app boot) -------------------------------
+
+    @staticmethod
+    def _entry(lm, bar):
+        from types import SimpleNamespace
+        return SimpleNamespace(local_measurement=lm, measurement=bar)
+
+    def test_rig_numbers_with_dim_baseline_reference(self):
+        """Rule 1 — a rig record with TPS + 8pk renders '<n> ▸ rig' with the
+        shipped baseline as a dim '(<bar> base)' tail in BOTH columns."""
+        from club3090_cockpit.app import _rig_tps_cell, _rig_8pk_cell
+        from club3090_cockpit.data import LocalMeasured, Measurement
+
+        e = self._entry(
+            LocalMeasured(narr_tps=72.3, code_tps=120.0, quality_8pk="100/150"),
+            Measurement(narr_tps=174.0, code_tps=42.0, quality_8pk="109/150",
+                        source="baseline"),
+        )
+        assert _rig_tps_cell(e) == "72/120 ▸ rig [dim](174/42 base)[/dim]"
+        assert _rig_8pk_cell(e) == "100/150 ▸ rig [dim](109/150 base)[/dim]"
+
+    def test_no_rig_record_renders_run_bench_nudge(self):
+        """Rule 3 — baseline-only rows keep the nudge render; the shipped
+        baseline NEVER masquerades as a column number."""
+        from club3090_cockpit.app import _rig_tps_cell, _rig_8pk_cell
+        from club3090_cockpit.data import Measurement
+
+        e = self._entry(
+            None,
+            Measurement(narr_tps=174.0, code_tps=42.0, quality_8pk="109/150",
+                        source="baseline"),
+        )
+        assert _rig_tps_cell(e) == "[dim]⏵ run bench[/dim]"
+        assert _rig_8pk_cell(e) == "[dim]⏵ run bench[/dim]"
+
+    def test_tps_only_rig_record_leaves_honest_8pk_dash(self):
+        """A bench without the quality battery: rig TPS renders, 8pk stays '—'."""
+        from club3090_cockpit.app import _rig_tps_cell, _rig_8pk_cell
+        from club3090_cockpit.data import LocalMeasured, Measurement
+
+        e = self._entry(
+            LocalMeasured(decode_tps=88.0),
+            Measurement(narr_tps=174.0, code_tps=42.0, quality_8pk="109/150",
+                        source="baseline"),
+        )
+        assert _rig_tps_cell(e) == "—/88 ▸ rig [dim](174/42 base)[/dim]"
+        assert _rig_8pk_cell(e) == "[dim]—[/dim]"
+
+    def test_quality_only_rig_record_nudges_tps(self):
+        """A quality-only record has no rig TPS → the TPS cell nudges, 8pk
+        renders the rig pack."""
+        from club3090_cockpit.app import _rig_tps_cell, _rig_8pk_cell
+        from club3090_cockpit.data import LocalMeasured, Measurement
+
+        e = self._entry(
+            LocalMeasured(quality_8pk="95/150"),
+            Measurement(narr_tps=174.0, code_tps=42.0, quality_8pk="109/150",
+                        source="baseline"),
+        )
+        assert _rig_tps_cell(e) == "[dim]⏵ run bench[/dim]"
+        assert _rig_8pk_cell(e) == "95/150 ▸ rig [dim](109/150 base)[/dim]"
+
+    def test_submission_bar_is_never_labelled_base(self):
+        """The dim 'base' reference is the SHIPPED baseline only — a cross-rig
+        submission (source 'submission') must not be presented as 'base'."""
+        from club3090_cockpit.app import _rig_tps_cell
+        from club3090_cockpit.data import LocalMeasured, Measurement
+
+        e = self._entry(
+            LocalMeasured(narr_tps=72.0, code_tps=120.0),
+            Measurement(narr_tps=200.0, code_tps=60.0, source="submission",
+                        submission_rig="@elsewhere"),
+        )
+        cell = _rig_tps_cell(e)
+        assert cell == "72/120 ▸ rig"
+        assert "base" not in cell
+
+    # -- wired render (full app, seeded corpus) -----------------------------
+        assert cell == "72/120 ▸ rig"
+    @pytest.mark.asyncio
+    async def test_catalog_row_renders_rig_numbers_over_base(self, tmp_path):
+        """End-to-end: a seeded corpus record flips vllm/dual's row to the rig
+        numbers over the dim baseline reference; the unmeasured ik row keeps
+        the ⏵ run bench nudge and never shows '▸ rig'."""
+        recdir = tmp_path / "results" / "measurement-records"
+        recdir.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "_tag": "vllm/dual",
+            "_recorded_at": "2026-08-01T10:00:00Z",
+            "result_class": "bench-measured",
+            "measured_extensions": {
+                "decode_tps_by_ctx": {"canonical-short": 120.0},
+                "quality_8pk": "100/150",
+            },
+        }
+        (recdir / "dual.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        app, _, _ = make_app(repo_root=tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            tbl = app.query_one("#catalog-table", DataTable)
+            rows = [" ".join(str(c) for c in tbl.get_row_at(r)) for r in range(tbl.row_count)]
+            dual_row = next(r for r in rows if "vllm/dual" in r)
+            ik_row = next(r for r in rows if "iq4ks-mtp" in r)
+            # Rig numbers + the dim shipped-baseline reference, same cell.
+            assert "—/120 ▸ rig [dim](174/42 base)[/dim]" in dual_row
+            assert "100/150 ▸ rig [dim](109/150 base)[/dim]" in dual_row
+            # Unmeasured slug: nudge only, no rig marker, no baseline leak.
+            assert "⏵ run bench" in ik_row
+            assert "▸ rig" not in ik_row
+            assert "60/72" not in ik_row
+            status = str(app.query_one("#catalog-status", Label).render())
+            assert "⏵ run bench = not measured on this rig" in status
+
+    @pytest.mark.asyncio
+    async def test_catalog_rig_cells_render_visibly(self, tmp_path):
+        """The rig-over-base cell renders VISIBLY on screen (DataTable clips
+        multi-line cells at row height 1, so the reference must ride the same
+        line): the compositor's visible text carries both the rig number and
+        the dim base reference."""
+        recdir = tmp_path / "results" / "measurement-records"
+        recdir.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "_tag": "vllm/dual",
+            "_recorded_at": "2026-08-01T10:00:00Z",
+            "result_class": "bench-measured",
+            "measured_extensions": {"decode_tps_by_ctx": {"canonical-short": 120.0}},
+        }
+        (recdir / "dual.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        app, _, _ = make_app(repo_root=tmp_path)
+        async with app.run_test(size=(160, 44)) as pilot:
+            await _settle(pilot)
+            strips = app.screen._compositor.render_strips()
+            text = "\n".join(s.text for s in strips)
+            assert "▸ rig" in text
+            assert "174/42 base" in text
+
+
 # ===========================================================================
 # Bring-an-arbitrary-repo fit-check — 2-mode merge removed the standalone Run · BYO
 # tab; the producer lane's ① Bring (LaneBringPane) is now the SINGLE entry point.
@@ -2505,6 +3005,55 @@ async def test_scene_preview_shows_all_services_no_clip():
         # the #scene-preview rule carries no max-height cap (box auto-grows to fit)
         preview_rule = OperateOrchPane.DEFAULT_CSS.split("#scene-preview")[1].split("}")[0]
         assert "max-height" not in preview_rule
+
+
+class TestRailKvPool:
+    """c3 — the estate rail card shows the serving target's KV pool from the
+    SAME poll (doctor.kv_pool_pct, parsed by health.sh), honestly '—' when the
+    poll couldn't read it.  The per-GPU VRAM bars above it stay untouched."""
+
+    @staticmethod
+    def _state(kv_pct):
+        from club3090_cockpit.data import DoctorRead
+        return EstateState(
+            gpus=[GpuInfo(index=0, mem_used_mib=12 * 1024, mem_total_mib=24 * 1024)],
+            doctor=DoctorRead(reachable=True, serving=True, kv_pool_pct=kv_pct,
+                              summary="serving" if kv_pct is not None else "reachable"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_rail_shows_kv_pool_when_reported(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            rail = app.query_one("#rail-status", RailStatus)
+            rail.update_from_state(self._state(34), as_of="")
+            txt = str(rail.render())
+            assert "kv pool 34%" in txt
+            # The VRAM bars still render above it.
+            assert "GPU0 12/24G" in txt
+
+    @pytest.mark.asyncio
+    async def test_rail_kv_pool_dash_when_unknown(self):
+        """No KV read in the poll (engine down / non-vLLM / no log line) → an
+        honest '—', never a fabricated percentage."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            rail = app.query_one("#rail-status", RailStatus)
+            rail.update_from_state(self._state(None), as_of="")
+            assert "kv pool —" in str(rail.render())
+
+    @pytest.mark.asyncio
+    async def test_rail_kv_pool_flows_from_estate_poll(self):
+        """The wired path: HEALTH_SERVING's KV line parsed into doctor.kv_pool_pct
+        reaches the rail through load_estate → update_from_state."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            txt = str(app.query_one("#rail-status", RailStatus).render())
+            # HEALTH_SERVING carries "KV pool 61%" → the rail shows it.
+            assert "kv pool 61%" in txt
 
 
 @pytest.mark.asyncio
@@ -4783,6 +5332,7 @@ class TestValidateNoLiveWriteOrNetwork:
 
 from club3090_cockpit.app import (  # noqa: E402
     PromoteScaffoldScreen,
+    ExportPrBundleScreen,
     OptimizeScreen,
     UntestedComposePreviewScreen,
     LaneBringPane,
@@ -4926,9 +5476,12 @@ class TestPromoteHookWired:
             assert isinstance(app.screen, PromoteScaffoldScreen)
             body = str(app.screen.query_one("#promote-body", Static).render())
             assert "schema_version: 1" in body
-            assert "_entry(" in body
+            # C4-rev: the LOCAL layer is the default target — the preview shows
+            # the registry.local.json JSON payload (not a core _entry row).
+            assert "local/" in body
+            assert "registry.local.json" in body
             assert "incubating" in body
-            assert "scripts/tests/*.sh" in body   # the gated guard suite
+            assert "scripts/tests/*.sh" in body   # authoritative-before-commit note
 
     @pytest.mark.asyncio
     async def test_promote_stage_write_is_gated_mock_only(self):
@@ -4946,12 +5499,28 @@ class TestPromoteHookWired:
             await pilot.press("P")
             await pilot.pause()
             assert isinstance(app.screen, PromoteScaffoldScreen)
+            # C4-rev gating: display_name + family are REQUIRED inline edits —
+            # staging stays disabled (and inert) until both are real values.
+            assert app.screen.query_one("#promote-stage-btn", Button).disabled is True
+            app.screen.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            app.screen.on_input_changed(None)
+            assert app.screen.query_one("#promote-stage-btn", Button).disabled is True
+            app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            app.screen.on_input_changed(None)
+            assert app.screen.query_one("#promote-stage-btn", Button).disabled is False
             # Stage the gated write — routes through ConfirmActionScreen.
             app.screen.query_one("#promote-stage-btn", Button).press()
             await pilot.pause()
             assert isinstance(app.screen, ConfirmActionScreen)
             assert app.screen._plan.kind == "promote_catalog"
             assert app.screen._plan.requires_confirm is True
+            # C4-rev: layer default LOCAL + the spec rides in the child env.
+            assert "--layer local" in " ".join(app.screen._plan.cmd)
+            assert "C3_PROMOTE_SPEC" in (app.screen._plan.env or {})
+            _spec = json.loads(app.screen._plan.env["C3_PROMOTE_SPEC"])
+            assert _spec["display_name"] == "Qwen3 27B Abliterated"
+            assert _spec["family"] == "qwen3-dense"
+            assert _spec["registry_entry"]["slug"].startswith("local/")
             # Nothing executed yet — the write is mock-only and never auto-fired.
             assert wr.started == []
 
@@ -4969,7 +5538,195 @@ class TestPromoteHookWired:
             app.dispatch_action(sc.write_plan)
             await _settle(pilot)
             assert len(wr.started) == 1
-            assert "scripts/tests/*.sh" in " ".join(wr.started[0]["cmd"])
+            joined = " ".join(wr.started[0]["cmd"])
+            # C4-rev: the dispatched plan IS the layered write chain.
+            assert "promote.py" in joined and "--layer local" in joined
+            assert "preflight-add-model.sh" in joined
+
+    @pytest.mark.asyncio
+    async def test_promote_core_action_is_env_gated(self, monkeypatch):
+        """C4-rev: the WRITE CORE REGISTRY secondary action asserts the
+        maintainer gate IN THE SCREEN — without C3_ALLOW_CORE_PROMOTE=1 it
+        refuses (stays on the scaffold, notifies, stages nothing); with it, the
+        plan is built for the CORE layer and still routes through confirm."""
+        monkeypatch.delenv("C3_ALLOW_CORE_PROMOTE", raising=False)
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            assert isinstance(app.screen, PromoteScaffoldScreen)
+            app.screen.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            app.screen.on_input_changed(None)
+            # WITHOUT the flag: refused in-screen, nothing staged.
+            app.screen._stage_write(layer="core")
+            await pilot.pause()
+            assert isinstance(app.screen, PromoteScaffoldScreen)   # still open
+            assert wr.started == []
+            # WITH the flag: the core plan builds (promote.py re-asserts too).
+            monkeypatch.setenv("C3_ALLOW_CORE_PROMOTE", "1")
+            app.screen._stage_write(layer="core")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert "--layer core" in " ".join(app.screen._plan.cmd)
+            assert wr.started == []          # confirm gate not yet passed
+
+    @pytest.mark.asyncio
+    async def test_export_pr_binding_is_local_only_and_confirm_gated(self):
+        """[E] Export PR bundle — the community-loop completion.  The binding
+        is declared on the LOCAL-layer scaffold, context-gated OFF for CORE
+        (a core scaffold already IS core content), and the staged plan routes
+        through the standard confirm gate without ever auto-firing."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            sc = app.screen
+            assert isinstance(sc, PromoteScaffoldScreen)
+            # The [E] binding is advertised.
+            assert sc.check_action("export_pr", ()) is True
+            assert any(
+                b.action == "export_pr" for b in sc.BINDINGS
+            ), "the [E] binding must be declared on the scaffold"
+            # A CORE-layer scaffold is NOT exportable (it already IS core
+            # content) — the gate is contextual, not global.
+            sc._scaffold.layer = "core"
+            assert sc.check_action("export_pr", ()) is False
+
+    @pytest.mark.asyncio
+    async def test_export_opens_confirm_gate_with_spec_env(self):
+        """Pressing [E] pops the scaffold and opens the confirm gate over the
+        export_pr plan: export_pr.py + --spec-env C3_EXPORT_SPEC carrying the
+        edited spec; nothing executes until confirmed."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            sc = app.screen
+            sc.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            sc.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            sc.on_input_changed(None)
+            # off the inputs.
+            sc.action_export_pr()
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            plan = app.screen._plan
+            assert plan.kind == "export_pr"
+            assert plan.requires_confirm is True
+            assert plan.requires_reconcile is False
+            joined = " ".join(plan.cmd)
+            assert "export_pr.py" in joined
+            assert "--spec-env" in joined and "C3_EXPORT_SPEC" in joined
+            spec = json.loads((plan.env or {})["C3_EXPORT_SPEC"])
+            assert spec["display_name"] == "Qwen3 27B Abliterated"
+            assert spec["family"] == "qwen3-dense"
+            # Nothing executed yet — the write is mock-only, never auto-fired.
+            assert wr.started == []
+
+
+class TestExportPrBundle:
+    """Community-loop completion — [E] Export-as-PR-bundle on the Promote
+    scaffold: context-gated to LOCAL-layer entries, confirm-gated, and run
+    through the write-runner seam ONLY (never a live spawn)."""
+
+    @pytest.mark.asyncio
+    async def test_export_binding_is_context_gated_to_local_layer(self):
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            sc = app.screen
+            assert isinstance(sc, PromoteScaffoldScreen)
+            # The default scaffold targets the LOCAL layer → exportable, and
+            # the [E] binding is advertised.
+            assert sc.check_action("export_pr", ()) is True
+            assert any(
+                b.action == "export_pr" for b in sc.BINDINGS
+            ), "the [E] binding must be declared on the scaffold"
+            # A CORE-layer scaffold is NOT exportable (it already IS core
+            # content) — the gate is contextual, not global.
+            sc._scaffold.layer = "core"
+            assert sc.check_action("export_pr", ()) is False
+
+    @pytest.mark.asyncio
+    async def test_export_opens_confirm_gate_with_spec_env(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            sc = app.screen
+            assert isinstance(sc, PromoteScaffoldScreen)
+            sc.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            sc.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            sc.on_input_changed(None)
+            # The binding's action — same path pressing E takes once focus is
+            # off the inputs.
+            sc.action_export_pr()
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            plan = app.screen._plan
+            assert plan.kind == "export_pr"
+            assert plan.requires_confirm is True
+            assert plan.requires_reconcile is False
+            joined = " ".join(plan.cmd)
+            assert "export_pr.py" in joined
+            assert "--spec-env" in joined and "C3_EXPORT_SPEC" in joined
+            spec = json.loads((plan.env or {})["C3_EXPORT_SPEC"])
+            assert spec["display_name"] == "Qwen3 27B Abliterated"
+            # Confirm gate not passed — nothing has been written or spawned.
+            assert wr.started == []
+
+    @pytest.mark.asyncio
+    async def test_export_dispatch_reaches_only_mock_runner_and_shows_bundle(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.export_pr_plan({"model_id": "my-model"},
+                                            out_dir="/tmp/pr-bundle-test")
+            # The confirmed commit path (ConfirmActionScreen on_confirm).
+            app.run_export_pr_launch(plan)
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            started = wr.started[0]
+            assert started["run_type"] == "export_pr"
+            assert "export_pr.py" in " ".join(started["cmd"])
+            assert "--out" in started["cmd"]
+            # The copyable bundle-location modal shows the output dir.
+            assert isinstance(app.screen, ExportPrBundleScreen)
+            assert "/tmp/pr-bundle-test" in str(app.screen._out_dir)
+            payload = app.screen.copyable_text()
+            assert "/tmp/pr-bundle-test" in payload
+            assert "compose_registry.patch" in payload
 
 
 # ===========================================================================
@@ -5277,21 +6034,93 @@ class TestLaneHelpSurfaceThreadedR3b1:
             assert app.screen._surface == "producer"
 
 
-class TestOptimizeHookWired:
-    """Hook 3 — ▸ Optimize for my card: DORMANT v0.10.0 seam (no-op)."""
+class TestOptimizeBrain:
+    """Hook 3 — ▸ Optimize for my card: the kv-calc brain (P4).
+
+    The modal renders REAL canned kv-calc output (FIT_JSON + one
+    --solve-max-ctx pricing per legal dtype); Apply stages the SAME gated
+    switch.sh serve with the overrides riding plan.env.  Failures render an
+    honest error card; kvcalc_key=SKIP engines get an explicit message."""
+
+    async def _open_optimize(self, pilot, app, row: int = 0) -> None:
+        app.query_one("#catalog-table", DataTable).move_cursor(row=row)
+        await pilot.press("O")          # ▸ Optimize for my card
+        await _settle(pilot)
 
     @pytest.mark.asyncio
-    async def test_optimize_shows_not_available_message(self):
-        app, _, _ = make_app()
+    async def test_optimize_renders_recommendations_and_options(self):
+        app, runner, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
-            # From Run · Catalog with a selected slug.
-            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
-            await pilot.press("O")          # ▸ Optimize for my card
-            await _settle(pilot)
+            await self._open_optimize(pilot, app)
             assert isinstance(app.screen, OptimizeScreen)
             body = str(app.screen.query_one("#optimize-body", Static).render())
-            assert "optimizer not available (v0.10.0)" in body
+            assert "Recommended max-model-len" in body
+            assert "262,144" in body                       # FIT_JSON max_ctx
+            assert "19.9G" in body and "1.5G" in body      # est ± band
+            assert "KV dtype options (hardware-legal)" in body
+            for fmt in ("bf16", "fp16", "fp8_e5m2", "int8_per_token_head"):
+                assert fmt in body                         # SOLVE_JSON-priced rows
+            sel = app.screen.query_one("#optimize-kv", Select)
+            btn = app.screen.query_one("#optimize-apply", Button)
+            assert sel.disabled is False and btn.disabled is False
+            # Interface: exactly ONE --fit + N --solve-max-ctx via the Runner seam.
+            fit_calls = [c for c in runner.calls if "--fit " in " ".join(c)]
+            solve_calls = [c for c in runner.calls if "--solve-max-ctx" in c]
+            assert len(fit_calls) == 1 and len(solve_calls) >= 4
+
+    @pytest.mark.asyncio
+    async def test_apply_stages_gated_serve_with_env_overrides(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await self._open_optimize(pilot, app)
+            await pilot.click("#optimize-apply")
+            await pilot.pause()
+            # The APPLY action opens the STANDARD confirm gate (advisory rec,
+            # user confirms) — nothing has fired yet.
+            assert isinstance(app.screen, ConfirmActionScreen)
+            plan = app.screen._plan
+            assert plan.kind == "serve"
+            assert plan.cmd == ["bash", "scripts/switch.sh", "vllm/dual"]
+            assert plan.env["MAX_MODEL_LEN"] == "262144"
+            assert plan.env["KV_CACHE_DTYPE"] in (
+                "bf16", "fp16", "fp8_e5m2", "int8_per_token_head")
+            assert plan.requires_confirm is True and plan.requires_reconcile is True
+            wr_started = wr.started
+            assert wr_started == []
+
+    @pytest.mark.asyncio
+    async def test_kvcalc_failure_shows_error_card_no_numbers(self):
+        responses = {
+            k: v for k, v in fake_responses().items() if not k.startswith("kv-calc")
+        }
+        app, runner, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await self._open_optimize(pilot, app)
+            assert isinstance(app.screen, OptimizeScreen)
+            body = str(app.screen.query_one("#optimize-body", Static).render())
+            assert "kv-calc failed" in body                 # honest error card
+            assert "Recommended max-model-len" not in body  # no fabricated numbers
+            assert app.screen.query_one("#optimize-apply", Button).disabled is True
+
+    @pytest.mark.asyncio
+    async def test_skip_engine_gets_explicit_unsupported_message(self):
+        app, runner, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Row 1 = ik-llama/iq4ks-mtp (kvcalc_key SKIP) in REGISTRY_JSON.
+            await self._open_optimize(pilot, app, row=1)
+            assert isinstance(app.screen, OptimizeScreen)
+            body = str(app.screen.query_one("#optimize-body", Static).render())
+            assert "kvcalc_key=SKIP" in body
+            assert "Recommended max-model-len" not in body
+            assert app.screen.query_one("#optimize-apply", Button).disabled is True
+            # The SKIP check short-circuits BEFORE any kv-calc call.
+            assert all("kv-calc.py" not in " ".join(c) for c in runner.calls
+                       if "--fit " in " ".join(c))
 
     @pytest.mark.asyncio
     async def test_optimize_is_a_noop_no_write(self):
@@ -5299,10 +6128,8 @@ class TestOptimizeHookWired:
         app, _, _ = make_app(write_runner=wr)
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
-            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
-            await pilot.press("O")
-            await _settle(pilot)
-            # A no-op seam: a modal, but never a write / launch.
+            await self._open_optimize(pilot, app)
+            # Browsing recommendations never writes / launches.
             assert isinstance(app.screen, OptimizeScreen)
             assert wr.started == []
 
@@ -5324,7 +6151,7 @@ class TestOptimizeHookWired:
             await _settle(pilot)
             assert isinstance(app.screen, OptimizeScreen)
             body = str(app.screen.query_one("#optimize-body", Static).render())
-            assert "v0.10.0" in body
+            assert "Recommended max-model-len" in body
 
 
 class TestPhase5NoLiveEffect:
@@ -5745,6 +6572,113 @@ class TestModalKeyCapture:
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, OptimizeScreen)
+
+
+class TestAccidentalQGuard:
+    """Accidental-q protection: [q] quits instantly when IDLE (unchanged), but
+    while a download or serve/boot action is ACTIVE it routes through the same
+    ConfirmActionScreen gate every other verb uses — Confirm proceeds (exits),
+    Esc/Cancel stays."""
+
+    @staticmethod
+    def _dl_entry(slug="vllm/qwen-27b-dual-max"):
+        from club3090_cockpit.data import (
+            CatalogEntry,
+            WeightsMeta,
+            WEIGHTS_DOWNLOADING,
+            VariantRow,
+        )
+
+        e = CatalogEntry(row=VariantRow(
+            slug=slug, switch_engine="vllm", launch_engine="vllm", compose_dir="x",
+            file="mtp.yml", port=8013, model="qwen3.6-27b", engine="vllm-stable",
+            kvcalc_key="SKIP", container="c",
+            compose_path="models/qwen3.6-27b/vllm/compose/dual/fp8/mtp.yml",
+            status="experimental", ctx_label="262K", status_note=""))
+        e.weights_state = WEIGHTS_DOWNLOADING
+        e.download_pct = 37
+        e.weights = WeightsMeta(
+            model="qwen3.6-27b", variant="fp8", subdir="qwen3.6-27b-fp8",
+            hf_repo="Some/Repo", size_gb=29.0, verify_glob="*.safetensors")
+        return e
+
+    @pytest.mark.asyncio
+    async def test_idle_q_quits_instantly(self):
+        """Idle cockpit: [q] must quit immediately — no confirm modal."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await pilot.press("q")
+            await pilot.pause()
+            assert not isinstance(app.screen, ConfirmActionScreen)
+            assert not app.is_running, "idle q must quit instantly"
+
+    @pytest.mark.asyncio
+    async def test_active_download_q_shows_confirm_not_quit(self):
+        """An in-flight catalog download makes [q] open the confirm modal — the
+        app must NOT quit on the first press."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            e = self._dl_entry()
+            app._active_downloads()[e.slug] = {"entry": e, "meta": e.weights, "pct": 37}
+            assert app._work_in_flight()
+            await pilot.press("q")
+            await pilot.pause()
+            assert app.is_running, "active-download q must NOT quit outright"
+            assert isinstance(app.screen, ConfirmActionScreen)
+
+    @pytest.mark.asyncio
+    async def test_pending_serve_boot_q_shows_confirm_not_quit(self):
+        """A serve still booting (pending-serve watcher armed) gates [q] too."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app._pending_serve_slug = "vllm/dual"   # watcher armed mid-boot
+            assert app._work_in_flight()
+            await pilot.press("q")
+            await pilot.pause()
+            assert app.is_running, "mid-boot q must NOT quit outright"
+            assert isinstance(app.screen, ConfirmActionScreen)
+
+    @pytest.mark.asyncio
+    async def test_active_download_confirm_proceeds_and_exits(self):
+        """⏎ on the quit-confirm modal proceeds: the app exits — and NOTHING is
+        dispatched to the gated executor (the quit plan executes nothing)."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            e = self._dl_entry()
+            app._active_downloads()[e.slug] = {"entry": e, "meta": e.weights, "pct": 37}
+            await pilot.press("q")
+            await _settle(pilot)
+            assert isinstance(app.screen, ConfirmActionScreen)
+            # requires_reconcile=False → the gate reports clear immediately.
+            screen = app.screen
+            assert screen._reconcile is not None and screen._reconcile.safe
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not app.is_running, "confirmed quit must proceed"
+            assert wr.started == [], "quit must never dispatch a write"
+
+    @pytest.mark.asyncio
+    async def test_active_download_dismiss_stays_running(self):
+        """Esc on the quit-confirm modal dismisses it — the app stays up with the
+        download still tracked."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            e = self._dl_entry()
+            app._active_downloads()[e.slug] = {"entry": e, "meta": e.weights, "pct": 37}
+            await pilot.press("q")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, ConfirmActionScreen)
+            assert app.is_running, "dismissed quit must stay running"
+            assert e.slug in app._active_downloads()
 
 
 class TestSubtabCycling:
@@ -6377,6 +7311,507 @@ class TestContainerClampDoesNotAutoloadDrill:
                 ), f"a drill spuriously loaded for {other}: {runner.calls}"
 
 
+class TestContainerLogFollow:
+    """[f] log-follow (live tail) — spec docs/superpowers/specs/2026-08-16-c3-container-log-follow-design.md.
+
+    Ticks are driven by direct app._log_follow_tick() calls — no real 2s waits."""
+
+    class _StepLogsRunner(FakeRunner):
+        """docker logs responses step through a list of tails: first call gets
+        the first tail, every later call gets the last (steady state)."""
+
+        def __init__(self, tails):
+            super().__init__(fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)}))
+            self._tails = list(tails)
+
+        async def run(self, cmd, *, cwd, timeout=30.0):
+            joined = " ".join(cmd)
+            if "docker logs" in joined:
+                self.calls.append(list(cmd))
+                tail = self._tails.pop(0) if len(self._tails) > 1 else self._tails[0]
+                return ok(tail)
+            return await super().run(cmd, cwd=cwd, timeout=timeout)
+
+    async def test_follow_binding_gated_to_containers_tab(self):
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)  # lands on Orchestration
+            assert app.check_action("container_follow", ()) is False
+            app.query_one("#operate-tabs", TabbedContent).active = "tab-containers"
+            await pilot.pause()
+            assert app.check_action("container_follow", ()) is True
+
+    async def test_containers_hint_mentions_follow(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            hint = app.query_one("#containers-hint", Label)
+            assert "[f] follow" in hint.content
+
+    async def test_f_arms_follow(self):
+        responses = fake_responses(
+            **{"docker ps": ok(DOCKER_PS_ENGINE), "docker logs": ok("L1\nL2\nL3\n")}
+        )
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_armed is True
+            assert app._log_follow_paused is False
+            assert app._log_follow_timer is not None
+            assert app._log_follow_name == "vllm-qwen36-27b-dual"
+            title = app.query_one("#drill-logs", LivePane).query_one(".live-title", Label)
+            assert title.content == "Live  [green]●  following[/green]"
+
+    async def test_f_with_no_selection_warns_and_stays_off(self):
+        # Default responses: docker ps empty → no selectable running row.
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            await pilot.pause()
+            await pilot.press("f")
+            await pilot.pause()
+            assert app._log_follow_armed is False
+            assert app._log_follow_timer is None
+
+    async def test_f_pauses_follow(self):
+        responses = fake_responses(
+            **{"docker ps": ok(DOCKER_PS_ENGINE), "docker logs": ok("L1\nL2\nL3\n")}
+        )
+        app, runner, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_armed is True  # paused is NOT off
+            calls_before = len(runner.calls)
+            await pilot.press("f")
+            await pilot.pause()
+            assert app._log_follow_armed is True
+            assert app._log_follow_paused is True
+            assert app._log_follow_timer is None
+            # A tick while paused performs NO read.
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert len(runner.calls) == calls_before
+            title = app.query_one("#drill-logs", LivePane).query_one(".live-title", Label)
+            assert title.content == "Live  [yellow]…  paused[/yellow]"
+            # The 'follow paused' note is display-only — never in the [Y] tail.
+            pane = app.query_one("#drill-logs", LivePane)
+            assert "follow paused" not in pane.tail_text()
+
+    async def test_follow_disarms_on_operate_tab_leave(self):
+        responses = fake_responses(
+            **{"docker ps": ok(DOCKER_PS_ENGINE), "docker logs": ok("L1\nL2\nL3\n")}
+        )
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_armed is True
+            app.query_one("#operate-tabs", TabbedContent).active = "tab-orchestration"
+            await pilot.pause()
+            assert app._log_follow_armed is False
+            assert app._log_follow_paused is False
+            assert app._log_follow_timer is None
+            assert app._log_follow_anchor is None
+            title = app.query_one("#drill-logs", LivePane).query_one(".live-title", Label)
+            assert title.content == "Live"
+
+    async def test_follow_disarms_on_mode_switch(self):
+        responses = fake_responses(
+            **{"docker ps": ok(DOCKER_PS_ENGINE), "docker logs": ok("L1\nL2\nL3\n")}
+        )
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_armed is True
+            await pilot.press("2")  # Bring & Validate lane
+            await pilot.pause()
+            assert app._log_follow_armed is False
+            assert app._log_follow_timer is None
+
+    async def test_tick_appends_only_new_lines(self):
+        runner = TestContainerLogFollow._StepLogsRunner(["L1\nL2\nL3\n", "L1\nL2\nL3\nL4\nL5\n"])
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_anchor == "L3"  # snapshot rebased the anchor
+            calls_before = len(runner.calls)
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert len(runner.calls) == calls_before + 1  # exactly one docker-logs read
+            text = app.query_one("#drill-logs", LivePane).tail_text()
+            assert text.count("L4") == 1 and text.count("L5") == 1
+            assert "L1" in text  # snapshot lines kept — no resync
+
+    async def test_tick_quiet_log_appends_nothing(self):
+        runner = TestContainerLogFollow._StepLogsRunner(["L1\nL2\nL3\n"])
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            calls_before = len(runner.calls)
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert len(runner.calls) == calls_before + 1
+            text = app.query_one("#drill-logs", LivePane).tail_text()
+            assert text.count("L3") == 1  # nothing appended on the same tail
+
+    async def test_tick_anchor_missing_resyncs(self):
+        # The tail scrolled past 200 lines: the anchor line is gone → clear +
+        # full fresh tail in normal color (no duplicated tail content).
+        runner = TestContainerLogFollow._StepLogsRunner(["L1\nL2\nL3\n", "L4\nL5\nL6\n"])
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            app._log_follow_tick()
+            await _settle(pilot)
+            pane = app.query_one("#drill-logs", LivePane)
+            text = pane.tail_text()
+            assert "L1" not in text and "L2" not in text  # old tail cleared
+            assert text.count("L4") == 1 and text.count("L6") == 1  # fresh tail, once each
+            assert app._log_follow_anchor == "L6"
+
+    async def test_tick_tints_only_new_lines_and_copy_stays_clean(self):
+        runner = TestContainerLogFollow._StepLogsRunner(["L1\nL2\nL3\n", "L1\nL2\nL3\nL4\nL5\n"])
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            written: list[str] = []
+            log = app.query_one("#drill-logs", LivePane).query_one("#live-log", RichLog)
+            real_write = log.write
+
+            def spy(content, *a, **kw):
+                written.append(str(content))
+                return real_write(content, *a, **kw)
+
+            log.write = spy
+            app._log_follow_tick()
+            await _settle(pilot)
+            pane = app.query_one("#drill-logs", LivePane)
+            # Tinted markup on screen for the tick lines ONLY…
+            assert "[underline]L4[/underline]" in written and "[underline]L5[/underline]" in written
+            # …and the [Y]-copy tail is unmarked plain text either way.
+            text = pane.tail_text()
+            assert "[underline]" not in text and "L4" in text and "L5" in text
+
+    async def test_tick_underline_tracks_only_newest_batch(self):
+        # Moving highlight: when a 2nd tick arrives, the 1st tick's
+        # underlined lines drop back to plain and only the newest lines
+        # keep the underline (the pane is re-rendered from the model).
+        runner = TestContainerLogFollow._StepLogsRunner(
+            ["L1\nL2\nL3\n", "L1\nL2\nL3\nL4\nL5\n", "L1\nL2\nL3\nL4\nL5\nL6\nL7\n"]
+        )
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            written: list[str] = []
+            log = app.query_one("#drill-logs", LivePane).query_one("#live-log", RichLog)
+            real_write = log.write
+
+            def spy(content, *a, **kw):
+                written.append(str(content))
+                return real_write(content, *a, **kw)
+
+            log.write = spy
+            app._log_follow_tick()  # L4/L5 new
+            await _settle(pilot)
+            app._log_follow_tick()  # L6/L7 new — L4/L5 must lose the underline
+            await _settle(pilot)
+            # Each re-render starts with the command prompt — isolate the last.
+            starts = [i for i, w in enumerate(written) if "$ docker logs" in w]
+            assert len(starts) == 2, f"expected two re-renders, saw {len(starts)}"
+            last_batch = written[starts[-1] :]
+            assert "[underline]L6[/underline]" in last_batch
+            assert "[underline]L7[/underline]" in last_batch
+            assert "[underline]L4[/underline]" not in last_batch
+            assert "[underline]L5[/underline]" not in last_batch
+            assert "L4" in last_batch  # still on screen, plain now
+            # No content duplication from the re-renders.
+            text = app.query_one("#drill-logs", LivePane).tail_text()
+            for ln in ("L1", "L2", "L3", "L4", "L5", "L6", "L7"):
+                assert text.count(ln) == 1
+
+    async def test_state_notes_survive_rerender(self):
+        # The pause/resume notes live in the display model — the resume-tick
+        # re-render re-emits them in chronological order, and they stay out
+        # of the [Y] copy.
+        runner = TestContainerLogFollow._StepLogsRunner(["L1\nL2\nL3\n", "L1\nL2\nL3\nL4\nL5\n"])
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            await pilot.press("f")  # pause
+            await pilot.pause()
+            written: list[str] = []
+            log = app.query_one("#drill-logs", LivePane).query_one("#live-log", RichLog)
+            real_write = log.write
+
+            def spy(content, *a, **kw):
+                written.append(str(content))
+                return real_write(content, *a, **kw)
+
+            log.write = spy
+            await pilot.press("f")  # resume → immediate tick → re-render
+            await _settle(pilot)
+            starts = [i for i, w in enumerate(written) if "$ docker logs" in w]
+            assert starts, "resume-tick re-render did not rewrite the pane"
+            last_batch = written[starts[-1] :]
+            i_paused = last_batch.index("[yellow]follow paused — press f to resume[/yellow]")
+            i_resumed = last_batch.index("[green]follow resumed[/green]")
+            i_l4 = last_batch.index("[underline]L4[/underline]")
+            assert i_paused < i_resumed < i_l4  # chronological: notes, then fresh lines
+            text = app.query_one("#drill-logs", LivePane).tail_text()
+            assert "follow paused" not in text and "follow resumed" not in text
+
+    async def test_tick_scrolled_up_appends_plain(self):
+        # Reading history: a tick appends the new lines plain (no underline,
+        # no rewrite) — the moving highlight is a tail affordance.
+        base = "".join(f"K{i:03d}\n" for i in range(60))
+        runner = TestContainerLogFollow._StepLogsRunner(
+            [base, base + "K060\nK061\n", base + "K060\nK061\nK062\n"]
+        )
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            app._log_follow_tick()  # K060/K061 new — re-render at the tail
+            await _settle(pilot)
+            pane = app.query_one("#drill-logs", LivePane)
+            log = pane.query_one("#live-log", RichLog)
+            log.scroll_up(immediate=True, animate=False)
+            await pilot.pause()
+            assert pane.at_bottom is False
+            written: list[str] = []
+            real_write = log.write
+
+            def spy(content, *a, **kw):
+                written.append(str(content))
+                return real_write(content, *a, **kw)
+
+            log.write = spy
+            app._log_follow_tick()  # K062 new
+            await _settle(pilot)
+            assert written == ["K062"]  # plain append only — no rewrite, no tint
+            text = pane.tail_text()
+            assert text.count("K062") == 1 and "[underline]" not in text
+
+    async def test_navigation_to_another_container_rebases(self):
+        class _PerNameLogsRunner(FakeRunner):
+            """docker logs keyed by the container name in the command."""
+
+            def __init__(self, by_name):
+                super().__init__(fake_responses(**{"docker ps": ok(DOCKER_PS_TWO)}))
+                self._by_name = by_name
+
+            async def run(self, cmd, *, cwd, timeout=30.0):
+                joined = " ".join(cmd)
+                if "docker logs" in joined:
+                    self.calls.append(list(cmd))
+                    for name, tail in self._by_name.items():
+                        if name in joined:
+                            return ok(tail)
+                    return ok("")
+                return await super().run(cmd, cwd=cwd, timeout=timeout)
+
+        runner = _PerNameLogsRunner(
+            {
+                "vllm-qwen36-27b-dual": "A1\nA2\n",
+                "vllm-gemma-4-31b-dual": "B1\nB2\n",
+            }
+        )
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            pane = app.query_one("#operate-containers-pane", OperateContainersPane)
+            pane.query_one("#containers-table", DataTable).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_anchor == "A2"
+            # User browses to the other running engine → navigation snapshot
+            # (existing path) re-snapshots AND rebases the anchor.
+            pane.query_one("#containers-table", DataTable).move_cursor(row=1)
+            await pilot.pause(0.35)  # let the 0.25s drill-debounce timer fire
+            await _settle(pilot)
+            assert app._log_follow_anchor == "B2"
+            assert app._log_follow_name == "vllm-gemma-4-31b-dual"
+            text = app.query_one("#drill-logs", LivePane).tail_text()
+            assert "A1" not in text and "B1" in text
+            # A tick now streams the NEW container's tail (quiet → nothing new).
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert app.query_one("#drill-logs", LivePane).tail_text().count("B2") == 1
+
+    async def test_followed_container_stops_notes_and_disarms(self):
+        responses = fake_responses(
+            **{"docker ps": ok(DOCKER_PS_ENGINE), "docker logs": ok("L1\nL2\nL3\n")}
+        )
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            pane = app.query_one("#operate-containers-pane", OperateContainersPane)
+            pane.query_one("#containers-table", DataTable).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_armed is True
+            # The followed container itself stopped (estate poll would surface
+            # this; simulate by flipping the live row's status).
+            pane._containers[0].status = "stopped"
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert app._log_follow_armed is False
+            assert app._log_follow_timer is None
+            assert app._log_follow_anchor is None
+
+    async def test_browsing_to_other_stopped_row_stays_armed(self):
+        responses = fake_responses(
+            **{
+                "docker ps": ok(DOCKER_PS_TWO),
+                "docker container ls -a": ok("studio-step-voice\n"),
+                "docker logs": ok("L1\nL2\nL3\n"),
+            }
+        )
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            pane = app.query_one("#operate-containers-pane", OperateContainersPane)
+            pane.query_one("#containers-table", DataTable).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            assert app._log_follow_armed is True
+            assert app._log_follow_name == "vllm-qwen36-27b-dual"
+            # Browse to a DIFFERENT stopped row (the studio stack row).
+            stopped = [c for c in pane._containers if c.status == "stopped"]
+            assert stopped, "test setup: expected a stopped studio row"
+            idx = [c.name for c in pane._containers].index(stopped[0].name)
+            pane.query_one("#containers-table", DataTable).move_cursor(row=idx)
+            await _settle(pilot)
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert app._log_follow_armed is True  # mode stays armed, tick no-ops
+            assert app._log_follow_timer is not None
+            assert app._log_follow_name == "vllm-qwen36-27b-dual"
+
+    async def test_follow_runner_error_notes_and_disarms(self):
+        class _ErrLogsRunner(FakeRunner):
+            def __init__(self):
+                super().__init__(fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)}))
+
+            async def run(self, cmd, *, cwd, timeout=30.0):
+                joined = " ".join(cmd)
+                if "docker logs" in joined:
+                    self.calls.append(list(cmd))
+                    return RunResult(returncode=1, stdout="", stderr="No such container: x")
+                return await super().run(cmd, cwd=cwd, timeout=timeout)
+
+        app, _, _ = make_app(runner=_ErrLogsRunner())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")
+            await _settle(pilot)
+            app._log_follow_tick()
+            await _settle(pilot)
+            assert app._log_follow_armed is False
+            assert app._log_follow_timer is None
+            # The 'follow stopped' note is display-only.
+            assert "follow stopped" not in app.query_one("#drill-logs", LivePane).tail_text()
+
+    async def test_f_resumes_with_immediate_incremental_poll(self):
+        runner = TestContainerLogFollow._StepLogsRunner(["L1\nL2\nL3\n", "L1\nL2\nL3\nL4\nL5\n"])
+        app, runner, _ = make_app(runner=runner)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-containers")
+            app.query_one("#operate-containers-pane", OperateContainersPane).query_one(
+                "#containers-table", DataTable
+            ).move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("f")  # arm — snapshot L1-L3
+            await _settle(pilot)
+            await pilot.press("f")  # pause
+            await pilot.pause()
+            calls_before = len(runner.calls)
+            await pilot.press("f")  # resume → ONE immediate incremental poll
+            await _settle(pilot)
+            assert app._log_follow_paused is False
+            assert app._log_follow_timer is not None
+            assert len(runner.calls) == calls_before + 1
+            pane = app.query_one("#drill-logs", LivePane)
+            text = pane.tail_text()
+            assert text.count("L4") == 1 and text.count("L5") == 1  # pause-window lines arrived
+            # The 'follow resumed' note is display-only — never in the [Y] tail.
+            assert "follow resumed" not in text
+            title = pane.query_one(".live-title", Label)
+            assert title.content == "Live  [green]●  following[/green]"
+
+
 class TestEscClosesFilter:
     """Esc closes an open filter Input + refocuses the table (it was a dead key
     inside the filter before) — and never quits the app."""
@@ -6472,9 +7907,11 @@ class TestSurfaceScaffold:
         # R3b-2: + [m] measure_vs_bar (④ Measure).
         # Batch 3: [F] full_report is NO LONGER producer-only — it's reachable on
         # the consumer Operate · Doctor (a consumer can run the full battery).
+        # HF-search front-end: + [f] search_hf (① Bring repo discovery).
+        # Boot-log back-solve: + [k] bootlog_solve (③ Gate Step-5 automation).
         assert CockpitApp._PRODUCER_ONLY == frozenset({
             "mode_validate", "promote_catalog", "evaluate_target", "serve_untested",
-            "measure_vs_bar",
+            "measure_vs_bar", "search_hf", "bootlog_solve",
         })
 
     @pytest.mark.asyncio
@@ -9702,9 +11139,10 @@ class TestTier1PrimaryActionAndSKeyHonesty:
             assert app.check_action("doctor_rerun", ()) is False
 
     @pytest.mark.asyncio
-    async def test_s_key_gated_to_containers_only_in_mode0(self):
-        """[s] is valid on Containers (restart) but NOT on Catalog / Orchestration /
-        Doctor — the over-broad ({0,1}, None) gate is gone."""
+    async def test_s_key_gated_to_containers_and_catalog_in_mode0(self):
+        """[s] is valid on Containers (restart) AND on Catalog (sort cycle —
+        the [s] cycle verb); NOT on Orchestration / Doctor — the over-broad
+        ({0,1}, None) gate is gone."""
         app, _, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
@@ -9712,7 +11150,10 @@ class TestTier1PrimaryActionAndSKeyHonesty:
             tc.active = "tab-containers"
             await pilot.pause()
             assert app.check_action("s_key", ()) is True
-            for tab in ("tab-catalog", "tab-orchestration", "tab-doctor"):
+            tc.active = "tab-catalog"
+            await pilot.pause()
+            assert app.check_action("s_key", ()) is True  # sort cycle lives here
+            for tab in ("tab-orchestration", "tab-doctor"):
                 tc.active = tab
                 await pilot.pause()
                 assert app.check_action("s_key", ()) is False, tab
@@ -9758,7 +11199,16 @@ class TestTier1PreviewModalEnterBindings:
             assert "stage_write" in actions
             assert actions["stage_write"].key == "enter"
             assert actions["stage_write"].show is True
-            # Footer-discoverable: stage_write reaches the modal footer.
+            # C4-rev: with the required edits UNFILLED the binding is gated OFF
+            # (check_action → False) — staging is inert until they are real.
+            assert not any(
+                v.binding.action == "stage_write" and v.binding.show
+                for v in scr.active_bindings.values()
+            )
+            scr.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            scr.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            scr.on_input_changed(None)
+            # Footer-discoverable once staging is possible.
             assert any(
                 v.binding.action == "stage_write" and v.binding.show
                 for v in scr.active_bindings.values()
@@ -9779,9 +11229,17 @@ class TestTier1PreviewModalEnterBindings:
             await pilot.press("P")
             await pilot.pause()
             assert isinstance(app.screen, PromoteScaffoldScreen)
+            # C4-rev: ⏎ is INERT until the required inline edits are filled.
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, PromoteScaffoldScreen)
+            app.screen.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            app.screen.on_input_changed(None)
             await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen, ConfirmActionScreen)
+            assert "--layer local" in " ".join(app.screen._plan.cmd)
             assert app.screen._plan.kind == "promote_catalog"
             assert wr.started == []  # mock-only, never auto-fired
 
@@ -11837,3 +13295,182 @@ class TestAdaptiveEstatePoll:
         assert st.gpus == ["g0", "g1"] and calls == [st]
         bound([])                          # empty read → keep last bars (no-op)
         assert st.gpus == ["g0", "g1"]
+
+
+class TestCatalogSort:
+    """[s] on Catalog cycles the sort: group-by-model (default) → TPS ↓ →
+    GB ↑ → ctx ↓ → back.  Sorting applies AFTER the filter; the model-cell
+    blank-on-repeat grouping renders ONLY in the default mode (sorted rows rank
+    globally, so every row must keep its model identity); the choice persists
+    to c3-settings.json ("catalog_sort") and seeds the next launch."""
+
+    @staticmethod
+    def _entry(slug: str, model: str, *, tps=None, gb=None, ctx_label="262K"):
+        from club3090_cockpit.data import (
+            CatalogEntry as _CE,
+            LocalMeasured as _LM,
+            WeightsMeta as _WM,
+        )
+        from club3090_tui_core import VariantRow as _VR
+
+        cp = f"models/{model}/vllm/compose/dual/q/base.yml"
+        return _CE(
+            row=_VR(
+                slug=slug, switch_engine="vllm", launch_engine="vllm",
+                compose_dir=cp.rsplit("/", 1)[0], file="base.yml", port=8000,
+                model=model, engine="vllm-stable", kvcalc_key=f"{model}:dual",
+                container="c", compose_path=cp, status="production",
+                ctx_label=ctx_label, status_note="",
+            ),
+            # The TPS sort ranks THIS RIG's own measured number (what the
+            # column shows) — code_tps only mirrors an ONLY= corpus record.
+            local_measurement=_LM(code_tps=float(tps)) if tps is not None else None,
+            weights=_WM(size_gb=float(gb)) if gb is not None else None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_cycle_order_and_status_line(self):
+        """The [s] cycle order + the 'sort:' status segment: shown in every
+        non-default mode with the right direction glyph, absent on default."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            status = str(app.query_one("#catalog-status", Label).render())
+            assert pane._sort_mode == "model"
+            assert "sort:" not in status  # default needs no announcement
+
+            expected = [("tps", "sort: TPS ↓"), ("gb", "sort: GB ↑"),
+                        ("ctx", "sort: ctx ↓"), ("model", None)]
+            for mode, label in expected:
+                await pilot.press("s")   # through the REAL key routing
+                await pilot.pause()
+                assert pane._sort_mode == mode
+                status = str(app.query_one("#catalog-status", Label).render())
+                if label is None:
+                    assert "sort:" not in status
+                else:
+                    assert label in status
+
+    @pytest.mark.asyncio
+    async def test_sorted_render_keeps_model_identity(self):
+        """Blank-on-repeat model cells ONLY in the group-by-model default; a
+        sorted mode shows EVERY row's model name (a global ranking would
+        otherwise strip interleaved rows of their identity)."""
+        from textual.widgets import DataTable
+
+        entries = [
+            self._entry("mA/slow", "mA", tps=10.0),
+            self._entry("mA/fast", "mA", tps=90.0),
+            self._entry("mB/mid", "mB", tps=50.0),
+        ]
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.populate(entries, None)
+            table = app.query_one("#catalog-table", DataTable)
+
+            def model_cells():
+                # Cells carry the [cyan] model-name markup — strip it.
+                return [
+                    str(table.get_row_at(r)[0])
+                    .replace("[cyan]", "").replace("[/cyan]", "")
+                    for r in range(table.row_count)
+                ]
+
+            # Default: grouped — mA header once, repeat blanked.
+            assert [c for c in model_cells() if c] == ["mA", "mB"]
+
+            # TPS ↓: global ranking; every row names its model.
+            pane.cycle_sort()
+            assert [e.slug for e in pane._filtered_entries()] == [
+                "mA/fast", "mB/mid", "mA/slow",
+            ]
+            assert model_cells() == ["mA", "mB", "mA"]
+
+    @pytest.mark.asyncio
+    async def test_sort_applies_after_filter(self):
+        """Filtering narrows FIRST; the active sort then orders the survivors —
+        never resurrects filtered-out rows, never mixes pools."""
+        from textual.widgets import DataTable
+
+        entries = [
+            self._entry("gemma/dual", "gemma-4-31b", tps=30.0),
+            self._entry("gemma/single", "gemma-4-31b", tps=80.0),
+            self._entry("qwen/dual", "qwen3-27b", tps=10.0),
+            self._entry("qwen/fast", "qwen3-27b", tps=100.0),
+        ]
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.populate(entries, None)
+            pane.cycle_sort()          # → TPS ↓
+            # NOTE: "dual" would match EVERY row here — the topology token is
+            # derived from the compose path, which all four share.  Filter on
+            # the model name instead: narrows to the two gemma lanes FIRST,
+            # then the active TPS ↓ sort orders them (80 > 30).
+            pane.set_filter("gemma")
+            got = [e.slug for e in pane._filtered_entries()]
+            assert got == ["gemma/single", "gemma/dual"]
+            table = app.query_one("#catalog-table", DataTable)
+            assert table.row_count == 2
+            # The RENDERED table agrees (slug is visible column index 1).
+            assert [str(table.get_row_at(r)[1]) for r in range(table.row_count)] == [
+                "gemma/single", "gemma/dual",
+            ]
+
+    @pytest.mark.asyncio
+    async def test_gb_and_ctx_directions_and_unknowns_sink(self):
+        """GB ↑ ascends; ctx ↓ descends; rows with NO value for the active key
+        sink to the bottom regardless of direction."""
+        entries = [
+            self._entry("big/no-ctx", "m", gb=64.0, ctx_label=""),
+            self._entry("m/small", "m", gb=16.0, ctx_label="131K"),
+            self._entry("m/big-ctx", "m", gb=32.0, ctx_label="262K"),
+        ]
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.populate(entries, None)
+            pane.cycle_sort(); pane.cycle_sort()      # → GB ↑
+            assert [e.slug for e in pane._filtered_entries()] == [
+                "m/small", "m/big-ctx", "big/no-ctx",
+            ]
+            pane.cycle_sort()                          # → ctx ↓
+            assert [e.slug for e in pane._filtered_entries()] == [
+                "m/big-ctx", "m/small", "big/no-ctx",
+            ]
+
+    @pytest.mark.asyncio
+    async def test_persistence_round_trip(self, monkeypatch, tmp_path):
+        """cycle_sort writes "catalog_sort" to c3-settings.json (alongside the
+        column prefs), and apply_persisted_settings seeds the NEXT launch's
+        pane with it.  C3_CONFIG_DIR isolated so nothing real is touched."""
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        from club3090_cockpit import __main__ as M
+
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#catalog-pane", CatalogPane)
+            pane.cycle_sort()
+        assert M.load_settings()["catalog_sort"] == "tps"
+
+        # Next launch: apply_persisted_settings → the pane MOUNTS sorted.
+        app2, _, _ = make_app()
+        M.apply_persisted_settings(app2, {})
+        async with app2.run_test(size=(120, 40)):
+            pane2 = app2.query_one("#catalog-pane", CatalogPane)
+            assert pane2._sort_mode == "tps"
+            assert pane2._sort_label() == "TPS ↓"
+        # A corrupt persisted value degrades to the group-by-model default.
+        s = M.load_settings()
+        s["catalog_sort"] = "bogus"
+        M.save_settings(s)
+        app3, _, _ = make_app()
+        M.apply_persisted_settings(app3, {})
+        async with app3.run_test(size=(120, 40)):
+            assert app3.query_one("#catalog-pane", CatalogPane)._sort_mode == "model"

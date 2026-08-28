@@ -36,10 +36,17 @@
 #                is below that swing and measured ~11% SLOWER despite a larger
 #                pool and higher hit rate. Do not copy these values to another
 #                card count or VRAM size without re-deriving them.
-#              • `-ub/-b 2048` is a decode↔prefill trade, chosen deliberately:
-#                vs 4096 it frees ~2.2-2.7 GB/card of compute buffer which the
-#                cache converts into ~1,300 more resident experts → +10% decode
-#                for −12.5% prefill @10K. Prefer 4096 for prompt-heavy work.
+#              • `-ub/-b 4096` — DEFAULT SINCE 2026-08-25, re-measured. The old
+#                2048 default assumed the compute buffer it frees (worth ~1,254
+#                more resident experts on CUDA0: 2,624 vs 1,370 slots) bought
+#                ~+10% decode. Post-prefetch it does NOT: a 3×3 interleaved soak
+#                measured ub4096 vs ub2048 at −1.6% decode (pooled sd 6.6%, so
+#                only effects >8% are resolvable), while prefill is +18% @40K
+#                and +13% @10K (3 runs/depth, CV ≤2.2%). ⚠️ Pool occupancy spans
+#                2× across these configs with no decode difference — the slot
+#                count is a diagnostic, not a decode predictor. `UBATCH=2048`
+#                restores the old trade; 8192 is NOT better (prefill saturates
+#                at +18.0%, decode −30% as the pool is squeezed).
 #              • 262144 boots and serves here (unlike the stock slug, which OOMs
 #                at 262K with a GPU-resident drafter), but costs ~8% decode and
 #                445 expert slots, and this model is PREFILL-BOUND at depth.
@@ -54,7 +61,7 @@
 #              · structoutput-15 14/15 (93%) · dataextract-15 12/15 (80%)
 #              · reasonmath-15 14/15 (93%) · bugfind-15 15/15 (100%)
 #              · hermesagent-20 14/20 (70%) · cli-40 31/40 (78%)
-#              = 128/150 reasoning-ON  (--full, packs v1.0.x, 2026-08-11)
+#              = 128/150 reasoning-ON  (--full, 2026-08-11)  # pack versions not recorded pre-#981
 #              Reasoning-OFF leg: 122/150. repeat=1 per arm.
 #              ⚠️ NO stock-engine comparison arm — this shows the output is
 #              sound, NOT that the expert cache is quality-neutral.
@@ -70,6 +77,10 @@
 #     stock slug              18.34 narr / 23.51 code
 #     this config             23.64 / 22.67 decode · 354.7 t/s prefill @10K
 #                             pool 2,579 + 2,580 slots · hit rate ~56%
+#
+#   ⚠️ The line above was taken at the THEN-default `-ub 2048`; the default is
+#   4096 since 2026-08-25 (see the -ub bullet). Prefill at the new default is
+#   390.2 t/s @10K / 377.7 @40K. Kept as the historical anchor, not re-stated.
 #
 #   ≈ +29% decode vs stock, ≈ −19% prefill. Cache hit rate and pool occupancy
 #   are DIAGNOSTICS ONLY — three times on this stack a config improved every
@@ -112,6 +123,13 @@ services:
     image: ${LLAMACPP_CLUB3090_IMAGE:-ghcr.io/noonghunna/llamacpp-club3090@sha256:17824d4483dbd60c297613bddf130f25e739d3edc7e633e4d973edc4e2165649}
     container_name: ${ESTATE_CONTAINER:-llama-cpp-deepseek-flash-q8-moecache}
     restart: unless-stopped
+    # Reap orphaned children. Without this, a wedged llama-server becomes a
+    # <defunct> PID 1 child that docker CANNOT kill ("PID N is zombie and can
+    # not be killed. Use the --init option"), and it keeps holding GPU memory
+    # AND ~117 GB of host RAM — after which preflight correctly refuses every
+    # later boot ("needs ~156 GB; only 39 GB AVAILABLE"). Cost 8 of 9 A/B arms
+    # on 2026-08-25 before it was diagnosed.
+    init: true
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8030}}:8080"
     volumes:
@@ -123,6 +141,33 @@ services:
       # Expert-cache tuning — every value MEASURED on 2×24 GB, see Caveats.
       - GGML_CUDA_MOE_CACHE_ADMIT_AFTER=${MOE_ADMIT_AFTER:-64}
       - GGML_CUDA_MOE_CACHE_RESERVE_MB=${MOE_RESERVE_MB:-1536}
+      # Prefill expert-prefetch (v1.2 default ON, worth +14.5% prefill) and log
+      # verbosity. ⚠️ BARE PASS-THROUGH FORM ON PURPOSE — do NOT rewrite these as
+      # `- GGML_EXPERT_PREFETCH=${PREFETCH:-}`. The engine tests
+      # `if (on && atoi(on) == 0) return nullptr;` (expert-prefetch.cu:126) and
+      # atoi("") == 0, so an empty-string default would set the var to "" and
+      # SILENTLY DISABLE the prefetch for every user. Bare form leaves the var
+      # UNSET in the container unless the caller exports it, which is the only
+      # spelling that preserves default-ON.
+      #   GGML_EXPERT_PREFETCH=0  stock (no ring; frees ~484 CUDA0 cache slots)
+      #                       =2  BALLAST (ring allocated, every node declined) —
+      #                           the pool-matched control for mechanism A/Bs
+      #   LLAMA_ARG_LOG_VERBOSITY=4  resolved pools + moe-cache statistics
+      - GGML_EXPERT_PREFETCH
+      - GGML_EXPERT_PREFETCH_SLOTS
+      - LLAMA_ARG_LOG_VERBOSITY
+      # Prefix reuse via KV shifting (default 0 = OFF). The between-turn TTFT
+      # lever for agent traffic — the llama.cpp analogue of the vLLM
+      # mamba-align work on the qwen3.8 MTP composes (#1093), though a
+      # different mechanism (KV shift, not SSM-state alignment).
+      # ⚠️ The server force-disables it when the memory layout cannot shift
+      # (server-context.cpp: "cache_reuse is not supported by this context")
+      # — MLA + SWA is a plausible refusal case, so CHECK THE BOOT LOG rather
+      # than assuming it engaged.
+      - LLAMA_ARG_CACHE_REUSE
+      # Thread count. Resolved in the entrypoint (see [threads]) because a
+      # fixed compose default cannot be right on two different rigs.
+      - THREADS
     deploy:
       resources:
         reservations:
@@ -150,6 +195,29 @@ services:
         # model when one is named -- so the memory stays spent. Removing the
         # flags is the only clean off. A non-numeric SPEC_N is a hard error, so a
         # typo can never masquerade as a silent "drafter off".
+        # -- Threads ------------------------------------------------------------
+        # llama.cpp's own default collapses CPU-offload decode (-31% measured on
+        # this workload), and the old `-t ${THREADS:-8}` compose default was worse
+        # still for anyone running `docker compose` directly. Resolve here instead:
+        # THREADS if the caller set it, else nproc/2 -- which MATCHES what the
+        # launcher already computes (scripts/lib/compose-meta.sh
+        # resolve_offload_threads), so the two paths agree instead of diverging.
+        # ⚠️ nproc/2 is a floor, NOT the optimum: on the 32c/8-channel reference
+        # host `-t 28` measured ~20% faster than the launcher's nproc/2=16, which
+        # is why .env pins 28 there. Under the launcher THREADS is always already
+        # set, so this branch only serves direct-compose users.
+        # Exported as LLAMA_ARG_THREADS -- the `-t` flag is therefore NOT in the
+        # command list; adding one back would override this (CLI beats env).
+        if [ -n "$${THREADS:-}" ]; then
+          export LLAMA_ARG_THREADS="$${THREADS}"
+          echo "[threads] -t $${LLAMA_ARG_THREADS} (THREADS set explicitly)" >&2
+        else
+          _np=$$(nproc 2>/dev/null || echo 8)
+          _half=$$(( _np / 2 )); [ "$$_half" -lt 1 ] && _half=1
+          export LLAMA_ARG_THREADS="$$_half"
+          echo "[threads] -t $${LLAMA_ARG_THREADS} (auto = nproc/2, nproc=$$_np)" >&2
+        fi
+
         _spec_n="$${SPEC_N:-1}"
         case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
         case "$$_spec_n" in ""|*[!0-9]*)
@@ -219,12 +287,10 @@ services:
       # decides residency dynamically, so static pins are counter-productive.
       - '-ot'
       - 'blk\.[0-9]+\.ffn_(gate|up|down)_exps\.weight=CPU'
-      - '-t'
-      - '${THREADS:-8}'
       - '-ub'
-      - '${UBATCH:-2048}'
+      - '${UBATCH:-4096}'
       - '-b'
-      - '${UBATCH:-2048}'
+      - '${UBATCH:-4096}'
       - '--cache-prompt'
       - '--no-mmap'
       - '-md'

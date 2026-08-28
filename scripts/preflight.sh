@@ -10,7 +10,6 @@
 #   preflight_disk <path> <gb>— free space at path covers <gb> gigabytes
 #   preflight_gpu_idle        — warn if GPUs have significant VRAM already in use
 #   preflight_running         — warn if a club-3090 container is already up
-#   preflight_genesis_pin     — warn if on-disk Genesis tree differs from setup.sh's pin
 #   preflight_repo_drift      — warn if local HEAD is behind origin/master
 #   preflight_compose_hardware— check compose VRAM/GPU-count/SM metadata
 #
@@ -755,56 +754,9 @@ preflight_running() {
   return 0
 }
 
-# preflight_genesis_pin — warn if scripts/setup.sh's declared GENESIS_PIN
-# differs from the on-disk Genesis tree HEAD. This catches the
-# "user pulled the repo but didn't re-run setup.sh" failure mode where
-# vLLM boots against an outdated Genesis tree (mysterious patch failures
-# at runtime). Sourceable; soft-warning only — caller decides whether
-# to abort. Returns 0 always; emits a [preflight] WARN line on mismatch.
-preflight_genesis_pin() {
-  local repo_root="${1:-${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
-  local setup_script="${repo_root}/scripts/setup.sh"
-  local genesis_dir="${repo_root}/models/qwen3.6-27b/vllm/patches/genesis"
-
-  # If setup.sh isn't here we're in a weird state — skip silently.
-  [[ -f "$setup_script" ]] || return 0
-  # If Genesis hasn't been cloned yet, this isn't a mismatch — it's a
-  # missing-setup case. Skip; setup.sh will handle it on first run.
-  [[ -d "${genesis_dir}/.git" ]] || return 0
-
-  # Parse `GENESIS_PIN="${GENESIS_PIN:-<default>}"` to extract the default.
-  local declared_pin
-  declared_pin=$(grep -E '^GENESIS_PIN=' "$setup_script" 2>/dev/null | head -1 \
-    | sed -E 's/.*:-([^}]+)\}.*/\1/; t; s/.*=//' \
-    | tr -d '"' | tr -d "'")
-  [[ -z "$declared_pin" ]] && return 0
-
-  # Get on-disk HEAD short SHA (matches setup.sh's `git rev-parse --short HEAD`).
-  local ondisk_pin
-  ondisk_pin=$(cd "$genesis_dir" && git rev-parse --short HEAD 2>/dev/null)
-  [[ -z "$ondisk_pin" ]] && return 0
-
-  # Compare. setup.sh declares short-form pins (e.g. 2db18df); on-disk
-  # short SHA from git rev-parse --short matches that form. If declared
-  # pin is full-length, take its prefix matching ondisk's length.
-  local declared_short="${declared_pin:0:${#ondisk_pin}}"
-
-  if [[ "$declared_short" != "$ondisk_pin" ]]; then
-    echo "[preflight] WARN:  Genesis tree out of sync with setup.sh's declared pin." >&2
-    echo "[preflight]          declared (scripts/setup.sh): ${declared_pin}" >&2
-    echo "[preflight]          on-disk (genesis/.git HEAD): ${ondisk_pin}" >&2
-    echo "[preflight]        This usually means you pulled latest club-3090 but" >&2
-    echo "[preflight]        didn't re-run setup.sh. vLLM may boot against an" >&2
-    echo "[preflight]        outdated Genesis tree, causing mysterious patch" >&2
-    echo "[preflight]        failures at runtime (see #32 for an example)." >&2
-    echo "[preflight]        Fix:  bash scripts/setup.sh qwen3.6-27b" >&2
-  fi
-  return 0
-}
-
 # preflight_repo_drift — warn if local HEAD is behind origin/master.
 # Catches the most common stale-setup pattern: user cloned weeks ago, master
-# has moved (Genesis pin bumps, compose changes, vendored patch updates),
+# has moved (compose changes, vendored patch updates, engine pin bumps),
 # they re-run their compose, hit a stale config, and file an issue we
 # already solved on master.
 #
@@ -863,7 +815,6 @@ preflight_repo_drift() {
 
   echo "[preflight] WARN:  Your club-3090 checkout is ${behind} commit(s) behind origin/master." >&2
   [[ -n "$age_str" ]] && echo "[preflight]          (last origin fetch: ${age_str})" >&2
-  echo "[preflight]        Master may have new configs, patches, or Genesis pin bumps." >&2
   echo "[preflight]        Easy upgrade:  bash scripts/update.sh" >&2
   echo "[preflight]        (Will refuse if you have local edits — commit or stash first.)" >&2
   echo "[preflight]        Skip this check:  PREFLIGHT_NO_FETCH=1 bash scripts/launch.sh" >&2
@@ -905,6 +856,15 @@ preflight_hf_token() {
 #
 # Hard error (returns 1) — refuses to proceed if a required model dir is missing.
 # Skip via: PREFLIGHT_NO_COMPOSE_DEPS=1
+#
+# Also runs the #1042 weight-shard preflight: for every model directory the
+# compose mounts that DOES exist, verify the weight files its
+# model.safetensors.index.json references (or, failing that, its numbered
+# -000NN-of-000NN GGUF parts) are actually on disk. Catches the interrupted
+# re-fetch / partial rsync / manual `hf download` divergence that otherwise
+# surfaces as a 53 KB vLLM traceback naming the absent shard near the bottom
+# (club-3090#1042). Existence + count only — never hashes (setup.sh owns
+# integrity). Bypassed by FORCE=1 (--force) or PREFLIGHT_NO_SHARD_CHECK=1.
 _preflight_compose_model_dir() {
   local compose_file="$1"
   local model_dir
@@ -1197,6 +1157,69 @@ _preflight_offer_fetch_missing() {
   PREFLIGHT_NO_FETCH_PROMPT=1 preflight_compose_deps "$compose_file"
 }
 
+# _preflight_shard_scan <dir> — #1042 weight-shard presence scan.
+#
+# Prints one "<kind>:<filename>" line per ABSENT weight file, kind being:
+#   safetensors — named in <dir>/model.safetensors.index.json's weight_map
+#   gpart       — one numbered part of a -000NN-of-000NN GGUF part-set
+# Empty output == nothing missing. Existence + count ONLY, never hashes:
+# setup.sh owns integrity (sha256 per fetch), and re-hashing ~30 GB of
+# weights on every launch is exactly what #1042 rules out.
+#
+# Skips cleanly — empty output, exit 0 — when there is no index AND no
+# GGUF part-pattern: not every checkout has either (single-file safetensors
+# or single-file GGUF), and an absent index is explicitly NOT an error.
+_preflight_shard_scan() {
+  local dir="$1"
+  command -v python3 >/dev/null 2>&1 || return 0
+  [[ -d "$dir" ]] || return 0
+  python3 - "$dir" <<'PY'
+import json, os, re, sys
+
+d = sys.argv[1]
+entries = set(os.listdir(d))
+
+# Case 1 — sharded safetensors: diff weight_map values against disk.
+idx = os.path.join(d, "model.safetensors.index.json")
+if os.path.isfile(idx):
+    weight_map = None
+    try:
+        with open(idx, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            weight_map = data.get("weight_map")
+    except (OSError, ValueError):
+        weight_map = None
+    if isinstance(weight_map, dict):
+        for name in sorted({str(v) for v in weight_map.values()}):
+            if name not in entries:
+                print(f"safetensors:{name}")
+    else:
+        # A present-but-unparseable index usually means the download that
+        # wrote it was interrupted — but this check owns ABSENT shards, not
+        # index health; warn softly and let the engine report its own error.
+        print(f"[preflight] WARN: unparseable {idx} — skipping the shard check", file=sys.stderr)
+    raise SystemExit(0)
+
+# Case 2 — no index, but numbered GGUF parts (-00001-of-000NN): every
+# prefix-group must have ALL parts 1..NN on disk.
+part = re.compile(r"^(?P<prefix>.+)-(?P<num>\d+)-of-(?P<total>\d+)\.gguf$")
+groups = {}
+for entry in sorted(entries):
+    m = part.match(entry)
+    if m:
+        groups[m.group("prefix")] = (
+            int(m.group("total")),
+            max(len(m.group("num")), len(m.group("total"))),
+        )
+for prefix, (total, width) in sorted(groups.items()):
+    for n in range(1, total + 1):
+        name = f"{prefix}-{n:0{width}d}-of-{total:0{width}d}.gguf"
+        if name not in entries:
+            print(f"gpart:{name}")
+PY
+}
+
 preflight_compose_deps() {
   local compose_file="$1"
   if [[ "${PREFLIGHT_NO_COMPOSE_DEPS:-0}" == "1" ]]; then
@@ -1227,6 +1250,11 @@ preflight_compose_deps() {
 
   local missing=()
   local escaped=()
+  # Model dirs that exist and are worth a #1042 shard scan (deduped below):
+  # HF subdirs with a config.json, GGUF/drafter/mmproj parent dirs, SGLang
+  # ${MODEL_DIR}/... volume dirs.
+  local shard_dirs=()
+  local shard_note=0
 
   # Engine detection: llama.cpp composes mount ${MODEL_DIR}:/models and pass
   # `-m /models/<path>` or `--model /models/<path>`; vLLM composes mount
@@ -1283,6 +1311,7 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (llama.cpp GGUF weights)")
       else
         _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
+        shard_dirs+=("$(dirname -- "${model_dir}/${path}")")
       fi
     done
     for path in "${draft_paths[@]}"; do
@@ -1290,6 +1319,7 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (speculative drafter GGUF)")
       else
         _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
+        shard_dirs+=("$(dirname -- "${model_dir}/${path}")")
       fi
     done
     for path in "${mmproj_paths[@]}"; do
@@ -1297,6 +1327,7 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (vision projector)")
       else
         _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
+        shard_dirs+=("$(dirname -- "${model_dir}/${path}")")
       fi
     done
   else
@@ -1312,6 +1343,9 @@ preflight_compose_deps() {
         seen_subdirs+="${subdir} "
         if [[ ! -f "${model_dir}/${subdir}/config.json" ]]; then
           missing+=("${model_dir}/${subdir}/config.json (HF model)")
+        else
+          # Present enough to scan — the #1042 shard check runs on it below.
+          shard_dirs+=("${model_dir}/${subdir}")
         fi
       fi
     # Char-class must NOT exclude `:` or `}` — model paths can be
@@ -1330,6 +1364,8 @@ preflight_compose_deps() {
       [[ -n "$path" ]] || continue
       if [[ ! -e "${model_dir}/${path}" ]]; then
         missing+=("${model_dir}/${path} (MODEL_DIR volume path)")
+      elif [[ -d "${model_dir}/${path}" ]]; then
+        shard_dirs+=("${model_dir}/${path}")
       fi
     done < <(grep -hoE '\$\{MODEL_DIR[^}]*\}/[^"[:space:]]+' "${compose_files[@]}" || true)
   fi
@@ -1358,6 +1394,31 @@ preflight_compose_deps() {
     return 1
   fi
 
+  # ── #1042 weight-shard preflight ─────────────────────────────────────────
+  # The dirs exist; now verify the weight FILES they need are on disk.
+  # Behind the same guard as the other preflight checks: --force (FORCE=1,
+  # switch.sh) bypasses it deliberately, as does PREFLIGHT_NO_SHARD_CHECK=1.
+  if [[ "${FORCE:-0}" != "1" && "${PREFLIGHT_NO_SHARD_CHECK:-0}" != "1" ]]; then
+    local _sd _shard _seen_shard_dirs=" "
+    for _sd in ${shard_dirs[@]+"${shard_dirs[@]}"}; do
+      [[ "$_seen_shard_dirs" != *" ${_sd} "* ]] || continue
+      _seen_shard_dirs+="$_sd "
+      while IFS= read -r _shard; do
+        [[ -n "$_shard" ]] || continue
+        case "$_shard" in
+          safetensors:*)
+            missing+=("${_sd}/${_shard#safetensors:} (referenced by model.safetensors.index.json)")
+            shard_note=1
+            ;;
+          gpart:*)
+            missing+=("${_sd}/${_shard#gpart:} (missing numbered GGUF part)")
+            shard_note=1
+            ;;
+        esac
+      done < <(_preflight_shard_scan "$_sd")
+    done
+  fi
+
   if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
   fi
@@ -1367,6 +1428,11 @@ preflight_compose_deps() {
     echo "[preflight]   missing: ${item}" >&2
   done
   echo "[preflight]" >&2
+  if [[ "$shard_note" == "1" ]]; then
+    echo "[preflight] The index/part-referenced entries above are absent from disk — the download is incomplete." >&2
+    echo "[preflight] (Existence + count are checked, never hashes.) The re-fetch is resumable:" >&2
+  fi
+
   echo "[preflight] Fix:" >&2
   _preflight_print_weight_hints "$model_dir" "${missing[@]}"
   if _preflight_offer_fetch_missing "$compose_file" "$model_dir" "${missing[@]}"; then
