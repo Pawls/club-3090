@@ -245,6 +245,22 @@ model_list:
       # ⚠️ -np 1: one decode stream, so a long turn blocks the lane for its duration. That is
       # the accepted trade here; lower this if you would rather fail fast than wait.
       timeout: 5400
+    # Context window, DECLARED for /model/info so a harness can autodetect it instead of
+    # trusting a hand-typed number (PAWL's backends.probe_context reads
+    # data[].model_info.max_input_tokens; null/0/missing = "no opinion" and it keeps its
+    # own declared value). LiteLLM ECHOES this yaml — it never asks the engine — so a value
+    # that drifts from the backend's real n_ctx is WORSE than null.
+    #   Derivation (mtp-vision.yml, this lane's compose): -c ${CTX_SIZE:-262144} with
+    #   -np ${NP:-1}, and no .env in the quant dir -> per-session window = 262144 / 1.
+    #   Confirmed live 2026-08-30: GET :8117/props ->
+    #   default_generation_settings.n_ctx = 262144, total_slots = 1.
+    #   ⚠ On a lane running -np N the per-session window is n_ctx/N — declare THAT.
+    # scripts/tests/test-litellm-context-window.sh re-derives this from the compose and
+    # fails on drift; if you change CTX_SIZE or NP, that gate tells you to change this too.
+    # max_output_tokens is deliberately NOT declared: /props n_predict is -1 (unbounded) and
+    # the 5400 s timeout above is the only real ceiling, so any number here would be invented.
+    model_info:
+      max_input_tokens: 262144
 
   # Reasoning-effort aliases — SAME backend, SAME served model, only the template's
   # `reasoning_strength` differs. custom_hooks.py §D reads the level off the alias suffix and
