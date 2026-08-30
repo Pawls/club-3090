@@ -243,8 +243,19 @@
 #     preserve_thinking true   (per-request override ✅ works)
 #     reasoning_effort  n/a while thinking is off (per-request ✅ works, clamp needed)
 #
-# ⚠️ All of the above is DIRECT-TO-ENGINE on :8117. This lane is NOT yet registered in
-# services/litellm/config.yaml, so the harness -> LiteLLM -> engine path is UNPROVEN.
+# ⚠️ All of the above was measured DIRECT-TO-ENGINE on :8117 — read those numbers as
+# engine behaviour, not proxy behaviour.
+#
+# ✅ The harness -> LiteLLM -> engine path is REGISTERED AND PROVEN (this block said
+# "NOT yet registered / UNPROVEN" until 2026-08-30; it was stale). services/litellm/config.yaml
+# ships `model_name: qwen3.8-27b-vision` -> :8117, plus reasoning-effort aliases that select
+# the template's effort per request via custom_hooks.py §D/§E (a TOP-LEVEL reasoning_effort is
+# inert on llama.cpp, so the hook translates it into chat_template_kwargs and CLAMPS it —
+# an out-of-set value reaching the template is an HTTP 500, not a no-op). MEASURED end-to-end
+# THROUGH the proxy: 17,129 tokens in 384 s = 44.6 tok/s incl. prefill, finish_reason=stop,
+# on an unbounded xhigh request. The proxy timeout is 5400 s and is derived, not picked —
+# with no engine or proxy cap on an unbounded xhigh turn it silently becomes the thinking
+# budget. See the entry's own header in config.yaml for that derivation.
 #
 # ---------------------------------------------------------------------------
 # Override defaults via .env or shell:

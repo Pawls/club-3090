@@ -203,8 +203,10 @@ model_list:
   # 🧪 Experimental: booted + verify-full 9/9 + vision verified, but no soak/bench/8-pack. This is the only Qwen3.8 lane in the estate that serves IMAGES —
   # every upstream qwen3.8 slug is text-only.
   #
-  # ⚠️ TIMEOUT: 900 s like the other 262K lanes. A cold deep-prefill is minutes, not seconds,
-  # and a default client timeout reads that as a hang.
+  # ⚠️ TIMEOUT: 5400 s — NOT the 900 s the other 262K lanes use. A cold deep-prefill is
+  # minutes, not seconds, and a default client timeout reads that as a hang; on top of that,
+  # an unbounded xhigh turn makes the timeout the de-facto thinking budget. The derivation
+  # lives on the `timeout:` key below — keep the two in sync.
   #
   # ⭐ PER-REQUEST DIALS (this is why the lane exists for BoxelBuilder):
   #   chat_template_kwargs: {"enable_thinking": true|false,
