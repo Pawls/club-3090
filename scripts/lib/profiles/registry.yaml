@@ -26,6 +26,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: true
@@ -54,6 +55,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: true
@@ -82,6 +84,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: true
@@ -110,6 +113,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -138,6 +142,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-lmcache
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: int8_per_token_head
     act_format: 16bit
     act8_capable: false
@@ -166,6 +171,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: int8_per_token_head
     act_format: 16bit
     act8_capable: false
@@ -194,6 +200,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: true
@@ -222,6 +229,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -250,6 +258,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -280,6 +289,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -310,6 +320,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -338,6 +349,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -366,6 +378,7 @@ entries:
     workload: tool-heavy
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -394,6 +407,7 @@ entries:
     workload: vision-coding
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -423,6 +437,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -451,6 +466,7 @@ entries:
     workload: vision-coding
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -480,6 +496,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -508,6 +525,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: anbeeld-qwen-dflash
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -539,6 +557,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: qwopus-mtp-gguf
+    spec_method: null
     kv_format: kvarn4
     act_format: 16bit
     act8_capable: false
@@ -567,6 +586,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: carnice-mtp-gguf
+    spec_method: null
     kv_format: kvarn4
     act_format: 16bit
     act8_capable: false
@@ -595,6 +615,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: carnice-mtp-gguf
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -623,6 +644,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -651,6 +673,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -679,6 +702,7 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -707,6 +731,7 @@ entries:
     workload: tool-heavy
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -735,6 +760,7 @@ entries:
     workload: tool-heavy
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -763,6 +789,7 @@ entries:
     workload: vision-coding
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -792,6 +819,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -820,6 +848,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -848,6 +877,7 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -876,6 +906,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -904,6 +935,7 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -932,6 +964,7 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -960,6 +993,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -988,6 +1022,7 @@ entries:
     workload: fast-chat
     engine: vllm-gemma-stable
     drafter: gemma-it-assistant
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1017,6 +1052,7 @@ entries:
     workload: fast-chat
     engine: vllm-gemma-stable
     drafter: gemma-it-assistant
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1045,6 +1081,7 @@ entries:
     workload: multi-stream-tenant
     engine: vllm-gemma-stable
     drafter: gemma-it-assistant
+    spec_method: null
     kv_format: int8_per_token_head
     act_format: 16bit
     act8_capable: false
@@ -1074,6 +1111,7 @@ entries:
     workload: multi-stream-tenant
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1103,6 +1141,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: gemma-it-assistant
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1131,6 +1170,7 @@ entries:
     workload: multi-stream-tenant
     engine: vllm-gemma-stable
     drafter: gemma-it-assistant
+    spec_method: null
     kv_format: int8_per_token_head
     act_format: 16bit
     act8_capable: false
@@ -1160,6 +1200,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1188,6 +1229,7 @@ entries:
     workload: fast-chat
     engine: vllm-gemma4-unified
     drafter: gemma-12b-it-assistant
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1216,6 +1258,7 @@ entries:
     workload: fast-chat
     engine: vllm-gemma4-unified
     drafter: gemma-12b-it-assistant
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1244,6 +1287,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: null
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -1272,6 +1316,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: null
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -1300,6 +1345,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: anbeeld-gemma-dflash
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -1331,6 +1377,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: anbeeld-gemma-dflash
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -1360,6 +1407,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: unsloth-mtp-gguf
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -1388,6 +1436,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: anbeeld-qwen-dflash
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -1417,6 +1466,7 @@ entries:
     workload: fast-chat
     engine: beellama-local
     drafter: anbeeld-gemma-dflash
+    spec_method: null
     kv_format: q5_0
     act_format: 16bit
     act8_capable: false
@@ -1446,6 +1496,7 @@ entries:
     workload: fast-chat
     engine: vllm-gemma-stable
     drafter: gemma-26b-it-assistant
+    spec_method: null
     kv_format: int8_per_token_head
     act_format: 16bit
     act8_capable: false
@@ -1474,6 +1525,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1502,6 +1554,7 @@ entries:
     workload: fast-chat
     engine: vllm-diffusion-gemma
     drafter: null
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -1530,6 +1583,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1558,6 +1612,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1586,6 +1641,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1616,6 +1672,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1646,6 +1703,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1676,6 +1734,7 @@ entries:
     workload: multi-stream-tenant
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1704,6 +1763,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -1732,6 +1792,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -1759,12 +1820,13 @@ entries:
     model: inkling-small
     weights_variant: unsloth-ud-iq4xs
     workload: long-ctx-single
-    engine: llamacpp-club3090-v1.1
+    engine: llamacpp-club3090-v1.5
     drafter: null
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: tensor-override
     moe_cache: true
     host_ram_gb: 121
     chat_template: native
@@ -1789,12 +1851,13 @@ entries:
     model: inkling-small
     weights_variant: unsloth-ud-iq4xs
     workload: long-ctx-single
-    engine: llamacpp-club3090-v1.1
+    engine: llamacpp-club3090-v1.5
     drafter: null
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: residency
     moe_cache: true
     host_ram_gb: 99
     chat_template: native
@@ -1819,12 +1882,13 @@ entries:
     model: inkling-small
     weights_variant: unsloth-ud-iq4xs
     workload: long-ctx-single
-    engine: llamacpp-club3090-v1.1
+    engine: llamacpp-club3090-v1.5
     drafter: null
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: tensor-override
     moe_cache: true
     host_ram_gb: 121
     chat_template: native
@@ -1845,16 +1909,356 @@ entries:
     serve_aliases: []
     required_sm: 8.6
     category: frontier
+  llamacpp-club3090/glm53-flash-dual-iq4xs-moecache:
+    model: glm-5.3-flash
+    weights_variant: unsloth-ud-iq4xs
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: anbeeld-glm53-dflash2
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 142
+    chat_template: native
+    tp: 2
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8119
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🧪 Validated 2026-08-29 on llamacpp-club3090-v1.5 (rc0): verify-full 8/9 -- the one failure is [8] output-quality under reasoning_effort=max, a HARNESS budget artefact (2000 tokens spent reasoning), fixed in verify-full by scaling MT_QUALITY with the thinking allowance; the same check PASSES at reasoning_effort=low with 9,875 chars. bench.sh canonical: decode 13.95 narrative (CV 2.8%) / 17.71 code (CV 4.5%), prefill 386.7@10K (CV 0.7%) / 279.8@90K (CV 2.3%). ⚠️ TTFT@93K is ~338 s -- the practical ceiling for deep-context agent work, and the number to optimise against rather than decode. Vision 4/4 on ground truth (mmproj-F16, clip projector glm5next). DFlash2 drafter on CUDA1 n=3: acceptance 0.533, mean accepted length 2.60, per-position (0.760, 0.512, 0.331) -- placement measured +18.4% code vs host, and depth past 3 is DESTRUCTIVE (n=5 -8.9%, n=7 -27.9%). ⚠️ Decode TPS is THINKING-INCLUSIVE and length-sensitive: the same config reads 13.95 over 1,000 tokens and 17.71 over 800. Compare only equal completion lengths. Shipped z.ai vendor serving config (temperature 1 / top_p 0.95 / reasoning_effort max / clear_thinking false / max_tokens 65536) + vision. ⚠️⚠️ THINKING CANNOT BE DISABLED: z.ai docs state GLM-5.3-FLASH uses forced thinking and thinking.type=disabled RETURNS AN ERROR; the working control is reasoning_effort (max|high|low, `low` is 5.3/5.3-Flash-only) and `none` is NOT valid -- silently ignored. Measured: low -> 0 ch reasoning, max -> ~1,170 ch. NOT a graded dial -- `high` lands beside `low`, not between. Per-request overrides BEAT this server default (verified both via chat_template_kwargs and the top-level OpenAI field), which is the intended split: serving ships vendor, agents dial per request. ⚠️ Expert pool 2,143 slots (CUDA0 iq3_s 763 + iq4_xs 395; CUDA1 iq3_s 921 + iq4_xs 64) at RESERVE_MB=1536 -- read at LLAMA_ARG_LOG_VERBOSITY=4 and SUMMED per device; a single pool's used=N/N counter under-reports ~4x. ⚠️ QUALITY UNTESTED at any quant -- no 8-pack has been run on this model."
+    weights_companions:
+      - dflash2-q4km
+      - mmproj-f16
+    gateway: true
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/glm53-flash-multi4-iq4xs-moecache:
+    model: glm-5.3-flash
+    weights_variant: unsloth-ud-iq4xs
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: anbeeld-glm53-dflash2
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 142
+    chat_template: native
+    tp: 4
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/glm-5.3-flash/llamacpp-club3090/compose/multi4/unsloth-ud-iq4xs/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8120
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🐣 NEVER BOOTED -- this rig has 2 GPUs, so 4-card topologies are COMMUNITY-VALIDATED BY DESIGN; 'never booted here' is a permanent property, not a TODO. ⚠️⚠️ ALL TUNING IS INHERITED FROM THE DUAL SLUG, NOT DERIVED FOR 4 CARDS: RESERVE_MB=1536, -ub/-b 4096, SPEC_N=3, DRAFT_DEVICE=CUDA1 and MMPROJ_DEVICE=CUDA0 were every one measured on 2x24 GB. Re-derive before trusting them. ⚠️ `-ot` force-disables pipeline parallelism (silently), so prefill is GPU-asymmetric -- measured GPU0 67.6% SM vs GPU1 26.6% on 2 cards -- and the waste scales WITH card count. Do NOT size a 4-card deployment by extrapolating single-card prefill throughput. See docs/ADDING_MODELS.md M1-M10 and learnings/moe-cache-engine.md section 11. Shipped z.ai vendor serving config (temperature 1 / top_p 0.95 / reasoning_effort max / clear_thinking false / max_tokens 65536) + vision. ⚠️⚠️ THINKING CANNOT BE DISABLED: z.ai docs state GLM-5.3-FLASH uses forced thinking and thinking.type=disabled RETURNS AN ERROR; the working control is reasoning_effort (max|high|low, `low` is 5.3/5.3-Flash-only) and `none` is NOT valid -- silently ignored. Measured: low -> 0 ch reasoning, max -> ~1,170 ch. NOT a graded dial -- `high` lands beside `low`, not between. Per-request overrides BEAT this server default (verified both via chat_template_kwargs and the top-level OpenAI field), which is the intended split: serving ships vendor, agents dial per request. ⚠️ Expert pool 2,143 slots (CUDA0 iq3_s 763 + iq4_xs 395; CUDA1 iq3_s 921 + iq4_xs 64) at RESERVE_MB=1536 -- read at LLAMA_ARG_LOG_VERBOSITY=4 and SUMMED per device; a single pool's used=N/N counter under-reports ~4x. ⚠️ QUALITY UNTESTED at any quant -- no 8-pack has been run on this model."
+    weights_companions:
+      - dflash2-q4km
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/glm53-flash-multi8-iq4xs-moecache:
+    model: glm-5.3-flash
+    weights_variant: unsloth-ud-iq4xs
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: anbeeld-glm53-dflash2
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 142
+    chat_template: native
+    tp: 8
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/glm-5.3-flash/llamacpp-club3090/compose/multi8/unsloth-ud-iq4xs/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8121
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🐣 NEVER BOOTED -- this rig has 2 GPUs, so 8-card topologies are COMMUNITY-VALIDATED BY DESIGN; 'never booted here' is a permanent property, not a TODO. ⚠️⚠️ ALL TUNING IS INHERITED FROM THE DUAL SLUG, NOT DERIVED FOR 8 CARDS: RESERVE_MB=1536, -ub/-b 4096, SPEC_N=3, DRAFT_DEVICE=CUDA1 and MMPROJ_DEVICE=CUDA0 were every one measured on 2x24 GB. Re-derive before trusting them. ⚠️ `-ot` force-disables pipeline parallelism (silently), so prefill is GPU-asymmetric -- measured GPU0 67.6% SM vs GPU1 26.6% on 2 cards -- and the waste scales WITH card count. Do NOT size a 8-card deployment by extrapolating single-card prefill throughput. See docs/ADDING_MODELS.md M1-M10 and learnings/moe-cache-engine.md section 11. Shipped z.ai vendor serving config (temperature 1 / top_p 0.95 / reasoning_effort max / clear_thinking false / max_tokens 65536) + vision. ⚠️⚠️ THINKING CANNOT BE DISABLED: z.ai docs state GLM-5.3-FLASH uses forced thinking and thinking.type=disabled RETURNS AN ERROR; the working control is reasoning_effort (max|high|low, `low` is 5.3/5.3-Flash-only) and `none` is NOT valid -- silently ignored. Measured: low -> 0 ch reasoning, max -> ~1,170 ch. NOT a graded dial -- `high` lands beside `low`, not between. Per-request overrides BEAT this server default (verified both via chat_template_kwargs and the top-level OpenAI field), which is the intended split: serving ships vendor, agents dial per request. ⚠️ Expert pool 2,143 slots (CUDA0 iq3_s 763 + iq4_xs 395; CUDA1 iq3_s 921 + iq4_xs 64) at RESERVE_MB=1536 -- read at LLAMA_ARG_LOG_VERBOSITY=4 and SUMMED per device; a single pool's used=N/N counter under-reports ~4x. ⚠️ QUALITY UNTESTED at any quant -- no 8-pack has been run on this model."
+    weights_companions:
+      - dflash2-q4km
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/glm53-flash-dual-iq3xxs-moecache:
+    model: glm-5.3-flash
+    weights_variant: unsloth-ud-iq3xxs
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: anbeeld-glm53-dflash2
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 110
+    chat_template: native
+    tp: 2
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq3xxs/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8125
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🧪 EXPERIMENTAL — NEVER BOOTED. Copied from the VALIDATED unsloth-ud-iq4xs sibling 2026-08-29; the non-comment delta is 4 lines (service key, container_name, port, weights path + shard count 5->4). ⭐ The POINT is residency: expert byte-size is the master variable, and this quant's experts are 24% smaller — MEASURED from the GGUF tensor table per-expert-matrix over expert_count=288: iq2_s 2,624 KiB x82 (63.6%, dominant), iq3_s 3,520 x41, iq4_xs 4,352 x3, q2_K 2,688 x2, q3_K 3,520 x1; weighted average 2,957 vs IQ4_XS's 3,867. ⭐ MEASURED on first boot 2026-08-29 (dual, slots SUMMED per device): CUDA0 1,975 + CUDA1 1,506 = 3,481 slots vs IQ4_XS's 2,143 = +62.4%, in a SMALLER pool (9,714 vs 10,874 MiB) — the whole gain is expert byte-size, and it beat the ~31% predicted from the 24% average shrink because the realised pools are more iq2_s-dominated than the model-wide average. Coherent on a one-word probe. ⚠️ CARDS IMBALANCED: 22,604 / 23,850 MiB leaves ~726 MiB CUDA1 headroom. ⚠️ host_ram_gb 110 is nominal against the compose's 114 worst case (113 GiB of weights); the IQ4_XS serving-RSS measurement does NOT transfer. ⚠️ QUALITY AT IQ3 IS UNTESTED — no verify-full, no bench, no 8-pack on this quant."
+    weights_companions:
+      - dflash2-q4km
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/glm53-flash-multi4-iq3xxs-moecache:
+    model: glm-5.3-flash
+    weights_variant: unsloth-ud-iq3xxs
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: anbeeld-glm53-dflash2
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 110
+    chat_template: native
+    tp: 4
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/glm-5.3-flash/llamacpp-club3090/compose/multi4/unsloth-ud-iq3xxs/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8126
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🧪 EXPERIMENTAL — NEVER BOOTED. Copied from the VALIDATED unsloth-ud-iq4xs sibling 2026-08-29; the non-comment delta is 4 lines (service key, container_name, port, weights path + shard count 5->4). ⭐ The POINT is residency: expert byte-size is the master variable, and this quant's experts are 24% smaller — MEASURED from the GGUF tensor table per-expert-matrix over expert_count=288: iq2_s 2,624 KiB x82 (63.6%, dominant), iq3_s 3,520 x41, iq4_xs 4,352 x3, q2_K 2,688 x2, q3_K 3,520 x1; weighted average 2,957 vs IQ4_XS's 3,867. ⭐ MEASURED on first boot 2026-08-29 (dual, slots SUMMED per device): CUDA0 1,975 + CUDA1 1,506 = 3,481 slots vs IQ4_XS's 2,143 = +62.4%, in a SMALLER pool (9,714 vs 10,874 MiB) — the whole gain is expert byte-size, and it beat the ~31% predicted from the 24% average shrink because the realised pools are more iq2_s-dominated than the model-wide average. Coherent on a one-word probe. ⚠️ CARDS IMBALANCED: 22,604 / 23,850 MiB leaves ~726 MiB CUDA1 headroom. ⚠️ host_ram_gb 110 is nominal against the compose's 114 worst case (113 GiB of weights); the IQ4_XS serving-RSS measurement does NOT transfer. ⚠️ QUALITY AT IQ3 IS UNTESTED — no verify-full, no bench, no 8-pack on this quant."
+    weights_companions:
+      - dflash2-q4km
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/glm53-flash-multi8-iq3xxs-moecache:
+    model: glm-5.3-flash
+    weights_variant: unsloth-ud-iq3xxs
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: anbeeld-glm53-dflash2
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 110
+    chat_template: native
+    tp: 8
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/glm-5.3-flash/llamacpp-club3090/compose/multi8/unsloth-ud-iq3xxs/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8127
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🧪 EXPERIMENTAL — NEVER BOOTED. Copied from the VALIDATED unsloth-ud-iq4xs sibling 2026-08-29; the non-comment delta is 4 lines (service key, container_name, port, weights path + shard count 5->4). ⭐ The POINT is residency: expert byte-size is the master variable, and this quant's experts are 24% smaller — MEASURED from the GGUF tensor table per-expert-matrix over expert_count=288: iq2_s 2,624 KiB x82 (63.6%, dominant), iq3_s 3,520 x41, iq4_xs 4,352 x3, q2_K 2,688 x2, q3_K 3,520 x1; weighted average 2,957 vs IQ4_XS's 3,867. ⭐ MEASURED on first boot 2026-08-29 (dual, slots SUMMED per device): CUDA0 1,975 + CUDA1 1,506 = 3,481 slots vs IQ4_XS's 2,143 = +62.4%, in a SMALLER pool (9,714 vs 10,874 MiB) — the whole gain is expert byte-size, and it beat the ~31% predicted from the 24% average shrink because the realised pools are more iq2_s-dominated than the model-wide average. Coherent on a one-word probe. ⚠️ CARDS IMBALANCED: 22,604 / 23,850 MiB leaves ~726 MiB CUDA1 headroom. ⚠️ host_ram_gb 110 is nominal against the compose's 114 worst case (113 GiB of weights); the IQ4_XS serving-RSS measurement does NOT transfer. ⚠️ QUALITY AT IQ3 IS UNTESTED — no verify-full, no bench, no 8-pack on this quant."
+    weights_companions:
+      - dflash2-q4km
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/qwen38-flash-next-dual-q4kxl-moecache:
+    model: qwen3.8-flash-next
+    weights_variant: unsloth-ud-q4kxl
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: null
+    spec_method: ngram-mod
+    kv_format: q8_0
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 110
+    chat_template: native
+    tp: 2
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-flash-next/llamacpp-club3090/compose/dual/unsloth-ud-q4kxl/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8122
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🧪 Validated 2026-08-29 on llamacpp-club3090-v1.5 (rc0): verify-full 10/10 (the MTP check skips -- it is vLLM-log-format-specific), bench-agentic 2x12 turns to 35,254 prompt tok with TTFT growing 8.0x against 25.1x context (SUB-LINEAR) and decode 27.7-44 TPS with no cliff in the 21-26K band, vision 4/4 on ground truth. bench.sh canonical: decode 39.28 narrative (CV 0.8%) / 38.57 code (CV 1.8%), prefill 749.09@10K (CV 0.2%), TTFT ~415 ms -- the FASTEST model on this stack as of this date, and the reason is expert BYTE-SIZE (1,638,400 weights per ffn_up vs GLM's 8,388,608), not the quant. Expert pool 9,435 slots (CUDA0 q4_K 3,044 + q5_1 1,490 + q8_0 128; CUDA1 q4_K 2,955 + q5_1 1,329 + q8_0 305 + q5_K 184) at MOE_RESERVE_MB=1536 -- read at LLAMA_ARG_LOG_VERBOSITY=4 and SUMMED per device; this quant makes 3-4 pools PER CARD and one pool's used=N/N under-reports badly. ⭐ Projector ships on the HOST (-mmdev none, default since 2026-08-29): on CUDA0 it cost 1,114 MiB and is allocated AFTER the pool is sized, leaving only 830 MiB headroom with a drafter active -- a latent OOM on the first image request. Host placement costs ZERO cache slots (9,435 either way) and GPU1 was byte-identical across the A/B. ⛔ NO DRAFTER EXISTS: no MTP head in the GGUF (nextn_predict_layers ABSENT, verified) and no external drafter for qwen4exp; engine support is an OPEN DRAFT PR (ggml-org/llama.cpp#27836). n-gram drafting needs no drafter file and IS available: ngram-mod at n_max=8 measured +64% on REPEATED context but -1.3% (noise) on held-out prompts -- the gain is cache-residency dependent, not acceptance dependent, so it is NOT enabled by default. ⛔ Its DEFAULTS are harmful (n_max=64 measured -7.6%) and --spec-draft-n-max binds NONE of the ngram types. ⚠️ Ships 204800, NOT the declared 262144 -- that boots but collapses the pool to 802/1,026 MiB. ⚠️ QUALITY UNTESTED -- no 8-pack has been run on this model."
+    weights_companions:
+      - mmproj-f16
+    gateway: true
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+  llamacpp-club3090/qwen38-flash-next-multi4-q4kxl-moecache:
+    model: qwen3.8-flash-next
+    weights_variant: unsloth-ud-q4kxl
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: null
+    spec_method: ngram-mod
+    kv_format: q8_0
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 110
+    chat_template: native
+    tp: 4
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-flash-next/llamacpp-club3090/compose/multi4/unsloth-ud-q4kxl/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8123
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🐣 NEVER BOOTED -- this rig has 2 GPUs, so 4-card topologies are COMMUNITY-VALIDATED BY DESIGN; 'never booted here' is a permanent property, NOT a TODO. Derived mechanically from the VALIDATED dual sibling by a 5-line delta (service key, container_name, port, device_ids, -ts); everything else is byte-identical, verified by diff. ⛔ CONSTANTS ARE INHERITED, NOT MEASURED: MOE_RESERVE_MB (1536), -ub/-b and CTX (204800) were derived against 2x24 GB, and moe-cache `granted` is computed per device as free-minus-reserve, so per-card pools WILL differ at 4 cards -- re-derive before quoting any number. ⭐ The thing to measure first on real hardware: `-ot ...=CPU` DISABLES pipeline parallelism (learnings/moe-cache-engine.md section 11), and that costs more the more cards you add. ✅ Unlike GLM's multi4, the projector is on the HOST (-mmdev none) so this does NOT inherit the card-0 pinning hazard where the projector lands on the card carrying pool + KV."
+    weights_companions:
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+  llamacpp-club3090/qwen38-flash-next-multi8-q4kxl-moecache:
+    model: qwen3.8-flash-next
+    weights_variant: unsloth-ud-q4kxl
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.5
+    drafter: null
+    spec_method: ngram-mod
+    kv_format: q8_0
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 110
+    chat_template: native
+    tp: 8
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-flash-next/llamacpp-club3090/compose/multi8/unsloth-ud-q4kxl/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8124
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🐣 NEVER BOOTED -- this rig has 2 GPUs, so 8-card topologies are COMMUNITY-VALIDATED BY DESIGN; 'never booted here' is a permanent property, NOT a TODO. Derived mechanically from the VALIDATED dual sibling by a 5-line delta (service key, container_name, port, device_ids, -ts); everything else is byte-identical, verified by diff. ⛔ CONSTANTS ARE INHERITED, NOT MEASURED: MOE_RESERVE_MB (1536), -ub/-b and CTX (204800) were derived against 2x24 GB, and moe-cache `granted` is computed per device as free-minus-reserve, so per-card pools WILL differ at 8 cards -- re-derive before quoting any number. ⭐ The thing to measure first on real hardware: `-ot ...=CPU` DISABLES pipeline parallelism (learnings/moe-cache-engine.md section 11), and that costs more the more cards you add. ✅ Unlike GLM's multi8, the projector is on the HOST (-mmdev none) so this does NOT inherit the card-0 pinning hazard where the projector lands on the card carrying pool + KV."
+    weights_companions:
+      - mmproj-f16
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
   llamacpp-club3090/deepseek-flash-multi4-q8-moecache:
     model: deepseek-v4-flash-0731
     weights_variant: unsloth-q8-kxl
     workload: long-ctx-single
-    engine: llamacpp-club3090
+    engine: llamacpp-club3090-v1.5
     drafter: dspark
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: tensor-override
     moe_cache: true
     host_ram_gb: 156
     chat_template: native
@@ -1876,16 +2280,79 @@ entries:
     serve_aliases: []
     required_sm: 8.6
     category: frontier
+  llamacpp-club3090/deepseek-flash-vision-dual-q8-moecache:
+    model: deepseek-v4-flash-vision-exp
+    weights_variant: unsloth-ud-q8kxl
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.6
+    drafter: null
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 156
+    chat_template: native
+    tp: 2
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/deepseek-v4-flash-vision-exp/llamacpp-club3090/compose/dual/unsloth-ud-q8kxl/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8128
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "VALIDATED 2026-09-01 (controlled re-run: vm.swappiness=1, clean boot, no competing processes). verify-full 10/10, boots ~110 s. Canonical bench at the SHIPPED default (THREADS unset -> -t 16), DRAFTER-FREE: decode 22.47 narrative (CV 1.3%) / 22.85 code (CV 1.2%); prefill 413.7 @10K (CV 1.5%) and 351.4 @90K; decode-at-depth 19.50 @10K and 17.38 @90K. MARGINAL hit rate 63.5% / 60.5% per card -- marginal, NOT cumulative (cumulative embeds cold-fill and is not boot-comparable). Pool 5,360 slots of 11,008 experts (48.7%). VRAM unaccounted only 939 MiB drafter-free. Expert bundle 3264 MiB/layer uniform, MXFP4, verified from the GGUF tensor table BEFORE download and confirmed live at boot. SUPERSEDES the 2026-08-31 figures (22.94/21.29/407.3, hit 63.1-60.2%), which were taken on a run bench.sh had flagged swap check: FAIL with 974 MB paged out and were published without that caveat -- code was understated ~7%, and the hit rates were cumulative. NOT CLEAN EITHER: the re-run still reported swap check FAIL at 155 MB; swappiness=1 reduced but did not eliminate it. Best available, not clean. FLOOR NOT CEILING: 16 threads is ~20% below this rig's measured optimum of 28. DRAFTER: works and is a SPLIT VERDICT -- 0731's DSpark on host (-devd none) gives -22.5% narrative, +17.9% code (matching the sibling's published +18.4%), +27.4% at 90K depth, for -29% pool and -6.4pp marginal hit. Deliberately NOT shipped: it is a workload-specific opt-in. -devd CUDA1 DOES NOT FIT (needs 33,317 MiB on a 24,576 card). NO VISION despite the model name: no mmproj published, no clip/vision metadata, zero vision tensors across all 1,328. Serves TEXT-ONLY. QUALITY UNTESTED: no 8-pack, no soak, no verify-stress. ATTRIBUTION: the expert cache is leloch's work (RFC ggml-org#24528), unmerged in mainline."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  llamacpp-club3090/deepseek-flash-vision-multi4-q8-moecache:
+    model: deepseek-v4-flash-vision-exp
+    weights_variant: unsloth-ud-q8kxl
+    workload: long-ctx-single
+    engine: llamacpp-club3090-v1.6
+    drafter: null
+    spec_method: null
+    kv_format: fp16
+    act_format: 16bit
+    act8_capable: false
+    offload: tensor-override
+    moe_cache: true
+    host_ram_gb: 156
+    chat_template: native
+    tp: 4
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/deepseek-v4-flash-vision-exp/llamacpp-club3090/compose/multi4/unsloth-ud-q8kxl/moecache.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8129
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "NEVER BOOTED, permanently: this rig has exactly two GPUs, so 4-card topologies are COMMUNITY-VALIDATED BY DESIGN, not a pending TODO. The DUAL sibling passed verify-full 10/10 on 2026-09-01 (22.47 narrative / 22.85 code / 413.7 prefill@10K at -t 16, drafter-free, marginal hit 63.5/60.5%), which validates the model+engine path but says NOTHING about 4-card VRAM, pool sizing or the -ot split -- all inherited from the dual and to be re-derived. NO VISION despite the model name: no mmproj, no clip/vision metadata, zero vision tensors across all 1,328. Serves TEXT-ONLY. DRAFTER: none wired; 0731's DSpark is tokenizer-identical and works on the dual (split verdict: -22.5% narrative, +17.9% code), but -devd CUDA1 does not fit on 24 GB cards. QUALITY UNTESTED. ATTRIBUTION: the expert cache is leloch's work (RFC ggml-org#24528), unmerged in mainline."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
   llamacpp-club3090/deepseek-flash-dual-q8-moecache:
     model: deepseek-v4-flash-0731
     weights_variant: unsloth-q8-kxl
     workload: long-ctx-single
-    engine: llamacpp-club3090
+    engine: llamacpp-club3090-v1.5
     drafter: dspark
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: tensor-override
     moe_cache: true
     host_ram_gb: 156
     chat_template: native
@@ -1913,10 +2380,11 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: dspark
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: residency
     moe_cache: false
     host_ram_gb: 146
     chat_template: native
@@ -1944,10 +2412,11 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: dspark
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: residency
     moe_cache: false
     host_ram_gb: 86
     chat_template: native
@@ -1975,10 +2444,11 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: dspark
+    spec_method: null
     kv_format: fp16
     act_format: 16bit
     act8_capable: false
-    offload: n-cpu-moe
+    offload: residency
     moe_cache: false
     host_ram_gb: 120
     chat_template: native
@@ -2006,6 +2476,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: tess-mtp-gguf
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -2034,6 +2505,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2064,6 +2536,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: tess-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2093,6 +2566,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: thinkingcap-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -2122,6 +2596,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: nemotron-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2152,6 +2627,7 @@ entries:
     workload: fast-chat
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: int8_per_token_head
     act_format: 16bit
     act8_capable: false
@@ -2182,6 +2658,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: null
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -2210,6 +2687,7 @@ entries:
     workload: fast-chat
     engine: llama-cpp-local
     drafter: null
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -2238,6 +2716,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: null
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2266,6 +2745,7 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: null
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -2294,6 +2774,7 @@ entries:
     workload: vision-coding
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q4_0
     act_format: 16bit
     act8_capable: false
@@ -2311,7 +2792,7 @@ entries:
     required_engine_features: []
     default_port: 8090
     kvcalc_key: SKIP
-    status: incubating
+    status: experimental
     status_note: "Qwen3.8-27B UD-IQ4_XS GGUF + F16 mmproj on a single 3090 (llama-cpp-local, b10236). q4_0/q4_0 KV @262144 + VISION, built-in MTP n=2 (--spec-type draft-mtp). ⭐ MAX-EVERYTHING single-card config (maintainer decision 2026-08-20): the q4_0 KV (BELOW the stack q8 serving floor) is the mechanism that fits full 262K ctx AND the F16 projector on one 24 GB card. For serving-grade q8_0 KV (131K) override KV_TYPE=q8_0 CTX_SIZE=131072 on this compose (q8@131K + vision, decode-free). ✅ VALIDATED 2026-08-20 (single 3090, GPU0, this exact compose): boots + fits 22,290 MiB load / 22,332 MiB peak under image-encode (~2.2 GiB headroom); verify-full PASS (all functional checks; the 2 skips are vLLM-only); image recognition CORRECT (blue-circle + red-7 probe); n_ctx_slot=262144, 'multimodal model' loaded; text decode projector-free (bench parity w/ the q8 text config, 61.7 narr / 72.7 code). CAVEATS: (1) q4_0 KV KLD ~5.75x worse than q8_0, NEVER depth-validated on this DeltaNet hybrid family — a max-ctx/vision exhibit, not serving-grade; (2) vision untested beyond one image probe — a large/high-res image at 262K encodes into far more tokens and could OOM the thin ~2.2 GiB margin (set IMAGE_MIN_TOKENS with budget in mind); (3) 262K NIAH-clean to 240,635 tok (91%) 2026-08-20 (addressability via verify-stress FAST; full-fidelity retrieval NIAH + fine ladder past 240K still unrun). Precedent: qwen3.6-27b's mtp-vision also ran q4_0 KV. Launch --force (incubating; hidden from switch.sh --list). Promote to 🧪/⚠️ only after a q4-config bench + verify-stress NIAH + soak; q4 KV keeps it off ✅ permanently (floor policy)."
     weights_companions:
       - gguf_mmproj_f16
@@ -2338,6 +2819,7 @@ entries:
     workload: long-ctx-single
     engine: llama-cpp-local
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: q8_0
     act_format: 16bit
     act8_capable: false
@@ -2355,7 +2837,7 @@ entries:
     required_engine_features: []
     default_port: 8087
     kvcalc_key: SKIP
-    status: incubating
+    status: experimental
     status_note: "Qwen3.8-27B (Unsloth Dynamic UD-Q8_K_XL GGUF, 31.5 GB) on dual 3090 layer-split (-sm layer -ts 1,1 — PCIe-only, no NVLink, no cross-GPU all-reduce), mainline llama.cpp (llama-cpp-local pin, server-cuda-b10236). q8_0/q8_0 KV @262144 (the model's architectural max_position_embeddings, i.e. genuinely max context), -b 4096 -ub 512, built-in MTP n=2 (--spec-type draft-mtp), text-only. Dual is mandatory, not a preference: 31.5 GB of weights does not fit a 24 GB card. ⚠️ NOTHING HAS BOOTED — authored 2026-08-14 before the weights landed; the weights are now down and sha256-verified, but this slug has still never been launched. Unvalidated: never launched, verify-full 0/8 (not run), no verify-stress / NIAH / soak / bench / 8-pack, and NO TPS number is claimed. The 262144 ceiling is COMPUTED, not measured: 16 growing layers x 4 KV heads x 256 head_dim x 2 tensors = 32,768 elements/token, at q8_0 = 34,816 B/token = 8.50 GiB at 262K; against 47.40 GiB usable across both cards that is 31.50 (weights — the HF page figure, taken while the file was STILL DOWNLOADING and unconfirmed on this rig; almost certainly decimal GB, so the real GiB footprint is likely ~29.3 and the true headroom LARGER, since the IQ4_NL sibling's page '16.3 GB' landed as 15.22 GiB) + 8.50 (KV) + ~2.50 (buffers) = 42.50 GiB, ~4.90 GiB headroom (~21.25 of ~23.40 GiB per card under an even 32/32 layer split, which puts 8 of the 16 full-attention layers on each — evenness ASSUMED, not read off a boot). Allocating 262144 is NOT filling it: the Tess-4-27B dual, which has identical growing-attention geometry, allocates 262144 and NIAH-fills to ~240K (~91%) — expect a comparable or worse gap here until a ladder proves otherwise. ALSO UNPROVEN: that this GGUF loads on the b10236 pin at all — the pin predates the model. q8_0 KV is free here (q4_0 would save 4.25 GiB but buys no context, since 262144 is already the architectural ceiling) and pairing near-lossless UD-Q8_K_XL weights with a lossy KV would be an odd trade. Vision is OFF because the mmproj projectors in the same HF repo were not downloaded. Promote to 🧪 on a clean boot + verify-full; to ⚠️/✅ only after the full gate."
     weights_companions: []
     gateway: false
@@ -2381,6 +2863,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2424,6 +2907,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -2441,7 +2925,7 @@ entries:
     required_engine_features: []
     default_port: 8092
     kvcalc_key: SKIP
-    status: incubating
+    status: experimental
     status_note: "Qwen3.8-27B 'max accuracy' tier, 4-card (TP=4): official Qwen/Qwen3.8-27B-FP8 weights + bf16 KV + MTP n=3 @262144. Identical to vllm/qwen38-27b-dual-max apart from --tensor-parallel-size, the required gpu-count, and --kv-cache-dtype; keep the first two in lockstep. ⚠️ KV DELIBERATELY DIVERGES from the dual (2026-08-15): this runs bf16 (--kv-cache-dtype auto over the pinned --dtype bfloat16) where the dual runs fp8 e4m3, because only TP>=4 has the per-card headroom — weights fall to ~7.2 GiB/card here vs ~14.4 on the dual, so a 16.00 GiB bf16 pool fits (~4.00 GiB/card) where it would not on 2 cards. Do not 'restore lockstep' by reverting it, and do not propagate it to the dual. TWO independent reasons this is incubating, and only the first is closable. (1) NOTHING HAS BOOTED on any card count — authored 2026-08-14; the weights have since landed and verified (30.87 GB / 28.75 GiB, all 66 safetensors CRC32-clean) but no engine has ever loaded them; no verify-full (0/8), no verify-stress / NIAH / soak / bench / 8-pack, NO TPS number claimed, no `Quality:` field, and the 262144 ceiling is arithmetic plus a qwen3.6-27b analogy rather than a measured fill depth. Engine compatibility is likewise inferred: the v0.25.1 pin predates this model. (2) ⛔ 4-CARD IS COMMUNITY-VALIDATED BY DESIGN and that is PERMANENT, not a TODO: the maintainer rig has exactly two 3090s, so TP=4 can never boot here and should never be filed as pending work. The on-rig proxy is vllm/qwen38-27b-dual-max, which is the same serving config at TP=2 EXCEPT for KV (it runs fp8 e4m3, this runs bf16) — so its numbers transfer on topology but NOT on pool size, concurrency, or any KV-sensitive quality result — and everything TP=4-specific (NCCL across 4 PCIe cards, the 4-way shard, the larger KV pool) is validated by whoever first runs it on 4 cards; that first community boot IS the validation. num_kv_heads=4 divides evenly by 4, so the shard is valid on paper. What TP=4 buys is headroom, not context: 262144 is already the architectural ceiling and the dual is projected to reach it, so the 4 cards convert ~14.4 GiB/card of weights into ~7.2, leaving far more room for KV pool and concurrency — on the qwen3.6-27b equivalent, single-stream decode was ~flat from 2 to 4 cards and the pool is what grew. Expect that shape, expect nothing quantitative. PCIe-only with no NVLink means more ranks = more all-reduce on a slow bus; custom all-reduce stays disabled in the entrypoint. Everything else (dense-not-MoE confirmation, the 16-growing-layer KV math — but DOUBLED for bf16: 65,536 B/token = 16.00 GiB @262K, ~4.00 GiB/card at TP=4, where the dual's note states the fp8 figure of 32,768 B/token, the 30.9 GB decimal / 28.8 GiB unit trap, why fp8_e5m2 is rejected, why the chat template is NATIVE and not froggeric, the MODEL-CARD sampler — Instruct row, temp 0.7 / top_p 0.80 / presence_penalty 1.5, because thinking ships off — and the built-in-MTP caveat) matches the dual sibling's note verbatim. ⚠️ MTP drafter exposed to OPEN vllm#50021 (GDN spec-decode wild write, live in this pin; v0.26.0 predates the fix) — structural exposure inherited from the hybrid-GDN family, never observed here because nothing has run. Mitigate with SPEC=off. Detail + re-test trigger: docs/UPSTREAM.md. Launch requires --force (incubating); hidden from switch.sh --list. Promote to 🧪 only after a clean boot + verify-full on a real 4-card host."
     weights_companions: []
     gateway: false
@@ -2467,6 +2951,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -2484,7 +2969,7 @@ entries:
     required_engine_features: []
     default_port: 8093
     kvcalc_key: SKIP
-    status: incubating
+    status: experimental
     status_note: "Qwen3.8-27B 'max accuracy' tier, 8-card (TP=8): same serving config as vllm/qwen38-27b-multi4-max with three lines changed — --tensor-parallel-size, the Requires-min-gpu-count header, and the port. ⚠️⚠️ TP=8 IS NOT THE SAME SHARD SHAPE AS TP=2/TP=4 AND DOES NOT SCALE THE SAME WAY: this model has num_kv_heads=4, which divides cleanly by 2 and by 4 but NOT by 8. At TP=8 vLLM REPLICATES KV heads across rank pairs rather than splitting them, so per-card KV stays at roughly the TP=4 figure (~4.00 GiB @262K at this compose's bf16 KV), NOT half of it. Only the WEIGHTS take the full 8-way split (~3.6 GiB/card vs ~7.2 at TP=4). So the 8-card gain over 4 is weight headroom only, bought with more all-reduce traffic on a PCIe bus with no NVLink — and on the qwen3.6-27b equivalent single-stream decode was ALREADY ~flat from 2 cards to 4. Expect flat-or-worse decode; expect nothing quantitative until measured. (1) NOTHING HAS BOOTED on any card count — the weights are on disk and CRC32-verified (66 safetensors, 30.87 GB decimal / 28.75 GiB, revision 017b9c7a) but no engine has loaded them; no verify-full, no bench, no 8-pack, no Quality: field, and 262144 is arithmetic plus a sibling analogy rather than a measured fill. (2) ⛔ 8-CARD IS COMMUNITY-VALIDATED BY DESIGN and that is PERMANENT, not a TODO: the maintainer rig has exactly two 3090s, so TP=8 can never boot here and must never be filed as pending work. The on-rig proxy is vllm/qwen38-27b-dual-max (TP=2, which HAS booted and passed verify-full on the reference 2x3090 2026-08-17, with a canonical bench (67.39 narr / 85.75 code tok/s, MTP accept 2.62) — see BENCHMARKS.md) — but it runs fp8 e4m3 KV where this runs bf16 (--kv-cache-dtype auto), a deliberate 2026-08-15 divergence on headroom grounds, so its pool/concurrency numbers do NOT transfer. Everything TP=8-specific — NCCL across 8 PCIe cards, the 8-way weight shard, KV-head replication — is validated by whoever first runs it on 8 cards; that first community boot IS the validation. Report via numbers-from-your-rig. P2P is NOT hardcoded: scripts/detect_nvlink.sh (NVLINK_MODE=auto) probes the interconnect and, when it finds a fast one, exports NCCL_P2P_LEVEL and UNSETS the compose's NCCL_P2P_DISABLE default — so an 8-card host with working P2P picks it up automatically. ⚠️ A 'topo -p2p OK' line reports a grant, not a working transfer; prove it with a real transfer check. ⚠️ MTP drafter exposed to OPEN vllm#50021 (GDN spec-decode wild write, live in this pin); mitigate with SPEC=off. Detail: docs/UPSTREAM.md. Launch requires --force (incubating); hidden from switch.sh --list. Promote to 🧪 only after a clean boot + verify-full on a real 8-card host. Everything else (dense-not-MoE, the 16-growing-layer KV math, the decimal/GiB unit trap, why fp8_e5m2 is rejected, the NATIVE chat template, the MODEL-CARD sampler) matches the multi4 sibling verbatim."
     weights_companions: []
     gateway: false
@@ -2510,6 +2995,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2553,6 +3039,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2596,6 +3083,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -2639,6 +3127,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -2682,6 +3171,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -2725,6 +3215,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: false
@@ -2768,6 +3259,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -2811,6 +3303,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -2854,6 +3347,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -2897,6 +3391,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -2940,6 +3435,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -2983,6 +3479,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: int8
     act8_capable: true
@@ -3026,6 +3523,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: true
@@ -3069,6 +3567,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: true
@@ -3112,6 +3611,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
+    spec_method: null
     kv_format: bf16
     act_format: 16bit
     act8_capable: true
@@ -3155,6 +3655,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
@@ -3198,6 +3699,7 @@ entries:
     workload: long-ctx-single
     engine: vllm-stable
     drafter: qwen-mtp-builtin
+    spec_method: null
     kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false

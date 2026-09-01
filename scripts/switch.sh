@@ -1135,6 +1135,8 @@ up_variant() {
     # Engine-agnostic: warn if a multi-card (TP>=2) target sits on a narrow/asymmetric
     # PCIe link, where the per-layer NCCL all-reduce is the bottleneck (club-3090#142).
     preflight_pcie_lane_width "${full_dir}/${file}" || true
+    # WARN-only first-token-latency hint; never blocks a boot.
+    preflight_offload_thp "${full_dir}/${file}" || true
     # Single-card util-override guard — runs even under --force (the nvfp4 slug
     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
     preflight_single_card_util "${full_dir}/${file}" "$v" || true

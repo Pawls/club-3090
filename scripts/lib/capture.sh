@@ -334,6 +334,31 @@ cap_moe_cache_config() {
 }
 
 # ---------------------------------------------------------------------------
+# VRAM breakdown — where the card's memory actually went
+# ---------------------------------------------------------------------------
+# Added 2026-08-31 after a DeepSeek-V4-Flash-Vision-Exp run where nvidia-smi read
+# 22,612 MiB/card and NOTHING in the bench output said what held it. Two facts
+# that only a breakdown surfaces:
+#   • `-devd none` (drafter on the HOST) still costs ~7.5 GiB of VRAM across two
+#     cards for the DRAFT CONTEXT. "On the host" is not "free".
+#   • The moe-cache pool GROWS after boot (5,814 -> 9,248 MiB on CUDA0 over three
+#     generations) until it hits the free-minus-reserve floor. A pool figure read
+#     at boot is a LOWER BOUND — quoting it understated the warmed pool by 42%.
+# One line per device. Components are llama.cpp-family; on other engines those
+# lines are absent and only the nvidia-smi total is reported.
+cap_vram_breakdown() {                 # $1=log
+  local log="${1:-}"
+  [[ -r "$log" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  local _d
+  # resolve from BASH_SOURCE, never cwd: a wrong dir here would make the
+  # breakdown silently vanish from every run instead of failing loudly
+  _d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+  [[ -r "${_d}/vram_breakdown.py" ]] || return 1
+  PYTHONUTF8="${PYTHONUTF8:-1}" python3 "${_d}/vram_breakdown.py" "$log"
+}
+
+# ---------------------------------------------------------------------------
 # moe-cache log parsing — one python entry point, several modes
 # ---------------------------------------------------------------------------
 # Line shapes handled (both the fork's current census format and the older one):
@@ -388,28 +413,42 @@ def num(pat, s, cast=int):
 
 if mode == "census":
     # per device: pool count, TOTAL slots, TOTAL MiB, mean expert KiB
-    per = {}
+    #
+    # ⚠️ Aggregate across DISTINCT pool indices, taking the LAST report of each.
+    # A device legitimately holds several pools (one per expert dtype) and those
+    # DO sum. But loading a drafter triggers a full pool RE-ALLOCATION, and the
+    # SAME index is then logged twice -- summing those double-counts. Measured
+    # 2026-09-01 on deepseek-v4-flash-vision-exp: CUDA1 pool[0] reported at 5546
+    # then 6910 MiB, and the old sum-every-line census printed 12456 = exactly
+    # 5546+6910, inflating both slots and bytes on every drafter-enabled run.
+    # Keyed by (device, index) with last-wins, both cases come out right.
+    last = {}
     for ln in lines:
         if "pool[" not in ln:
             continue
         d = DEV.search(ln)
         if not d:
             continue
-        key = d.group(1)
-        e = per.setdefault(key, {"pools": 0, "slots": 0, "mib": 0, "expert": [], "type": ""})
-        e["pools"] += 1
-        s = num(r"slots=(\d+)", ln)
-        if s:
-            e["slots"] += s
-        t = num(r"total=(\d+)\s*MiB", ln)
-        if t:
-            e["mib"] += t
-        x = num(r"expert=(\d+)\s*KiB", ln)
-        if x:
-            e["expert"].append(x)
+        idx = re.search(r"pool\[(\d+)\]", ln)
+        key = (d.group(1), idx.group(1) if idx else "?")
         ty = re.search(r"type=(\S+)", ln)
+        last[key] = (num(r"slots=(\d+)", ln), num(r"total=(\d+)\s*MiB", ln),
+                     num(r"expert=(\d+)\s*KiB", ln), ty.group(1) if ty else "",
+                     last.get(key, (None, None, None, "", 0))[4] + 1)
+    per = {}
+    for (dev, _idx), (sl, mib, exp, ty, seen) in sorted(last.items()):
+        e = per.setdefault(dev, {"pools": 0, "slots": 0, "mib": 0, "expert": [], "type": "", "realloc": 0})
+        e["pools"] += 1
+        if sl:
+            e["slots"] += sl
+        if mib:
+            e["mib"] += mib
+        if exp:
+            e["expert"].append(exp)
         if ty and not e["type"]:
-            e["type"] = ty.group(1)
+            e["type"] = ty
+        if seen > 1:
+            e["realloc"] = max(e["realloc"], seen)
     if not per:
         sys.exit(1)
     for k in sorted(per):
@@ -417,6 +456,9 @@ if mode == "census":
         exp = round(sum(e["expert"]) / len(e["expert"])) if e["expert"] else 0
         print(f"{k} pools={e['pools']} slots={e['slots']} total_mib={e['mib']} "
               f"expert_kib={exp} type={e['type'] or '-'}")
+        if e.get("realloc", 0) > 1:
+            print(f"{k} note: {e['realloc']} reports per pool index (drafter re-allocation) "
+                  f"— figures are the LAST per pool, not a sum of all reports")
 
 elif mode == "counters":
     # LAST cumulative counter emission per device (hits/total/evictions + health)
