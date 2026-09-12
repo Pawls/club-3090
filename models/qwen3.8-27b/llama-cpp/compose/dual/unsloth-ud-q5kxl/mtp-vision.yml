@@ -331,6 +331,25 @@ services:
       # high and xhigh both render 53 prompt_tokens). The vLLM path RAISES on `high`
       # instead. Setting REASONING_EFFORT=high gets the opposite of what it suggests.
       - LLAMA_ARG_CHAT_TEMPLATE_KWARGS=${LLAMA_ARG_CHAT_TEMPLATE_KWARGS:-{"preserve_thinking":${PRESERVE_THINKING:-true},"reasoning_effort":"${REASONING_EFFORT:-xhigh}"}}
+      # ⚠️⚠️ PROMPT-CACHE CEILING — this is a HARD CLIFF, not a tuning preference.
+      # llama.cpp caches a slot's prompt state in HOST RAM (not VRAM) so a returning
+      # conversation skips its prefill. The cap is -cram / LLAMA_ARG_CACHE_RAM, default
+      # 8192 MiB. A single entry LARGER than the whole cap cannot be stored at any price:
+      #     W srv alloc: - prompt state size 9625.136 MiB exceeds cache size limit 8192.000 MiB, skipping
+      # It is NOT an LRU miss — the log line above is a different path from the benign
+      # "making room for prompt cache entry, removing oldest entry". Under the cap the
+      # cache evicts and works fine; over it, that conversation is NEVER cached.
+      # MEASURED on this lane 2026-09-12 (A-B-A: big prompt, small prompt, same big prompt):
+      #     161,335 tok ->  7,613 MiB  fits   -> A2 re-evaluated 4 tokens,     2.5 s
+      #     203,968 tok ->  9,625 MiB  OVER   -> A2 re-prefilled in full,    359.0 s
+      # => 48.3 KiB/token, so the default 8192 MiB cliff sits at ~173,600 tokens, and a
+      # full 262,144 ctx needs ~12,370 MiB. 13312 covers the architectural max (~282K tok)
+      # with margin, so no conversation on this lane can fall off the cliff.
+      # ⚠️ This is a LIMIT, not a preallocation — RAM is used only as entries are cached.
+      # ⚠️ It is HOST RAM. On a 40 GB WSL2 VM, budget it against `free -m`, not VRAM.
+      # ⚠️ Do NOT set -1 (no limit): unbounded host-RAM growth in a fixed-size WSL2 VM is
+      # its own OOM risk. Pick a number that covers n_ctx and stop there.
+      - LLAMA_ARG_CACHE_RAM=${CACHE_RAM:-13312}
       - CUDA_VISIBLE_DEVICES=${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0,1}}
     # The image ENTRYPOINT is ["/app/llama-server"]. This wrapper is equivalent to it
     # plus the drafter toggle. Disabling REMOVES the drafter flags rather than passing
