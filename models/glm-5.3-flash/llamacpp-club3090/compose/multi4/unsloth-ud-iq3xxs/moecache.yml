@@ -125,7 +125,7 @@
 #      not a quality result. No verify-full, no bench, no 8-pack.
 #      ⚠️ The numbers above are the DUAL measurement, inherited here.
 #      Pools are sized per device (free-minus-reserve) — re-measure.
-#   Status:    🐣 Incubating
+#   Status:    🧪 Experimental
 #   Caveats:   • ⚠️⚠️ THE TUNING BELOW IS INHERITED FROM THE DUAL SLUG, NOT DERIVED
 #                FOR 4 CARDS — the single most important caveat on this file.
 #                `RESERVE_MB=1536`, `-ub/-b 4096`, `SPEC_N=3` and `DRAFT_DEVICE=CUDA1`
@@ -151,6 +151,35 @@
 #                been run on GLM-5.3-Flash. Stays 🧪.
 #   Best for:  long-context MoE serving experiments on the moe-cache engine
 #   Caveats:
+#     • ✅ TOOL CALLING WORKS — via the vendored template override wired below.
+#       ⚠️ It does NOT work on the GGUF's own embedded template: every request carrying
+#       `tools` returns HTTP 400 "Unable to generate parser for this template …
+#       CallExpression at line 163, column 57", and /props reports supports_tools:false.
+#       Reported club-3090#1250 (@paulp83); upstream ggml-org/llama.cpp#28786 (filed
+#       2026-09-11), same symptom previously unanswered on ggml-org/llama.cpp#27754.
+#       ⛔⛔ THE LINE IN THAT ERROR IS THE CRASH SITE, NOT THE CAUSE. Two earlier readings
+#       of this bug were WRONG and are recorded so nobody re-derives them:
+#         ❌ "minja cannot evaluate .items()" — GLM-4.7-Flash.jinja has the identical
+#            construct, is exercised by llama.cpp's own autoparser tests, and passes.
+#         ❌ "the caps probe under-detects supports_object_arguments because the template
+#            iterates instead of indexing" — adding a named access changes nothing; the
+#            probe never gets that far.
+#       ⭐ ACTUAL CAUSE: minja does not implement NUMERIC DOTTED ATTRIBUTE ACCESS (`x.0`).
+#       Jinja2 defines `x.0` as `x[0]`; minja parses it as a non-computed member whose
+#       property is a number literal and throws. The GGUF template uses it in 4 places, so
+#       the caps probe throws, infers NOTHING, and leaves every capability false —
+#       including supports_object_arguments, which gates the JSON-string -> object
+#       conversion of tool arguments (chat.cpp). Arguments therefore stay a string, and
+#       the autoparser then dies on `.items()` at line 163. That is why supports_string_content
+#       is false too, which no tools-only explanation accounts for.
+#       ⇒ The override is the vendor template with `.0.` -> `[0].` in 4 places plus a
+#       null-tool guard. Wire format UNCHANGED. Verified with llama.cpp's own
+#       llama-template-analysis: all four capabilities flip false -> true.
+#       ⚠️ NOT club-3090#1195 — that is an INTERMITTENT 500 parsing the model's OUTPUT
+#       ("Failed to parse tool call arguments as JSON", 2/25 turns, payload-dependent).
+#       Same subsystem, opposite end. Do not merge the two.
+#       ⚠️ NOT live-booted: verified by static analysis + the engine's own autoparser, not
+#       by serving 140 GiB end-to-end. Detail: patches/glm53-minja-numeric-index/README.md
 #     • ⚠️ ATTRIBUTION: the MoE expert cache is **leloch's** work
 #       (github.com/leloch/llama.cpp, RFC ggml-org#24528). This slug packages
 #       it; it does not originate it.
@@ -275,6 +304,9 @@ services:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8126}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+      # minja-compatible chat template — WITHOUT this every tools request 400s and
+      # /props reports supports_tools:false. See patches/glm53-minja-numeric-index/README.md
+      - ../../../patches/glm53-minja-numeric-index/chat_template.jinja:/etc/glm53-chat-template.jinja:ro
     environment:
       # Drafter toggle - docker forwards only what is declared here.
       - SPEC_N=${SPEC_N:-}
@@ -296,6 +328,20 @@ services:
       # Bare passthrough — forwarded ONLY if the caller sets it. Never write
       # `=${VAR:-}`: docker would set it EMPTY, which is not the same as unset.
       - LLAMA_ARG_LOG_VERBOSITY
+      # `--cache-reuse` via env. Inert unless the caller sets it; declared so
+      # trying it produces the ENGINE's answer (it can refuse — see the deepseek
+      # sibling's MLA+SWA note) instead of silence from an undeclared var.
+      - LLAMA_ARG_CACHE_REUSE
+      # Ring size for the above. Inert unless the caller sets it.
+      - GGML_EXPERT_PREFETCH_SLOTS
+      # Bare passthrough — inert unless the caller sets it. Declared so a
+      # graph-reuse A/B can run through the REAL delivery path: docker forwards
+      # only what is listed here, so without this line the two arms of the
+      # experiment are byte-identical and the null result is an artifact of the
+      # harness rather than a measurement. Measured cost of losing reuse on
+      # Qwen3.8-Flash-Next: ~3.9 ms/token (+13.5% decode with it on, 2 boots/arm,
+      # 2026-09-04) — see learnings/moe-cache-engine.md §8b.
+      - LLAMA_GRAPH_REUSE_DISABLE
       # Decode thread count. The entrypoint branches on THREADS but docker only
       # forwards what is declared here, so without this line `-t` was pinned to
       # the slug default and every THREADS= sweep silently measured one value.
@@ -579,6 +625,14 @@ services:
       - '--reasoning-effort'
       - '${REASONING_EFFORT:-max}'
       # Route thoughts to message.reasoning_content (never inline in content).
+      # ⭐ minja cannot parse `x.0` (numeric dotted attribute access); the GGUF's own
+      # template uses it in 4 places, which makes the jinja caps probe throw and report
+      # EVERY capability false — so tool arguments are never converted from JSON string
+      # to object and the autoparser dies. This override is the vendor template with
+      # `.0.` -> `[0].` (semantics-identical in Jinja2) + a null-tool guard. Wire format
+      # unchanged. club-3090#1250.
+      - '--chat-template-file'
+      - '/etc/glm53-chat-template.jinja'
       - '--reasoning-format'
       - '${REASONING_FORMAT:-deepseek}'
       # ✅ What DOES work is not paying for it twice. This GGUF's template sets

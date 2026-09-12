@@ -94,6 +94,19 @@ FAKE_REPO_ROOT = Path("/tmp/fake-club-3090-test-root")
 # ---------------------------------------------------------------------------
 
 
+# #1156: a minimal but REAL compose — ⑤ must register the one that was served.
+_FAKE_COMPOSE = (
+    "# Profile (at-a-glance):\n"
+    "#   Status: 🐣 Incubating\n"
+    "# ---\n"
+    "services:\n"
+    "  llm:\n"
+    "    image: vllm/vllm-openai:v0.27.1\n"
+    "    ports:\n"
+    '      - "${PORT:-20242}:8000"\n'
+)
+
+
 class FakeRunner:
     """Canned-output read runner keyed on a substring of the command.
 
@@ -164,7 +177,7 @@ def ok(stdout: str) -> RunResult:
 
 
 def make_detect(target: ServingTarget):
-    async def _detect() -> ServingTarget:
+    async def _detect(**_kwargs) -> ServingTarget:
         return target
     return _detect
 
@@ -698,22 +711,37 @@ def make_app(
     root = repo_root or FAKE_REPO_ROOT
     # The Optimize brain reads engine/hardware KV-legality lists off the repo
     # tree (stdlib yml scan) — seed the two tiny profile files it needs so the
-    # option table renders in tests.  (Idempotent; nothing else reads these.)
+    # option table renders in tests.
+    #
+    # ⚠️ NEVER OVERWRITE AN EXISTING FILE.  This block used to write
+    # unconditionally, and its "(Idempotent; nothing else reads these.)" claim was
+    # false on both counts: the real repo ships 77-line versions of both files
+    # that `engine_drafters` and the profile-compat layer read.  Any test passing
+    # `repo_root=<the real repo>` therefore TRUNCATED two tracked files to a
+    # 6-line stub — silently, since the writes are wrapped in `except OSError`.
+    # That is how test_services / test_route_g started failing: not from their
+    # own code, but because an unrelated test had clobbered the profile tree.
+    # Seeding a fake root still works (nothing is there yet); a real tree is left
+    # exactly as found.
     try:
         eng = root / "scripts" / "lib" / "profiles" / "engines"
         eng.mkdir(parents=True, exist_ok=True)
-        (eng / "vllm-stable.yml").write_text(
-            "supported_kv_formats:\n"
-            "  - bf16\n  - fp16\n  - fp8_e4m3\n  - fp8_e5m2\n"
-            "  - int8_per_token_head\n", encoding="utf-8")
+        stub = eng / "vllm-stable.yml"
+        if not stub.exists():
+            stub.write_text(
+                "supported_kv_formats:\n"
+                "  - bf16\n  - fp16\n  - fp8_e4m3\n  - fp8_e5m2\n"
+                "  - int8_per_token_head\n", encoding="utf-8")
         hw = root / "scripts" / "lib" / "profiles" / "hardware"
         hw.mkdir(parents=True, exist_ok=True)
         # Ampere card: fp8_e4m3 NOT hardware-legal → dropped from the options.
-        (hw / "rtx-3090.yml").write_text(
-            "sm: 8.6\nvram_gb: 24\n"
-            "supported_kv_formats:\n"
-            "  - bf16\n  - fp16\n  - fp8_e5m2\n  - int8_per_token_head\n",
-            encoding="utf-8")
+        hw_stub = hw / "rtx-3090.yml"
+        if not hw_stub.exists():
+            hw_stub.write_text(
+                "sm: 8.6\nvram_gb: 24\n"
+                "supported_kv_formats:\n"
+                "  - bf16\n  - fp16\n  - fp8_e5m2\n  - int8_per_token_head\n",
+                encoding="utf-8")
     except OSError:
         pass
     runner = runner or FakeRunner(responses or fake_responses())
@@ -1205,13 +1233,22 @@ class TestNavNodesExist:
         """#1014 L3: while the resolved mode is thinking, the card shows the
         registry 'thinking' row (temp/top_p/presence) near the toggle; inherit
         shows no sampler row; force-off pins the instruct row explicitly."""
+        # Assert on the MARKUP-PARSED line, not the raw source string: the key
+        # hints are written `\\[t]` / `\\[r]`, and a raw-substring assertion for
+        # "[t]" passes whether or not the escape is present — so it never
+        # protected the thing it looks like it protects (Textual deletes an
+        # unescaped `[t]`).  Parsing first makes the assertion real.
+        def _seen(lines):
+            from textual.content import Content
+            return "\n".join(Content.from_markup(ln).plain for ln in lines)
+
         m = self._thinking_modal(tmp_path=tmp_path)
         inherit_lines = m._thinking_card_lines()
-        assert any("inherit" in ln and "[t]" in ln for ln in inherit_lines)
+        assert "[t]" in _seen(inherit_lines) and "inherit" in _seen(inherit_lines)
         assert not any("temp" in ln for ln in inherit_lines)
 
         m.action_cycle_thinking()   # → on
-        on_lines = "\n".join(m._thinking_card_lines())
+        on_lines = _seen(m._thinking_card_lines())
         assert "FORCE-ON" in on_lines and "ENABLE_THINKING=true" in on_lines
         assert "temp 1 · top_p 0.95 · presence 0" in on_lines, on_lines
         assert "model card" in on_lines and "[r] reset to card defaults" in on_lines
@@ -3007,6 +3044,129 @@ async def test_scene_preview_shows_all_services_no_clip():
         assert "max-height" not in preview_rule
 
 
+class TestGpuCardsScaleToCardCount:
+    """The GPU panel renders ONE card per detected GPU, at any count.
+
+    Reported from the field 2026-09-08: "c3 cockpit only detects 2 GPU of 4 while
+    nvtop detects everyone".  Detection was never the problem — get_gpu_info()
+    parses every nvidia-smi line — but compose() defined exactly two card widgets
+    and _populate_gpus iterated a hardcoded (0, 1) pair, so cards 2+ were read and
+    dropped at render time.
+
+    This rig has TWO GPUs, so every count here is otherwise unreachable and would
+    ship on assumption.  That is the point of these fixtures.
+    """
+
+    @staticmethod
+    def _cards(n):
+        return [
+            GpuInfo(index=i, mem_used_mib=(i + 1) * 1024, mem_total_mib=24 * 1024,
+                    utilization=10 * i)
+            for i in range(n)
+        ]
+
+    async def _settled(self, app, pilot):
+        """Enter Operate and run a SECOND poll, so cards mounted on the first pass
+        (mount is async — they carry the startup placeholder until the DOM catches
+        up) are filled before anything is asserted."""
+        await _enter_operate(pilot)
+        app._periodic_estate_refresh()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_four_gpu_rig_renders_four_cards(self):
+        gpus = self._cards(4)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 60)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 4
+            for i in range(4):
+                bar = str(app.query_one(f"#gpu{i}-bar", Static).render())
+                assert f"{(i + 1)}.0 / 24.0 GiB" in bar, f"card {i}: {bar!r}"
+
+    @pytest.mark.asyncio
+    async def test_eight_gpu_rig_renders_eight_cards(self):
+        gpus = self._cards(8)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 80)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 8
+            bar7 = str(app.query_one("#gpu7-bar", Static).render())
+            assert "8.0 / 24.0 GiB" in bar7
+
+    @pytest.mark.asyncio
+    async def test_single_gpu_rig_drops_the_second_static_card(self):
+        """compose() lays down two cards; a 1-card rig must converge DOWN, not keep
+        an empty "not present" slot forever."""
+        gpus = self._cards(1)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 1
+            assert not app.query("#gpu1-card")
+
+    @pytest.mark.asyncio
+    async def test_card_count_change_between_polls_converges_both_ways(self):
+        """A card appearing or falling off the bus mid-session must not leave stale
+        widgets behind in either direction."""
+        gpus = self._cards(2)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 80)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 2
+            pane = app.query_one("#operate-orch-pane", OperateOrchPane)
+            st = pane._last_state
+            # 2 -> 4
+            st.gpus = self._cards(4)
+            pane._populate_gpus(st)
+            await pilot.pause()
+            pane._populate_gpus(st)
+            await pilot.pause()
+            assert len(app.query(".gpu-card")) == 4
+            # 4 -> 2 (two cards vanish)
+            st.gpus = self._cards(2)
+            pane._populate_gpus(st)
+            await pilot.pause()
+            assert len(app.query(".gpu-card")) == 2
+            assert not app.query("#gpu3-card")
+
+    @pytest.mark.asyncio
+    async def test_index_gap_keeps_real_gpu_numbers(self):
+        """Cards 0 and 2 present, 1 missing: slot 2 must still BE GPU2 (a
+        len()-driven count would slide it down to slot 1 and mislabel it), and the
+        gap keeps the calm "not present" — not the alarming empty-read message."""
+        gpus = [
+            GpuInfo(index=0, mem_used_mib=1024, mem_total_mib=24 * 1024),
+            GpuInfo(index=2, mem_used_mib=3 * 1024, mem_total_mib=24 * 1024),
+        ]
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 60)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 3
+            assert "3.0 / 24.0 GiB" in str(app.query_one("#gpu2-bar", Static).render())
+            gap = str(app.query_one("#gpu1-bar", Static).render())
+            assert "not present" in gap
+            assert "nvidia-smi returned nothing" not in gap
+
+    @pytest.mark.asyncio
+    async def test_empty_read_keeps_one_card_and_the_honest_message(self):
+        """N2 degradation is unchanged: an empty read is nvidia-smi failing, not a
+        GPU-less rig, and it still says so on card 0."""
+        app, _, _ = make_app(gpus=[], target=ServingTarget(gpus=[]))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            pane = app.query_one("#operate-orch-pane", OperateOrchPane)
+            st = pane._last_state
+            if st is not None:
+                st.gpus = []
+                pane._populate_gpus(st)
+                await pilot.pause()
+                assert len(app.query(".gpu-card")) == 1
+                bar0 = str(app.query_one("#gpu0-bar", Static).render())
+                assert "nvidia-smi returned nothing" in bar0
+
+
 class TestRailKvPool:
     """c3 — the estate rail card shows the serving target's KV pool from the
     SAME poll (doctor.kv_pool_pct, parsed by health.sh), honestly '—' when the
@@ -3054,6 +3214,198 @@ class TestRailKvPool:
             txt = str(app.query_one("#rail-status", RailStatus).render())
             # HEALTH_SERVING carries "KV pool 61%" → the rail shows it.
             assert "kv pool 61%" in txt
+
+
+class TestEstateVramSplit:
+    """c3 #1118 — the estate card renders the parsed VRAM component split
+    (CockpitData.vram_breakdown), aggregate by default, per-GPU via [G].
+    Degrades to the plain used/total card when there is no split."""
+
+    PAYLOAD = {
+        "ok": True,
+        "container": "llama-cpp-glm53-flash-iq3xxs-moecache",
+        "devices": [
+            {"device": "CUDA0", "model": 3524, "kv": 1238, "state": 231,
+             "compute": 5329, "pool": 11714, "used": 22938, "total": 24576,
+             "unaccounted": 902},
+            {"device": "CUDA1", "model": 3969, "kv": 1111, "state": 206,
+             "compute": 5240, "pool": 9903, "used": 22992, "total": 24576,
+             "unaccounted": 2563},
+        ],
+        "warnings": ["2 moe-cache allocations logged per pool -- figures "
+                     "take the LAST (summing them double-counts)"],
+    }
+
+    @staticmethod
+    def _state():
+        from club3090_cockpit.data import DoctorRead
+
+        return EstateState(
+            gpus=[GpuInfo(index=0, mem_used_mib=22938, mem_total_mib=24576),
+                  GpuInfo(index=1, mem_used_mib=22992, mem_total_mib=24576)],
+            doctor=DoctorRead(reachable=True, serving=True, kv_pool_pct=61,
+                              summary="serving"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_rail_renders_aggregate_split(self):
+        app, _, _ = make_app()
+        app._active_mode = 1                  # keep the mode-0 estate poll out
+        app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
+        app.load_estate = lambda: None                # frozen: tests drive the rail directly
+        async with app.run_test(size=(120, 60)) as pilot:
+            await _settle(pilot)
+            rail = app.query_one("#rail-status", RailStatus)
+            rail.set_vram_split(self.PAYLOAD)
+            rail.update_from_state(self._state(), as_of="just now")
+            txt = rail.render().plain
+            assert "VRAM split · estate" in txt
+            assert "boot log" in txt                 # staleness cue
+            assert "cycle" in txt                    # [G] affordance
+            # model aggregates: 3524 + 3969 MiB ≈ 7 GiB
+            assert "7G" in txt
+            # used/total anchor line: 22938+22992 of 2×24576 MiB
+            assert "used" in txt and "48G" in txt and "(93%)" in txt
+            # full moe-cache warning, not the 60-char chop
+            assert "summing them double-counts" in txt
+
+    @pytest.mark.asyncio
+    async def test_rail_drills_down_to_one_gpu(self):
+        app, _, _ = make_app()
+        app._active_mode = 1                  # keep the mode-0 estate poll out
+        app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
+        app.load_estate = lambda: None                # frozen: tests drive the rail directly
+        async with app.run_test(size=(120, 60)) as pilot:
+            await _settle(pilot)
+            rail = app.query_one("#rail-status", RailStatus)
+            rail.set_vram_split(self.PAYLOAD)
+            rail.update_from_state(self._state(), as_of="")
+            rail.cycle_vram_view()                   # estate -> CUDA0
+            t0 = rail.render().plain
+            assert "VRAM split · CUDA0" in t0
+            rail.cycle_vram_view()                   # CUDA0 -> CUDA1
+            t1 = rail.render().plain
+            assert "VRAM split · CUDA1" in t1
+
+    @pytest.mark.asyncio
+    async def test_rail_clamps_negative_other(self):
+        bad = {"ok": True, "container": "c",
+               "warnings": ["CUDA0: components (10622 MiB) exceed the live total "
+                            "(100 MiB) -- the log is staler than the card; "
+                            "unaccounted clamped to 0"],
+               "devices": [{"device": "CUDA0", "model": 3524, "kv": 1238,
+                            "state": 231, "compute": 5329, "pool": 11714,
+                            "used": 100, "total": 24576,
+                            "unaccounted": -22035}]}
+        app, _, _ = make_app()
+        app._active_mode = 1                  # keep the mode-0 estate poll out
+        app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
+        app.load_estate = lambda: None                # frozen: tests drive the rail directly
+        async with app.run_test(size=(120, 60)) as pilot:
+            await _settle(pilot)
+            rail = app.query_one("#rail-status", RailStatus)
+            rail.set_vram_split(bad)
+            rail.update_from_state(self._state(), as_of="")
+            txt = rail.render().plain
+            assert "-22035" not in txt and "-21G" not in txt
+            assert "≥ " in txt and "0G" in txt
+
+    @pytest.mark.asyncio
+    async def test_no_split_degrades_to_used_total(self):
+        app, _, _ = make_app()
+        app._active_mode = 1                  # keep the mode-0 estate poll out
+        app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
+        app.load_estate = lambda: None                # frozen: tests drive the rail directly
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await app.workers.wait_for_complete()  # flush startup workers
+            await pilot.pause()
+            rail = app.query_one("#rail-status", RailStatus)
+            rail.update_from_state(self._state(), as_of="")
+            await pilot.pause()                   # let polled continuations land
+            rail.update_from_state(self._state(), as_of="")
+            txt = rail.render().plain
+            assert "VRAM split" not in txt
+            assert "GPU0 22/24G" in txt
+
+    @pytest.mark.asyncio
+    async def test_worker_populates_split_and_G_cycles(self):
+        # Regression (#1118 follow-up): the boot component lines live on
+        # STDERR of a long log whose head any --tail window drops.  The read
+        # must take the FULL log and merge BOTH streams.
+
+        class _StreamsRunner(FakeRunner):
+            """docker-logs served with BOTH streams; for the parser call,
+            reads the handed temp log so the test can see what it got."""
+
+            def __init__(self, stdout, stderr):
+                super().__init__({})
+                self._out, self._err = stdout, stderr
+                self.parser_saw_load_tensors = False
+
+            async def run(self, cmd, *, cwd, timeout=30.0):
+                self.calls.append(list(cmd))
+                joined = " ".join(cmd)
+                if "vram_breakdown.py" in joined:
+                    log_file = cmd[cmd.index("--json") - 1]
+                    content = Path(log_file).read_text()
+                    self.parser_saw_load_tensors = "load_tensors" in content
+                    payload = json.dumps({
+                        "devices": (
+                            [{"device": "CUDA0", "model": 3524, "kv": 1238,
+                              "state": 231, "compute": 5329, "pool": 11714,
+                              "used": 22938, "total": 24576,
+                              "unaccounted": 902}]
+                            if self.parser_saw_load_tensors else []),
+                        "warnings": [],
+                    })
+                    return RunResult(returncode=0, stdout=payload, stderr="")
+                if "docker" in joined and "logs" in joined:
+                    return RunResult(returncode=0, stdout=self._out,
+                                     stderr=self._err)
+                return RunResult(returncode=0, stdout="", stderr="")
+        runner = _StreamsRunner(
+            stdout="later traffic line (stdout)\n",
+            stderr=("0.12.593.897 I load_tensors:        CUDA0 model buffer "
+                    "size =  3524.46 MiB\n"),
+        )
+        app, _, _ = make_app(runner=runner)
+        app._active_mode = 1                  # keep the mode-0 estate poll out
+        app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
+        app.load_estate = lambda: None                # frozen: tests drive the rail directly
+        async with app.run_test(size=(120, 60)) as pilot:
+            await _settle(pilot)
+            await app.workers.wait_for_complete()  # flush startup workers
+            await pilot.pause()
+            from club3090_cockpit.data import DoctorRead
+
+            app._last_estate_state = EstateState(
+                matched_slug="vllm/dual",
+                containers=[ContainerInfo(
+                    name="llama-cpp-glm53-flash-iq3xxs-moecache",
+                    kind="engine", slug="vllm/dual")],
+                gpus=[GpuInfo(index=0, mem_used_mib=22938),
+                      GpuInfo(index=1, mem_used_mib=22992)],
+                doctor=DoctorRead(reachable=True, serving=True,
+                                  kv_pool_pct=61, summary="serving"),
+            )
+            app._maybe_reparse_vram_split()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._vram_split and app._vram_split["ok"]
+            # #1118 follow-up regressions: the docker-logs read carries NO
+            # --tail (the boot lines live at the head of a long log), and the
+            # parser's temp log merged BOTH streams (stderr, where llama.cpp
+            # announces the buffers).
+            docker_logs_cmds = [c for c in runner.calls
+                                if c[:2] == ["docker", "logs"]]
+            assert docker_logs_cmds
+            assert all("--tail" not in c for c in docker_logs_cmds)
+            assert runner.parser_saw_load_tensors is True
+            rail = app.query_one("#rail-status", RailStatus)
+            assert "VRAM split · estate" in rail.render().plain
+            app.action_estate_vram_cycle()           # estate -> CUDA0
+            assert "VRAM split · CUDA0" in rail.render().plain
 
 
 @pytest.mark.asyncio
@@ -3244,12 +3596,45 @@ class TestBatch1OperateServingPanel:
 
     @pytest.mark.asyncio
     async def test_serving_panel_no_model(self):
-        # Default target has no model / no matching port → "no model serving".
+        """No target AND the endpoint is genuinely down → "no model serving".
+
+        The serving line and the Doctor line render one row apart from two
+        unreconciled sources: this one needs a registry SLUG match, Doctor's just
+        probes the port. So the "nothing is serving" line is only honest when the
+        endpoint is actually down — which this fixture makes explicit rather than
+        assuming."""
+        from club3090_cockpit.data import DoctorRead
+
         app, _, _ = make_app(target=ServingTarget())
         async with app.run_test(size=(120, 40)) as pilot:
             await _enter_operate(pilot)
+            pane = app.query_one("#operate-orch-pane", OperateOrchPane)
+            state = app._last_estate_state
+            assert state is not None
+            state.doctor = DoctorRead(reachable=False, serving=False)
+            pane._populate_serving(state)
+            await _settle(pilot)
             line = str(app.query_one("#serving-line", Static).render())
             assert "no model serving" in line.lower()
+
+    @pytest.mark.asyncio
+    async def test_serving_panel_never_contradicts_the_doctor_line(self):
+        """It must NOT say "no model serving" while Doctor says "● serving".
+
+        Both lines are visible at once. Anything served via
+        `docker compose -f <path>` — every Route-K and generated serve — has no
+        registry slug, so the estate detect finds nothing while health.sh plainly
+        sees the port. The default fixture reproduces exactly that, and used to
+        render "○ no model serving" directly above
+        "● serving · KV pool 61% · spec-dec firing"."""
+        app, _, _ = make_app(target=ServingTarget())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            serving = str(app.query_one("#serving-line", Static).render()).lower()
+            doctor = str(app.query_one("#doctor-line", Static).render()).lower()
+            if "● serving" in doctor or "serving ·" in doctor:
+                assert "no model serving" not in serving, (serving, doctor)
+                assert "not a catalog slug" in serving
 
     @pytest.mark.asyncio
     async def test_pod_create_modal_collects_and_dismisses(self):
@@ -3823,6 +4208,28 @@ class TestEveryWriteGoesThroughReconcile:
             assert screen.check_action("force", ()) is False
 
     @pytest.mark.asyncio
+    async def test_legacy_confirm_body_does_not_repeat_footer_keys(self):
+        """c3 cleanup item 3 — the safe-gate body used to print
+        '⏎ Confirm (streams below) · Esc Cancel' while the modal's Footer
+        already showed the same two keys, doubling them on one screen.  The
+        body line is gone; the Footer still teaches Confirm (its only job)."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.scene_switch("27b")
+            app.push_screen(ConfirmActionScreen(plan))
+            await _settle(pilot)
+            screen = app.screen
+            assert isinstance(screen, ConfirmActionScreen)
+            assert screen._is_serve is False      # the legacy card, not the serve one
+            assert screen._reconcile.safe is True
+            body = str(screen.query_one("#confirm-body", Static).render())
+            assert "gate clear" in body
+            assert "streams below" not in body    # the duplicated key line
+            footer_keys = {k.key for k in screen.query(FooterKey)}
+            assert "enter" in footer_keys         # Confirm still taught — once
+
+    @pytest.mark.asyncio
     async def test_unsafe_gate_disables_confirm_enables_force(self):
         """When a container is running, the gate is unsafe → Confirm disabled,
         Force enabled.  The teardown list is surfaced."""
@@ -4349,6 +4756,26 @@ class TestCrossRigBenchmarksViaExplain:
 # ===========================================================================
 
 
+def _renderable_text(widget) -> str:
+    """Plain text of a widget's renderable — works for str AND rich renderables.
+
+    ``str(widget.render())`` is only readable when the renderable is a string.
+    Once a widget holds a rich object (the evidence report body is a
+    ``rich.markdown.Markdown``, so the report renders as real headings/tables
+    instead of literal ``#``/``**``), ``render()`` returns a ``RichVisual`` whose
+    ``str()`` is a repr — an assertion against it silently stops testing content
+    and passes on anything.  Rendering through a Console asserts what the USER
+    actually sees."""
+    from rich.console import Console
+
+    r = widget.render()
+    inner = getattr(r, "_renderable", None)
+    console = Console(width=200, no_color=True, legacy_windows=False)
+    with console.capture() as cap:
+        console.print(r if inner is None else inner)
+    return cap.get()
+
+
 class TestValidateEvidenceWired:
     @pytest.mark.asyncio
     async def test_evidence_list_populates_from_rebench_dir(self, tmp_path):
@@ -4377,7 +4804,7 @@ class TestValidateEvidenceWired:
             await pilot.press("enter")
             await _settle(pilot)
             assert isinstance(app.screen, EvidenceReportScreen)
-            body = str(app.screen.query_one("#evidence-report-body", Static).render())
+            body = _renderable_text(app.screen.query_one("#evidence-report-body", Static))
             assert "Rebench report" in body
 
     @pytest.mark.asyncio
@@ -5110,7 +5537,15 @@ class TestValidateRunWired:
             # is) — activate it explicitly.
             app.query_one("#validate-tabs", TabbedContent).active = "tab-run"
             await pilot.pause()
-            app.query_one("#run-ladder-table", DataTable).move_cursor(row=0)  # verify-full
+            # ③ Gate now REFUSES to open a confirm dialog with an empty target
+            # (it used to render "GPUs —"/no model and fail only after commit).
+            # A real user reaches ③ with something serving; say so explicitly.
+            app._target_model = "qwen3.6-27b-autoround"
+            # Activating a tab no longer yanks focus off the tab bar, so focus
+            # the ladder the way [↓] does for the user.
+            t = app.query_one("#run-ladder-table", DataTable)
+            t.focus()
+            t.move_cursor(row=0)  # verify-full
             await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen, ConfirmActionScreen)
@@ -5130,7 +5565,10 @@ class TestValidateRunWired:
             # R3b-1: activate ③ Gate (no longer the lane default tab).
             app.query_one("#validate-tabs", TabbedContent).active = "tab-run"
             await pilot.pause()
-            app.query_one("#run-ladder-table", DataTable).move_cursor(row=2)  # bench
+            app._target_model = "qwen3.6-27b-autoround"   # ③ needs a target
+            t = app.query_one("#run-ladder-table", DataTable)
+            t.focus()
+            t.move_cursor(row=2)  # bench
             await pilot.press("enter")
             await _settle(pilot)
             screen = app.screen
@@ -5142,12 +5580,36 @@ class TestValidateRunWired:
             assert wr.started[0]["run_type"] == "validation"
 
     @pytest.mark.asyncio
+    async def test_run_enter_with_no_target_refuses_before_the_dialog(self):
+        """③ Gate must NOT open a confirm dialog it knows will fail.
+
+        Before this guard, ⏎ with nothing serving opened a full ConfirmActionScreen
+        showing "GPUs —" and an empty model/URL, and only reported the problem
+        after the user committed.  Now it declines up front and names the stage
+        that produces a target.  Mirrors the same precondition already enforced
+        for the agentic-curve launch."""
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await _settle(pilot)
+            app.query_one("#validate-tabs", TabbedContent).active = "tab-run"
+            await pilot.pause()
+            assert not app._target_model and not app._target_url
+            t = app.query_one("#run-ladder-table", DataTable)
+            t.focus()
+            t.move_cursor(row=0)
+            await pilot.press("enter")
+            await _settle(pilot)
+            # No dialog — still the base screen.
+            assert not isinstance(app.screen, ConfirmActionScreen)
+
+    @pytest.mark.asyncio
     async def test_run_step_does_not_go_through_dispatch_action(self):
         """A validation launch uses the on_confirm seam (run_validation), NOT the
         gated execute_action — it never claims a GPU."""
         wr = FakeWriteRunner()
 
-        async def detect_should_not_be_called():
+        async def detect_should_not_be_called(**_kwargs):
             raise AssertionError("a validation run must not reconcile")
 
         app, _, _ = make_app(write_runner=wr, surface="producer")
@@ -5484,6 +5946,180 @@ class TestPromoteHookWired:
             assert "scripts/tests/*.sh" in body   # authoritative-before-commit note
 
     @pytest.mark.asyncio
+    async def test_route_k_ingests_a_user_compose_and_arms_serve(self):
+        """#1153 Route-K: a compose path at ① is read, armed for ②, and reaches ⑤.
+
+        This is the BYOM position the funnel had no door for — weights already on
+        disk, compose already written. No HF call, no download, no catalog
+        reproduction: the user's file IS what gets served and registered."""
+        import tempfile as _tf
+        from pathlib import Path as _P
+
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        with _tf.TemporaryDirectory() as td:
+            cpath = _P(td) / "my-model.yml"
+            cpath.write_text(
+                "services:\n  vllm:\n    image: vllm/vllm-openai:v0.27.1\n"
+                '    ports:\n      - "${PORT:-20242}:8000"\n'
+                "    command:\n      - --model\n      - /mnt/models/huggingface/mine\n"
+                "      - --max-model-len\n      - \"131072\"\n",
+                encoding="utf-8",
+            )
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _settle(pilot)
+                await pilot.press("2")
+                await _settle(pilot)
+                app.query_one("#lane-bring-url-input", Input).value = str(cpath)
+                app._trigger_lane_bring()
+                await _settle(pilot)
+
+                byo = app._last_byo
+                assert byo is not None and byo.route == "K", f"route={byo and byo.route}"
+                assert byo.error == ""
+                assert app._bring_swap_compose == str(cpath)
+                # what the compose stated, read back
+                facts = app._bring_compose_facts
+                assert facts.engine == "vllm"
+                assert facts.model_path == "/mnt/models/huggingface/mine"
+                assert facts.port == "20242"
+
+                # ① [s] must NOT demand a download: the weights probe only knows
+                # c3's own pull dir, and Route-K's compose points at its own weights
+                app._bring_advance_to_serve()
+                await _settle(pilot)
+
+                # and ⑤ carries the user's compose, not an empty string (#1156)
+                text, src = app._promote_compose_text()
+                assert "vllm/vllm-openai" in text
+                assert src == str(cpath)
+            assert wr.started == []      # nothing executed
+
+    async def test_route_k_is_discoverable_and_works_on_plain_enter(self):
+        """#1153: Route-K was invisible — the field said "HF repo", the
+        placeholder said org/Model, both pane hints said "enter an HF repo", and
+        ⏎ went to Inspect, which calls the HF API and would have failed on a path.
+        A capability nothing surfaces is a capability nobody has."""
+        import tempfile as _tf
+        from pathlib import Path as _P
+
+        app, _, _ = make_app(write_runner=FakeWriteRunner(), surface="producer")
+        with _tf.TemporaryDirectory() as td:
+            cpath = _P(td) / "mine.yml"
+            cpath.write_text(
+                "services:\n  v:\n    image: vllm/vllm-openai:v0.27.1\n"
+                "    command:\n      - --model\n      - /mnt/models/huggingface/mine\n",
+                encoding="utf-8",
+            )
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _settle(pilot)
+                await pilot.press("2")
+                await _settle(pilot)
+                inp = app.query_one("#lane-bring-url-input", Input)
+                # the affordance must SAY so, not only the help overlay
+                assert "compose" in inp.placeholder.lower(), inp.placeholder
+                # plain ⏎ (which routes to Inspect → the HF API) must take Route-K
+                inp.value = str(cpath)
+                inp.focus()
+                await pilot.press("enter")
+                await _settle(pilot)
+                assert app._last_byo is not None
+                assert app._last_byo.route == "K", f"⏎ did not take Route-K: {app._last_byo.route}"
+                assert app._last_byo.error == ""
+                assert app._bring_swap_compose == str(cpath)
+
+    async def test_route_k_only_triggers_on_a_real_compose_file(self):
+        """An HF repo must never be mistaken for a path, and a bogus path must not
+        claim to be one — it falls through to the HF check, whose error names the
+        repo."""
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            assert app._looks_like_compose_path("org/Model-Name") is False
+            assert app._looks_like_compose_path("unsloth/Qwen3-27B") is False
+            assert app._looks_like_compose_path("/nope/missing.yml") is False
+            assert app._looks_like_compose_path("") is False
+
+    async def test_promote_spec_is_accepted_by_the_real_promote_executor(self):
+        """#1156: validate the plan with the tool that will RUN it.
+
+        The mock-only test asserts the plan's SHAPE and stops — a FakeWriteRunner
+        cannot disagree with you. That is exactly how a spec carrying an empty
+        `compose.content`, which promote.py refuses with exit 3 on every single
+        invocation, sat under a green suite. Feed the built spec to the real
+        executor in --dry-run (validates fully, writes nothing)."""
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        _repo = _Path(__file__).resolve().parents[3]   # <repo>/tools/serve-cockpit/tests
+
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            app.screen.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
+            app.screen.on_input_changed(None)
+            app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            app.screen.on_input_changed(None)
+            # #1156: ⑤ registers the compose ②③④ served; the write is refused
+            # without one. These tests exercise the GATE, not the compose source.
+            app.screen._scaffold.spec["compose"]["content"] = _FAKE_COMPOSE
+            app.screen.query_one("#promote-stage-btn", Button).press()
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            spec_json = app.screen._plan.env["C3_PROMOTE_SPEC"]
+
+        env = dict(_os.environ)
+        env["C3_PROMOTE_SPEC"] = spec_json
+        env.pop("C3_ALLOW_CORE_PROMOTE", None)
+        res = _sp.run(
+            [_sys.executable, str(_repo / "scripts/lib/profiles/promote.py"),
+             "--spec-env", "C3_PROMOTE_SPEC", "--layer", "local",
+             "--root", str(_repo), "--dry-run"],
+            capture_output=True, text=True, env=env, cwd=str(_repo),
+        )
+        assert res.returncode == 0, (
+            "the real promote.py REFUSED the spec this screen builds:\n"
+            f"{res.stderr}{res.stdout}"
+        )
+        assert "REFUSED" not in res.stderr
+
+    async def test_promote_write_refused_without_a_served_compose(self):
+        """#1156: ⑤ registers the compose ②③④ served. With none in hand the write
+        must be refused ON SCREEN — not built into a plan promote.py will reject
+        with exit 3 while the RunLog swallows the reason."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr, surface="producer")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("2")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            # the PREVIEW still opens — ⑤ is advertised as a preview
+            assert isinstance(app.screen, PromoteScaffoldScreen)
+            app.screen.query_one("#promote-display-input", Input).value = "Q"
+            app.screen.on_input_changed(None)
+            app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
+            app.screen.on_input_changed(None)
+            app.screen.query_one("#promote-stage-btn", Button).press()
+            await pilot.pause()
+            # ...but the WRITE is refused: no confirm screen, nothing dispatched
+            assert isinstance(app.screen, PromoteScaffoldScreen), (
+                "a write with no compose in hand must not reach the confirm gate"
+            )
+            assert wr.started == []
+
     async def test_promote_stage_write_is_gated_mock_only(self):
         """Staging the write opens the standard confirm gate; the plan is
         mock-only and writes nothing into scripts/ (no auto-fire)."""
@@ -5507,6 +6143,9 @@ class TestPromoteHookWired:
             assert app.screen.query_one("#promote-stage-btn", Button).disabled is True
             app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
             app.screen.on_input_changed(None)
+            # #1156: ⑤ registers the compose ②③④ served; the write is refused
+            # without one. These tests exercise the GATE, not the compose source.
+            app.screen._scaffold.spec["compose"]["content"] = _FAKE_COMPOSE
             assert app.screen.query_one("#promote-stage-btn", Button).disabled is False
             # Stage the gated write — routes through ConfirmActionScreen.
             app.screen.query_one("#promote-stage-btn", Button).press()
@@ -5520,7 +6159,14 @@ class TestPromoteHookWired:
             _spec = json.loads(app.screen._plan.env["C3_PROMOTE_SPEC"])
             assert _spec["display_name"] == "Qwen3 27B Abliterated"
             assert _spec["family"] == "qwen3-dense"
-            assert _spec["registry_entry"]["slug"].startswith("local/")
+            # #1202 P3: engine namespace, not `local/`. `--layer local` above is
+            # what keeps the write inside the gitignored layer.
+            _slug = _spec["registry_entry"]["slug"]
+            assert not _slug.startswith("local/")
+            assert _slug.count("/") == 1, _slug
+            # #1156: THIS assertion was missing, and its absence let a plan that
+            # promote.py always refuses (empty compose.content) pass as green.
+            assert _spec["compose"]["content"].strip(), "spec.compose.content is empty"
             # Nothing executed yet — the write is mock-only and never auto-fired.
             assert wr.started == []
 
@@ -5564,6 +6210,9 @@ class TestPromoteHookWired:
             app.screen.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
             app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
             app.screen.on_input_changed(None)
+            # #1156: ⑤ registers the compose ②③④ served; the write is refused
+            # without one. These tests exercise the GATE, not the compose source.
+            app.screen._scaffold.spec["compose"]["content"] = _FAKE_COMPOSE
             # WITHOUT the flag: refused in-screen, nothing staged.
             app.screen._stage_write(layer="core")
             await pilot.pause()
@@ -6104,7 +6753,10 @@ class TestOptimizeBrain:
             body = str(app.screen.query_one("#optimize-body", Static).render())
             assert "kv-calc failed" in body                 # honest error card
             assert "Recommended max-model-len" not in body  # no fabricated numbers
-            assert app.screen.query_one("#optimize-apply", Button).disabled is True
+            # Rebased (c3 cleanup item 2): the unavailable card now HIDES the
+            # KV/Apply rows instead of greying them — absent, not disabled.
+            assert app.screen.query_one("#optimize-apply", Button).display is False
+            assert app.screen.query_one("#optimize-kv", Select).display is False
 
     @pytest.mark.asyncio
     async def test_skip_engine_gets_explicit_unsupported_message(self):
@@ -6117,10 +6769,39 @@ class TestOptimizeBrain:
             body = str(app.screen.query_one("#optimize-body", Static).render())
             assert "kvcalc_key=SKIP" in body
             assert "Recommended max-model-len" not in body
-            assert app.screen.query_one("#optimize-apply", Button).disabled is True
+            assert app.screen.query_one("#optimize-apply", Button).display is False
+            assert app.screen.query_one("#optimize-kv", Select).display is False
             # The SKIP check short-circuits BEFORE any kv-calc call.
             assert all("kv-calc.py" not in " ".join(c) for c in runner.calls
                        if "--fit " in " ".join(c))
+
+    @pytest.mark.asyncio
+    async def test_optimize_rows_restored_after_unavailable_report(self):
+        """c3 cleanup item 2 — hiding is not sticky: a screen that first shows
+        an unavailable report and later receives a good one must render the
+        KV/Apply rows again, enabled (`.display` toggles both directions)."""
+        from club3090_cockpit.app import OptimizeScreen
+        from club3090_cockpit.data import KvOption, OptimizerReport
+
+        app, runner, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await self._open_optimize(pilot, app, row=1)  # kvcalc_key=SKIP → unavailable
+            screen = app.screen
+            assert isinstance(screen, OptimizeScreen)
+            assert screen.query_one("#optimize-apply", Button).display is False
+            good = OptimizerReport(
+                available=True, slug="vllm/dual", engine="vllm", card="3090",
+                recommended_kv_format="fp8_e5m2", recommended_max_ctx=262144,
+                fit_vram_est_gb=18.0, band_gb=0.5,
+                options=[KvOption(kv_format="fp8_e5m2", solved_max_ctx=262144,
+                                  vram_est_gb=18.0, headroom_gb=6.0,
+                                  verdict="fits-clean")],
+            )
+            screen.set_report(good)
+            assert screen.query_one("#optimize-apply", Button).display is True
+            assert screen.query_one("#optimize-kv", Select).display is True
+            assert screen.query_one("#optimize-apply", Button).disabled is False
 
     @pytest.mark.asyncio
     async def test_optimize_is_a_noop_no_write(self):
@@ -8333,6 +9014,98 @@ def _count_load_estate(monkeypatch):
     return calls
 
 
+def _count_load_catalog(monkeypatch):
+    """Wrap CockpitApp.load_catalog so a test can count how many times it fired.
+    Returns the counter dict (``{"n": int}``)."""
+    import club3090_cockpit.app as appmod
+
+    calls = {"n": 0}
+    orig = appmod.CockpitApp.load_catalog
+
+    def counting(self):
+        calls["n"] += 1
+        return orig(self)
+
+    monkeypatch.setattr(appmod.CockpitApp, "load_catalog", counting)
+    return calls
+
+
+class TestRegistryWriteRereadsCatalog:
+    """A registry-mutating write re-reads the CATALOG (not just the estate).
+
+    Regression: removing a slug from the local-layer view left it on screen
+    until the user pressed [r] by hand — the write path re-polled the estate
+    (the rig) but never the registry (what actually changed)."""
+
+    @pytest.mark.asyncio
+    async def test_local_remove_rereads_catalog(self, monkeypatch):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        calls = _count_load_catalog(monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            before = calls["n"]
+            plan = app._data.local_amend_plan("remove", "my-engine/my-model")
+            assert plan.kind == "local_remove"
+            app.dispatch_action(plan)
+            await _settle(pilot)
+            assert calls["n"] > before      # the removal re-read the registry
+            assert len(wr.started) == 1     # gate intact — the write went through
+
+    @pytest.mark.asyncio
+    async def test_local_rename_and_update_reread_catalog(self, monkeypatch):
+        for kind, kw in (("rename", {"to": "my-engine/renamed"}),
+                         ("update", {"sets": ["workload=fast-chat"]})):
+            wr = FakeWriteRunner()
+            app, _, _ = make_app(write_runner=wr)
+            calls = _count_load_catalog(monkeypatch)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _settle(pilot)
+                before = calls["n"]
+                plan = app._data.local_amend_plan(kind, "my-engine/my-model", **kw)
+                assert plan.kind == f"local_{kind}"
+                app.dispatch_action(plan)
+                await _settle(pilot)
+                assert calls["n"] > before, kind
+                assert len(wr.started) == 1, kind
+
+    @pytest.mark.asyncio
+    async def test_non_registry_write_does_not_reread_catalog(self, monkeypatch):
+        """NEGATIVE CONTROL — a write that doesn't touch the registry (container
+        rm) must NOT re-read the catalog, or the assertion above would pass for
+        every plan kind and prove nothing."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        calls = _count_load_catalog(monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            before = calls["n"]
+            plan = app._data.container_rm("vllm-qwen36-27b-dual")
+            app.dispatch_action(plan)
+            await _settle(pilot)
+            assert len(wr.started) == 1     # it DID write
+            assert calls["n"] == before     # but the registry didn't change
+
+    @pytest.mark.asyncio
+    async def test_refused_write_does_not_reread_catalog(self, monkeypatch):
+        """NEGATIVE CONTROL — a write REFUSED at the gate never mutated the
+        registry, so it must not re-read it either."""
+        wr = FakeWriteRunner()
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        gpus = [GpuInfo(index=0, mem_used_mib=22000), GpuInfo(index=1, mem_used_mib=1)]
+        app, _, _ = make_app(
+            responses=responses, gpus=gpus, target=ServingTarget(gpus=gpus), write_runner=wr
+        )
+        calls = _count_load_catalog(monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            before = calls["n"]
+            app.dispatch_action(app._data.serve("vllm/dual"))   # not forced → refused
+            await _settle(pilot)
+            assert wr.started == []
+            assert calls["n"] == before
+
+
 class TestBatch2A1RepollAfterEveryWrite:
     """A1 — every SUCCESSFUL GPU-mutating write re-polls the estate; a REFUSED
     write does not."""
@@ -8867,7 +9640,7 @@ class TestBatch2MustFix3ErrorLabel:
         """Force the services.py detect-failure path → state.error is
         'detect failed: …' and the rail/Containers render THAT, not 'docker
         unreachable'."""
-        async def _boom():
+        async def _boom(**_kwargs):
             raise RuntimeError("endpoint probe blew up")
 
         app, _, _ = make_app()
@@ -9339,7 +10112,7 @@ class TestDoctorRerunAndRemediation:
             pane._render_health(DoctorRead(reachable=False))
             body = str(app.query_one("#doctor-health-body", Static).render())
             assert "not reachable" in body
-            assert "fix:" in body and "Run · Catalog" in body
+            assert "fix:" in body and "Run & Operate · Catalog" in body
 
 
 class TestA9GateLadderOutcome:
@@ -9628,20 +10401,33 @@ class TestFooterOutOfTabChain:
         displayed-binding change (a surface flip that un-gates the [2] Bring &
         Validate mode key) flips the signature and DOES recompose the footer, so
         the new key renders.  No footer focus is involved any more."""
-        app, _, _ = make_app(surface="consumer")  # lean: only [1] shown
+        # The genuine displayed-binding change used to be the surface flip
+        # un-gating [2].  The mode keys [1]/[2] are now show=False permanently
+        # (they cost scarce footer width on a 100-col terminal while the Modes
+        # rail already teaches them), so a surface flip changes NO displayed
+        # binding and could no longer exercise this.
+        #
+        # It then used the mode flip un-gating [⏎].  That no longer works either:
+        # ⏎ is show=False on the app binding now (a focused DataTable's own
+        # `select_cursor` binding won the footer slot on Catalog / Orchestration /
+        # ③ Gate, so ⏎ appeared in some panes and not others for the same key;
+        # it is advertised in the Modes rail instead).  The invariant under test
+        # is unchanged — a REAL displayed-binding change must flip the signature
+        # and recompose — so it now rides on the same mode flip's DESCRIPTION
+        # change, which is exactly what `description`-in-the-signature exists for:
+        # `]` is relabelled "Next tab" → "Next stage".
+        app, _, _ = make_app(surface="producer")
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
             ff = app.query_one(FocusableFooter)
             sig_before = ff._last_binding_sig
-            # Sanity: '2' (Bring & Validate) is NOT shown on the lean surface.
-            assert "2" not in {k.key for k in ff.query(FooterKey)}
-            # Flip to the full surface → [2] (mode_validate) un-gates (show=True),
-            # so the footer signature genuinely changes and the footer recomposes.
-            app._surface = "producer"
-            app.refresh_bindings()
+            labels_before = {k.key: k.description for k in ff.query(FooterKey)}
+            assert labels_before.get("right_square_bracket") == "Next tab", labels_before
+            await pilot.press("2")   # → Bring & Validate, where ] = "Next stage"
             await _settle(pilot)
+            labels_after = {k.key: k.description for k in ff.query(FooterKey)}
+            assert labels_after.get("right_square_bracket") == "Next stage", labels_after
             assert ff._last_binding_sig != sig_before
-            assert "2" in {k.key for k in ff.query(FooterKey)}
 
 
 class TestFixBTabBarFocusStays:
@@ -9715,6 +10501,136 @@ class TestFixBTabBarFocusStays:
             assert isinstance(app.focused, DataTable)
             assert app.focused.id == "catalog-table", \
                 "mode switch lands the user on the primary list"
+
+    # ── FIX B, deferred half — the guard is re-checked, and applied atomically ──
+    #
+    # ``on_tabbed_content_tab_activated`` decides "move focus into the new tab's
+    # primary list" while handling the event, but performs it one render cycle
+    # later via ``call_after_refresh(self._focus_tab_primary, …)``.  Focus can move
+    # onto the tab bar inside that window — Textual re-homes focus when the
+    # outgoing pane's focused widget is hidden, the user Tabs/clicks onto the bar
+    # while the UI is busy, or a caller calls ``.focus()`` (itself deferred).  The
+    # two tests below pin the two properties that make "the tab bar keeps focus" an
+    # invariant rather than a race; without BOTH, the keyboard-economy tests
+    # (`TestOrchScrollNotATabStop`, `TestModesRailNavigation`, …) are order- and
+    # load-dependent and fail intermittently under a full-suite run.
+
+    @pytest.mark.asyncio
+    async def test_deferred_tab_focus_rechecks_the_tab_bar_guard(self):
+        """The DEFERRED focus must re-read focus, not trust the event-time read.
+
+        Drives ``_focus_tab_primary`` directly: that is the callback
+        ``call_after_refresh`` drains, and calling it here reproduces the adverse
+        ordering (focus reached the tab bar first) deterministically, which the
+        pilot cannot schedule reliably."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            tc = app.query_one("#operate-tabs", TabbedContent)
+            tc.active = "tab-orchestration"
+            await _settle(pilot)
+            tc.query_one(ContentTabs).focus()
+            await pilot.pause()
+            assert isinstance(app.focused, Tabs), "precondition: focus on the tab bar"
+            # The deferred body now lands, one cycle late.
+            app._focus_tab_primary("#scene-table")
+            await pilot.pause()
+            assert isinstance(app.focused, Tabs), \
+                f"deferred tab-activation focus must not yank the user off the " \
+                f"tab bar, got {app.focused!r}"
+
+    @pytest.mark.asyncio
+    async def test_deferred_tab_focus_is_applied_synchronously(self):
+        """The guard and its effect must be ONE step.
+
+        ``Widget.focus()`` does not focus — it queues ``set_focus`` on the app
+        message queue.  ``_focus_tab_primary`` is drained off the SCREEN's
+        post-refresh callback list, so a focus it merely QUEUES can land behind a
+        caller's own queued ``.focus()`` and win, re-opening the window the guard
+        above closes.  Assert with NO await between call and check."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            tc = app.query_one("#operate-tabs", TabbedContent)
+            tc.active = "tab-orchestration"
+            await _settle(pilot)
+            app.query_one("#catalog-table", DataTable).focus()
+            await pilot.pause()
+            app._focus_tab_primary("#scene-table")
+            assert app.focused is app.query_one("#scene-table", DataTable), \
+                "the deferred focus must be APPLIED, not queued for a later turn"
+
+
+class TestDeferredTabFocusRespectsModals:
+    """The deferred tab-activation focus must never reach past a modal.
+
+    ``_focus_tab_primary`` is drained one render cycle after the ``TabActivated``
+    that scheduled it, and a modal can be open by the time it lands.  If it focuses
+    the tab's widget anyway, focus leaves the modal and the modal's OWN bindings
+    (``escape`` to dismiss, ``q`` suppression) stop receiving keys — the modal is
+    stranded on screen with no way out.
+
+    ⚠️ The ``isinstance(self.focused, Tabs)`` guard CANNOT catch this: at that
+    moment focus is legitimately not a ``Tabs``, it is the modal's own widget.
+
+    Two independent paths, and a fix for one does not fix the other:
+
+    * modal pushed AFTER scheduling → the active screen is no longer the one we
+      were scheduled from (``origin_screen`` guard);
+    * modal pushed BEFORE scheduling → origin and active screen are the SAME
+      object, and only the query SCOPE separates them.  ``App.query_one`` searches
+      the whole DOM and finds the widget beneath the modal; ``Screen.query_one``
+      cannot, so it raises and the callback correctly does nothing.
+
+    Regression test for the 9 failures this caused in ``TestModalKeyCapture`` and
+    ``test_uiux_first_run`` — all of which read as "escape stopped working".
+    """
+
+    @pytest.mark.asyncio
+    async def test_deferred_focus_does_not_escape_a_modal_opened_after_scheduling(self):
+        """Modal pushed AFTER the callback was scheduled.
+
+        Called with ONE argument on purpose: that signature exists both before and
+        after the fix, so a failure here is the BEHAVIOUR regressing, never a
+        TypeError from the added parameter."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            main_screen = app.screen
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen), "precondition: help modal open"
+            # The deferred body lands while the modal is up, carrying the screen it
+            # was scheduled from — as the real call site passes it.
+            app._focus_tab_primary("#scene-table")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen), "the modal must still be open"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpScreen), \
+                "escape must still dismiss the modal — the deferred focus stole its keys"
+
+    @pytest.mark.asyncio
+    async def test_deferred_focus_does_not_escape_a_modal_open_before_scheduling(self):
+        """Modal already open when scheduled — only the query SCOPE separates them.
+
+        Called with ONE argument, so the identity guard is inert (``origin_screen``
+        defaults to None) and this isolates the SCOPE fix.  Without it,
+        ``App.query_one`` finds ``#scene-table`` on the screen underneath and focus
+        leaves the modal."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen), "precondition: help modal open"
+            app._focus_tab_primary("#scene-table")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpScreen), \
+                "escape must still dismiss the modal — the deferred focus reached " \
+                "past it via App.query_one"
 
 
 class TestBareBootFocusOnCatalog:
@@ -9878,16 +10794,23 @@ class TestArrowKeyFocusDescent:
     # ── No-op surfaces — Doctor (no primary list) ────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_doctor_tab_bar_down_is_a_noop(self):
-        """Doctor has no primary list → descend is a no-op (focus stays on the bar)."""
+    async def test_doctor_tab_bar_down_descends_into_the_check_list(self):
+        """[down] on Doctor's tab bar descends into its check list.
+
+        Was `test_doctor_tab_bar_down_is_a_noop`: Doctor had no primary DataTable,
+        so descend was gated off and focus stayed on the bar. Doctor's cards are
+        now ↑/↓-selectable and ⏎-runnable, so it has a list to descend INTO — it
+        resolves through _TAB_FOCUS_FALLBACK rather than _TAB_PRIMARY_LIST, which
+        stays DataTable-only for the ↑-ascend gate."""
         app, _, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
             await self._focus_tab_bar(pilot, "#operate-tabs", "tab-doctor")
             await pilot.press("down")
             await pilot.pause()
-            assert isinstance(app.focused, Tabs), \
-                f"down on Doctor's tab bar (no list) must stay on the bar, got {app.focused!r}"
+            await _settle(pilot)
+            assert app.focused is not None and app.focused.id == "doctor-scroll", \
+                f"down on Doctor's tab bar must reach its check list, got {app.focused!r}"
 
     # ── Modal invariant — arrows never steal focus to/from the tab bar ───────────
 
@@ -9967,6 +10890,271 @@ class TestArrowKeyFocusDescent:
             await _settle(pilot)
             assert app._primary_list_for_active_tab() is None
             assert "tab-doctor" not in _TAB_PRIMARY_LIST
+
+    @pytest.mark.asyncio
+    async def test_doctor_entry_focuses_its_scroll_box(self):
+        """Entering Doctor focuses #doctor-scroll so ↓/PgDn scroll immediately.
+
+        Doctor has no table or list to Tab to — the scroll box IS the content, and
+        the page overflows at 46 rows, so without focus the arrow keys do nothing
+        and the rest of the report is unreachable without a mouse.  It is resolved
+        through _TAB_FOCUS_FALLBACK rather than _TAB_PRIMARY_LIST because that map
+        is shared with the ↓ descend / ↑ ascend gates, which require a DataTable.
+
+        Regression: the focus call was `query_one(widget_id, DataTable)`, whose
+        type constraint raised for the ScrollableContainer and was swallowed by a
+        bare `except` — so this focus silently did nothing at all."""
+        from club3090_cockpit.app import _TAB_FOCUS_FALLBACK
+
+        assert _TAB_FOCUS_FALLBACK.get("tab-doctor") == "#doctor-scroll"
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Focus must not be on the tab bar, or the "don't yank focus while
+            # browsing tabs" guard correctly declines to move it.
+            app.query_one("#catalog-table").focus()
+            await _settle(pilot)
+            app.query_one("#operate-tabs", TabbedContent).active = "tab-doctor"
+            await _settle(pilot)
+            await _settle(pilot)   # the focus call is deferred one refresh cycle
+            focused = app.focused
+            assert focused is not None and focused.id == "doctor-scroll"
+
+
+class TestMakeAppDoesNotClobberRealFiles:
+    """`make_app` seeds two profile stubs under its repo_root — it must NEVER
+    overwrite a file that already exists.
+
+    It used to write unconditionally, so any test handed `repo_root=<the real
+    checkout>` truncated `scripts/lib/profiles/engines/vllm-stable.yml` (77 lines)
+    and `hardware/rtx-3090.yml` to a 6-line stub. Tracked files, silently, with
+    the writes swallowed by `except OSError`. The visible symptom was unrelated
+    tests failing (`engine_drafters` returning []), which points the reader at
+    the wrong code entirely."""
+
+    def test_existing_profile_files_are_left_alone(self, tmp_path):
+        eng = tmp_path / "scripts" / "lib" / "profiles" / "engines"
+        hw = tmp_path / "scripts" / "lib" / "profiles" / "hardware"
+        eng.mkdir(parents=True)
+        hw.mkdir(parents=True)
+        real_eng = "id: vllm-stable\nsupported_drafters:\n  - mtp\n"
+        real_hw = "sm: 8.6\nvram_gb: 24\nreal: yes\n"
+        (eng / "vllm-stable.yml").write_text(real_eng, encoding="utf-8")
+        (hw / "rtx-3090.yml").write_text(real_hw, encoding="utf-8")
+
+        make_app(repo_root=tmp_path)
+
+        assert (eng / "vllm-stable.yml").read_text(encoding="utf-8") == real_eng
+        assert (hw / "rtx-3090.yml").read_text(encoding="utf-8") == real_hw
+
+    def test_absent_profile_files_are_still_seeded(self, tmp_path):
+        """The seeding itself must keep working on a bare fake root."""
+        make_app(repo_root=tmp_path)
+        eng = tmp_path / "scripts" / "lib" / "profiles" / "engines" / "vllm-stable.yml"
+        hw = tmp_path / "scripts" / "lib" / "profiles" / "hardware" / "rtx-3090.yml"
+        assert "supported_kv_formats" in eng.read_text(encoding="utf-8")
+        assert "sm: 8.6" in hw.read_text(encoding="utf-8")
+
+
+class TestPromotePrereqsScopedToBroughtModel:
+    """⑤'s ✓ marks must describe THIS model, not the rig.
+
+    served_ok was true if ANYTHING was serving, measured_ok if ANY rebench tag
+    existed on disk, gated_ok if ANY ladder step had passed this session against
+    ANY target. On a rig with history ⑤ opened showing three ticks for a model
+    that had earned none of them — and that display is what the user promotes on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_different_serving_model_does_not_tick_served(self):
+        from club3090_cockpit.data import ByoResult
+
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            app._last_byo = ByoResult(repo="Qwen/Qwen3.8-Flash-Next", profile_like="vllm/minimal")
+            brought = app._brought_identity()
+            assert brought == "qwen38flashnext"
+            # An unrelated model is serving → NOT served.
+            assert app._identity_matches(brought, "glm-5.3-flash") is False
+            # The brought model is serving, however it is spelled → served.
+            assert app._identity_matches(brought, "qwen3.8-flash-next") is True
+            # A dated rebench tag for it still matches.
+            assert app._identity_matches(brought, "qwen38flashnext-20260903-1201") is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_identity_reads_as_not_done(self):
+        """When identity cannot be established the marks read ○, never ✓ —
+        under-claiming is recoverable, a false ✓ is not."""
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            assert app._last_byo is None
+            assert app._brought_identity() == ""
+            assert app._identity_matches("", "anything-at-all") is False
+            # A too-short identity must not match everything.
+            assert app._identity_matches("ab", "abcdef") is False
+
+
+class TestDoctorKeyboardNav:
+    """Doctor is a LIST of runnable checks: ↑/↓ select, ⏎ runs the selection.
+
+    Before this, Doctor was reachable only by hotkey — arrows scrolled and ⏎ did
+    nothing — so a user who did not already know v/V/R/F/w/y could read all six
+    cards and run none of them."""
+
+    @pytest.mark.asyncio
+    async def test_registry_matches_compose_order_both_ways(self):
+        """_DOCTOR_CHECKS must mirror the rendered card order exactly.
+
+        The registry drives navigation order, ⏎ dispatch AND the footer label, so
+        drift against `compose` would silently run the wrong check. Asserted in
+        both directions: no rendered card missing from the registry, no registry
+        row without a card, same sequence."""
+        from club3090_cockpit.app import _DOCTOR_CHECKS, DoctorPane
+
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            pane = app.query_one("#doctor-pane", DoctorPane)
+            rendered = [c.id for c in pane.query(".doctor-card")]
+            assert rendered == [row[0] for row in _DOCTOR_CHECKS]
+            # every action names a real handler on the app
+            for _cid, action, label in _DOCTOR_CHECKS:
+                assert hasattr(app, f"action_{action}"), action
+                assert label
+
+    async def _enter_doctor(self, app, pilot):
+        app.query_one("#catalog-table").focus()
+        await _settle(pilot)
+        app.query_one("#operate-tabs", TabbedContent).active = "tab-doctor"
+        await _settle(pilot)
+        await _settle(pilot)   # the focus call is deferred one refresh cycle
+
+    @pytest.mark.asyncio
+    async def test_arrows_move_the_selection_and_enter_runs_it(self):
+        from club3090_cockpit.app import _DOCTOR_CHECKS, DoctorPane
+
+        fired = []
+        app, _, _ = make_app(surface="producer")
+        for _cid, action, _lbl in _DOCTOR_CHECKS:
+            setattr(app, f"action_{action}", (lambda a=action: fired.append(a)))
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            await self._enter_doctor(app, pilot)
+            assert app.focused is not None and app.focused.id == "doctor-scroll"
+            pane = app.query_one("#doctor-pane", DoctorPane)
+            assert pane.selected_index == 0
+            await pilot.press("down")
+            await _settle(pilot)
+            assert pane.selected_index == 1
+            # ⏎ runs the SELECTED check, not a fixed one.
+            await pilot.press("enter")
+            await _settle(pilot)
+            assert fired == [_DOCTOR_CHECKS[1][1]]
+
+    @pytest.mark.asyncio
+    async def test_selection_is_clamped_not_wrapped(self):
+        """Holding ↓ must not land on `report --full` (~43 min, uses the serving
+        GPUs) or the power-cap sweep by wrapping around from the top."""
+        from club3090_cockpit.app import _DOCTOR_CHECKS, DoctorPane
+
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            await self._enter_doctor(app, pilot)
+            pane = app.query_one("#doctor-pane", DoctorPane)
+            for _ in range(len(_DOCTOR_CHECKS) + 4):
+                await pilot.press("down")
+            await _settle(pilot)
+            assert pane.selected_index == len(_DOCTOR_CHECKS) - 1
+            await pilot.press("down")
+            await _settle(pilot)
+            assert pane.selected_index == len(_DOCTOR_CHECKS) - 1
+
+    @pytest.mark.asyncio
+    async def test_up_at_first_check_ascends_to_the_tab_bar(self):
+        """Mirrors what a primary DataTable at cursor row 0 does. Doctor is not a
+        DataTable, so the priority ascend binding is gated off and this widget has
+        to offer the affordance itself."""
+        from club3090_cockpit.app import DoctorPane
+
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            await self._enter_doctor(app, pilot)
+            assert app.query_one("#doctor-pane", DoctorPane).selected_index == 0
+            await pilot.press("up")
+            await _settle(pilot)
+            assert isinstance(app.focused, Tabs)
+
+    @pytest.mark.asyncio
+    async def test_down_from_the_tab_bar_descends_into_the_list(self):
+        """[down] on the tab bar reaches Doctor's list. It resolves through
+        _TAB_FOCUS_FALLBACK because Doctor has no primary DataTable."""
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            tc = app.query_one("#operate-tabs", TabbedContent)
+            tc.active = "tab-doctor"
+            await _settle(pilot)
+            bar = app._active_tab_bar()
+            assert bar is not None
+            bar.focus()
+            await _settle(pilot)
+            await pilot.press("down")
+            await _settle(pilot)
+            await _settle(pilot)
+            assert app.focused is not None and app.focused.id == "doctor-scroll"
+
+    @pytest.mark.asyncio
+    async def test_enter_label_follows_the_selection(self):
+        """The ⏎ label names the SELECTED check and tracks ↑/↓.
+
+        Renamed from `test_footer_enter_label_follows_the_selection`: ⏎ is no
+        longer advertised in the footer at all (the app binding is show=False —
+        a focused DataTable's own `select_cursor` binding used to win that slot
+        on Catalog / Orchestration / ③ Gate, so ⏎ showed in some panes and not
+        others).  It is advertised in the Modes rail's `#mode-action-hint`, which
+        the same `_sync_footer_labels` line writes.  The invariant — the label
+        follows the cursor instead of naming a fixed check — is unchanged.
+
+        (The footer's recompose-signature-includes-`description` invariant that
+        this test used to double as a probe for is covered on its own by
+        `test_footer_recomposes_on_a_real_binding_change`.)
+
+        Read the RENDERED label, not the binding objects: `_relabel_binding`
+        mutates those either way, so asserting on them would pass even with the
+        repaint reverted."""
+        from club3090_cockpit.app import _DOCTOR_CHECKS
+
+        app, _, _ = make_app(surface="producer")
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            await self._enter_doctor(app, pilot)
+
+            def enter_label():
+                return _renderable_text(
+                    app.query_one("#mode-action-hint", Label)
+                ).strip()
+
+            assert enter_label() == f"⏎ {_DOCTOR_CHECKS[0][2]}"
+            await pilot.press("down")
+            await _settle(pilot)
+            assert enter_label() == f"⏎ {_DOCTOR_CHECKS[1][2]}"
+
+    @pytest.mark.asyncio
+    async def test_hotkeys_still_work_alongside_the_list(self):
+        """The list is ADDITIVE — the documented hotkeys keep firing."""
+        app, _, _ = make_app(surface="producer")
+        fired = []
+        app.action_doctor_verify_full = lambda: fired.append("V")  # type: ignore
+        async with app.run_test(size=(120, 44)) as pilot:
+            await _settle(pilot)
+            await self._enter_doctor(app, pilot)
+            await pilot.press("V")      # verify-full's hotkey, selection on card 0
+            await _settle(pilot)
+            assert fired == ["V"]
 
 
 class TestSubtabCycleScopedToDirectPanes:
@@ -11094,16 +12282,35 @@ class TestTier1PrimaryActionAndSKeyHonesty:
             assert app.check_action("primary_action", ()) is True
 
     @pytest.mark.asyncio
-    async def test_enter_not_advertised_on_doctor(self):
-        """⏎ no-ops on Doctor → check_action falsey so the footer never shows
-        the misleading 'Enter Select' there."""
+    async def test_enter_on_doctor_is_advertised_and_names_the_check(self):
+        """⏎ on Doctor runs the SELECTED check, so it is advertised — and labelled.
+
+        Was `test_enter_not_advertised_on_doctor`, which was right for a read-only
+        Doctor: ⏎ did nothing, so advertising it would have been the misleading
+        "Enter Select" the Modes rail was showing. Doctor's cards are now a
+        keyboard-navigable list whose ⏎ dispatches the selected check, so the
+        honest state is the opposite — the key IS shown, and its label names the
+        check rather than a generic verb.
+
+        The ADVERTISEMENT moved: it used to read the Footer, but the app's ⏎
+        binding is show=False now — a focused DataTable's own `select_cursor`
+        binding won the footer slot, so ⏎ showed in some panes and vanished in
+        others (Catalog / Orchestration / ③ Gate all boot table-focused) for a key
+        that worked everywhere.  ⏎ is advertised in ONE place instead:
+        `#mode-action-hint` in the Modes rail, written by the same
+        `_sync_footer_labels` line that used to relabel the footer.  The invariant
+        this test protects — "⏎ is advertised on Doctor and names the SELECTED
+        check, not a generic verb" — is unchanged; only where it is read from."""
+        from club3090_cockpit.app import _DOCTOR_CHECKS
+
         app, _, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             await _enter_operate(pilot, tab="tab-doctor")
-            assert app.check_action("primary_action", ()) is False
-            # And the footer genuinely omits the enter key on Doctor.
-            footer_keys = {k.key for k in app.query(FooterKey)}
-            assert "enter" not in footer_keys
+            assert app.check_action("primary_action", ()) is True
+            hint = _renderable_text(app.query_one("#mode-action-hint", Label)).strip()
+            assert hint == f"⏎ {_DOCTOR_CHECKS[0][2]}", hint
+            # ...and it is NOT duplicated in the footer under a second label.
+            assert "enter" not in {k.key for k in app.query(FooterKey)}
 
     @pytest.mark.asyncio
     async def test_enter_not_advertised_on_containers(self):
@@ -11111,6 +12318,31 @@ class TestTier1PrimaryActionAndSKeyHonesty:
         async with app.run_test(size=(120, 40)) as pilot:
             await _enter_operate(pilot, tab="tab-containers")
             assert app.check_action("primary_action", ()) is False
+
+
+    @pytest.mark.asyncio
+    async def test_orch_hint_names_keys_and_gates_once(self):
+        """#orch-hint used to append "(gated)" to four of its six keys, which
+        wrapped the hint to three or four lines at 80 columns.  The gating is
+        now stated once as a trailing clause.  Protected invariant: every key
+        is still named, and the confirm-gating is still taught."""
+        from rich.console import Console
+
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot, tab="tab-orchestration")
+            # The hint wraps across visual lines at this width, so a
+            # line-based render drops later keys.  `_content` is the widget's
+            # full post-markup text; the screen capture below re-checks what
+            # the user actually sees, wrap-safely.
+            # ``.render().plain`` is the full pre-wrap content (this Textual's
+            # Label has no `_content`; `_renderable_text` would wrap-crop it).
+            hint = app.query_one("#orch-hint", Label).render().plain
+            for key in ("[k]", "[b]", "[n]", "[⏎]", "[o]", "[c]"):
+                assert key in hint, f"key {key} missing from hint: {hint!r}"
+            assert "(gated)" not in hint
+            assert hint.lower().count("gated") == 1
+            assert "confirm-gated" in hint
 
     @pytest.mark.asyncio
     async def test_doctor_rerun_verb_advertised_on_doctor(self):
@@ -11160,14 +12392,30 @@ class TestTier1PrimaryActionAndSKeyHonesty:
 
     @pytest.mark.asyncio
     async def test_s_key_gated_to_bring_and_evidence_in_lane(self):
-        """In the Bring & Validate lane [s] is valid on ① Bring (advance → ②
-        Serve) and ④ Measure (submit), NOT on ② Serve / ③ Gate / ⑤ Promote."""
+        """In the Bring & Validate lane [s] is scoped to ① Bring (advance → ②
+        Serve) and ④ Measure (submit), NOT ② Serve / ③ Gate / ⑤ Promote.
+
+        ① additionally requires something SERVABLE. The tab scoping is what this
+        test was written for and still holds; the added condition is that a key
+        the footer offers is a key that works — ① used to advertise
+        "s Continue → ② Serve" on a lane that had never been fit-checked and
+        then answer "Fit-check a model first"."""
+        from club3090_cockpit.data import ByoResult
+
         app, _, _ = make_app(surface="producer")
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
             await pilot.press("2")
             await _settle(pilot)
             tc = app.query_one("#validate-tabs", TabbedContent)
+
+            # Nothing fit-checked yet → ① does NOT advertise [s].
+            tc.active = "tab-bring"
+            await pilot.pause()
+            assert app.check_action("s_key", ()) is False
+
+            # A servable fit-check turns it on.
+            app._last_byo = ByoResult(repo="org/M", profile_like="vllm/minimal")
             for tab in ("tab-bring", "tab-evidence"):
                 tc.active = tab
                 await pilot.pause()
@@ -11236,6 +12484,9 @@ class TestTier1PreviewModalEnterBindings:
             app.screen.query_one("#promote-display-input", Input).value = "Qwen3 27B Abliterated"
             app.screen.query_one("#promote-family-input", Input).value = "qwen3-dense"
             app.screen.on_input_changed(None)
+            # #1156: ⑤ registers the compose ②③④ served; the write is refused
+            # without one. These tests exercise the GATE, not the compose source.
+            app.screen._scaffold.spec["compose"]["content"] = _FAKE_COMPOSE
             await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen, ConfirmActionScreen)
@@ -11647,7 +12898,32 @@ class TestProfileTemplateDerivation:
         # representative (vllm/qwen38-27b-multi8-*). Same shape as the #905 note
         # above: an entirely incubating group still gets a representative, which is
         # rule (d) working as designed, not a regression.
-        assert len(opts) == 10, f"expected 10 reps, got {len(opts)}: {[o.slug for o in opts]}"
+        # LOCAL-AWARE. This reads the REAL registry, so a model the user has
+        # registered on this rig legitimately adds groups: a local slug on its own
+        # engine creates a new (engine, topology) pair and a representative for it.
+        # Counting those would make the guard fail for anyone who has used the
+        # local layer — the #1213 lesson, where hardcoded core counts went red the
+        # moment a local model existed. Count the CURATED reps and let local ones
+        # ride along.
+        import subprocess as _sp, sys as _sys
+        _local = set()
+        try:
+            _out = _sp.run(
+                [_sys.executable, "-c",
+                 "import sys;sys.path.insert(0,'.');"
+                 "from scripts.lib.profiles.compose_registry import local_entries;"
+                 "print('\\n'.join(e['slug'] for e in local_entries()))"],
+                capture_output=True, text=True, timeout=60, cwd=str(repo_root),
+            )
+            if _out.returncode == 0:
+                _local = {l.strip() for l in _out.stdout.splitlines() if l.strip()}
+        except (OSError, _sp.TimeoutExpired):
+            pass
+        core_opts = [o for o in opts if o.slug not in _local]
+        assert len(core_opts) == 10, (
+            f"expected 10 curated reps, got {len(core_opts)}: "
+            f"{[o.slug for o in core_opts]} (local: {sorted(_local)})"
+        )
 
         # The 1-card rig default must be FUNCTIONAL + non-incubating — ideally the
         # registry's curated single default (vllm/minimal).
@@ -11677,6 +12953,95 @@ class TestProfileTemplateDerivation:
                     f"rep {o.slug!r} is {o.status!r} but its ({fam},{o.topology}) "
                     f"group has a functional sibling"
                 )
+
+
+class TestRigTopologyLadder:
+    """The rig default understands rigs bigger than this one.
+
+    The picker asked only for "single" (1 card) or "dual" (anything more), so a 4-
+    or 8-GPU rig was offered DUAL templates while the multi4/multi8 slugs it wanted
+    were reachable only through the custom escape hatch.  This rig has TWO cards, so
+    every count below is otherwise untestable.
+    """
+
+    def _mk(self, slug, engine, path, status="production"):
+        return VariantRow(
+            slug=slug, switch_engine=engine, launch_engine=engine,
+            compose_dir=path.rsplit("/", 1)[0], file=path.rsplit("/", 1)[1],
+            port=8000, model="q", engine=engine, kvcalc_key="k", container="c",
+            compose_path=path, status=status, ctx_label="262K", status_note="",
+        )
+
+    def _full_ladder_rows(self):
+        return [
+            self._mk("vllm/single", "vllm-stable", "models/q/vllm/compose/single/aq/base.yml"),
+            self._mk("vllm/dual", "vllm-stable", "models/q/vllm/compose/dual/aq/fp8.yml"),
+            self._mk("vllm/multi4", "vllm-stable", "models/q/vllm/compose/multi4/aq/fp8.yml"),
+            self._mk("vllm/multi8", "vllm-stable", "models/q/vllm/compose/multi8/aq/fp8.yml"),
+        ]
+
+    def test_exact_topology_per_card_count(self):
+        opts = profile_templates(self._full_ladder_rows())
+        assert default_profile_template(opts, 1) == "vllm/single"
+        assert default_profile_template(opts, 2) == "vllm/dual"
+        assert default_profile_template(opts, 4) == "vllm/multi4"
+        assert default_profile_template(opts, 8) == "vllm/multi8"
+
+    def test_counts_without_a_topology_take_the_largest_that_fits(self):
+        """3 -> dual (no multi3 composes exist), 5-7 -> multi4, >8 -> multi8.  The
+        alternative — inventing multi3/multi5 — names slugs the registry does not
+        have."""
+        opts = profile_templates(self._full_ladder_rows())
+        assert default_profile_template(opts, 3) == "vllm/dual"
+        for n in (5, 6, 7):
+            assert default_profile_template(opts, n) == "vllm/multi4", f"{n} cards"
+        assert default_profile_template(opts, 16) == "vllm/multi8"
+
+    def test_degrades_when_the_rig_topology_has_no_option(self):
+        """A 4-card rig on a registry with no multi4 slug lands on dual — the
+        largest that fits and exists — not on a single-card slug picked by sort
+        order, which is what "first option" used to hand it."""
+        rows = [
+            self._mk("vllm/single", "vllm-stable", "models/q/vllm/compose/single/aq/base.yml"),
+            self._mk("vllm/dual", "vllm-stable", "models/q/vllm/compose/dual/aq/fp8.yml"),
+        ]
+        opts = profile_templates(rows)
+        assert default_profile_template(opts, 4) == "vllm/dual"
+        assert default_profile_template(opts, 8) == "vllm/dual"
+
+    def test_status_floor_outranks_topology_fit(self):
+        """FIX 2's floor is preserved: a launchable DUAL beats an incubating multi4
+        on a 4-card rig.  A Select default must be launchable; degrading topology is
+        the cheaper concession."""
+        rows = [
+            self._mk("vllm/dual", "vllm-stable", "models/q/vllm/compose/dual/aq/fp8.yml"),
+            self._mk("vllm/multi4", "vllm-stable",
+                     "models/q/vllm/compose/multi4/aq/fp8.yml", status="incubating"),
+        ]
+        opts = profile_templates(rows)
+        assert default_profile_template(opts, 4) == "vllm/dual"
+
+    def test_non_functional_only_still_returns_a_real_option(self):
+        """The invariant that outlives every rule here: a Select cannot default to a
+        value absent from its options."""
+        rows = [
+            self._mk("vllm/multi4", "vllm-stable",
+                     "models/q/vllm/compose/multi4/aq/fp8.yml", status="incubating"),
+        ]
+        opts = profile_templates(rows)
+        slugs = {o.slug for o in opts}
+        for n in (1, 2, 4, 8):
+            assert default_profile_template(opts, n) in slugs, f"{n} cards"
+
+    def test_ladder_shape(self):
+        from club3090_cockpit.app import _topology_ladder
+
+        assert _topology_ladder(1) == ["single"]
+        assert _topology_ladder(2) == ["dual", "single"]
+        assert _topology_ladder(4) == ["multi4", "dual", "single"]
+        assert _topology_ladder(8) == ["multi8", "multi4", "dual", "single"]
+        # Degenerate inputs must not produce an empty ladder.
+        assert _topology_ladder(0) == ["single"]
 
 
 class TestCatalogPreview:
@@ -13178,10 +14543,14 @@ class TestSettings:
         async with app.run_test(size=(120, 40)) as pilot:
             await _settle(pilot)
             pane = app.query_one("#catalog-pane", CatalogPane)
-            pane.set_model_dir_note("⚠ model dir not found — press [S] to set it")
+            # Mirror the production note verbatim (app.py escapes the key hint):
+            # the banner is interpolated into a markup Static, so an unescaped
+            # "[S]" is deleted before the user sees it.
+            pane.set_model_dir_note("⚠ model dir not found — press \\[S] to set it")
             await pilot.pause()
-            status = str(app.query_one("#catalog-status", Label).render())
+            status = _renderable_text(app.query_one("#catalog-status", Label))
             assert "model dir not found" in status
+            assert "[S]" in status, status
 
     @pytest.mark.asyncio
     async def test_env_model_dir_picked_up(self, monkeypatch):
@@ -13281,7 +14650,7 @@ class TestAdaptiveEstatePoll:
             return ["g0", "g1"]
         cd._get_gpu_info = ok
         assert asyncio.run(cd.gpu_info()) == ["g0", "g1"]
-        async def boom():
+        async def boom(**_kwargs):
             raise RuntimeError("nvidia-smi gone")
         cd._get_gpu_info = boom
         assert asyncio.run(cd.gpu_info()) == []   # degrades, never raises

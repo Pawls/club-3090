@@ -389,6 +389,28 @@ _CATALOG_COLUMNS: "list[tuple[str, str]]" = [
 ]
 _CATALOG_HEADERS = dict(_CATALOG_COLUMNS)
 _CATALOG_PINNED = {"slug"}  # identity — never hideable
+
+# #22 — narrow-terminal column default.  With all 16 columns on, an 80-col
+# terminal shows `model · slug · provider · we…` and nothing else: the table
+# needs 151 columns and gets 46, so the columns you actually PICK on (status,
+# ctx, TPS) sit ~100 columns off-screen right, reachable only by horizontal
+# scroll that nothing advertises.  Below _CATALOG_NARROW_COLS the config and
+# topology facets fold away by default, leaving identity + the decision columns.
+# This is a DEFAULT, not a lock: it applies only when the user has no persisted
+# [|] picker preference, and picking columns overrides it permanently.
+# Two tiers, because 80 and 120 are very different budgets.  Measured against
+# the rendered table width, not guessed:
+#   < 120 : fold the config + topology facets  → model · slug · ctx · TPS · status
+#   < 100 : also fold `model`  → slug · ctx · TPS · status  (the model is still
+#           named by the \\[\\] model-scope dropdown, the preview strip under the
+#           table, and the default group-by-model sort)
+_CATALOG_NARROW_COLS = 120
+_CATALOG_VERY_NARROW_COLS = 100
+_CATALOG_NARROW_HIDDEN = {
+    "provider", "weights", "gb", "kv", "act", "offload", "host_ram", "spec",
+    "8pk", "topo", "engine",
+}
+_CATALOG_VERY_NARROW_HIDDEN = _CATALOG_NARROW_HIDDEN | {"model"}
 _CATALOG_SORTS: "list[tuple[str, str]]" = [
     # The [s] catalog sort cycle, in order.  "model" is the DEFAULT — the
     # stable group-by-model registry view (switch.sh --list look); the other
@@ -410,18 +432,38 @@ def _sanitize_catalog_sort(saved: Any) -> str:
     return key if key in _CATALOG_SORT_KEYS else "model"
 
 
-def _sanitize_catalog_columns(saved: Any) -> tuple[list[str], set[str]]:
+def _sanitize_catalog_columns(
+    saved: Any, *, width: Optional[int] = None
+) -> tuple[list[str], set[str]]:
     """Normalise a persisted ``{"order": [...], "hidden": [...]}`` into a safe
     ``(order, hidden)`` pair: unknown keys dropped, canonical keys missing from
     a saved order inserted next to their canonical neighbour (a NEWLY-shipped
     column appears, visible, without wiping the user's layout), pinned keys
-    forced visible.  Tolerant of any malformed shape → canonical defaults."""
+    forced visible.  Tolerant of any malformed shape → canonical defaults.
+
+    ``width`` is the terminal width and applies ONLY when there is no persisted
+    preference: below ``_CATALOG_NARROW_COLS`` the default hidden set becomes
+    ``_CATALOG_NARROW_HIDDEN`` so the pick-decision columns are on screen
+    instead of scrolled off the right edge.  A user who has touched the [|]
+    picker keeps exactly what they chose, at every width."""
     default_order = [k for k, _ in _CATALOG_COLUMNS]
+
+    def _default_hidden() -> set[str]:
+        if width is None:
+            return set()
+        if width < _CATALOG_VERY_NARROW_COLS:
+            return set(_CATALOG_VERY_NARROW_HIDDEN) - _CATALOG_PINNED
+        if width < _CATALOG_NARROW_COLS:
+            return set(_CATALOG_NARROW_HIDDEN) - _CATALOG_PINNED
+        return set()
+
+    if not saved:
+        return list(default_order), _default_hidden()
     try:
         raw_order = [str(k) for k in (saved or {}).get("order", [])]
         raw_hidden = [str(k) for k in (saved or {}).get("hidden", [])]
     except (AttributeError, TypeError):
-        return list(default_order), set()
+        return list(default_order), _default_hidden()
     order = [k for k in raw_order if k in _CATALOG_HEADERS]
     # de-dup, first occurrence wins
     seen: set[str] = set()
@@ -801,18 +843,53 @@ def profile_templates(
     return out
 
 
+# Card counts that have REAL composes, smallest first.  Scanned from the registry
+# 2026-09-08: single 34 · dual 52 · multi4 17 · multi8 9 — and NO multi3, even
+# though `_TOPO_ORDER` still lists one (that entry is vestigial: `_variant_topology`
+# would accept a multi3 path, but no compose has ever used it).  Deriving the ladder
+# from card counts rather than from `_TOPO_ORDER` keeps a topology nobody ships out
+# of the default path.
+_TOPO_BY_CARDS: tuple[tuple[int, str], ...] = (
+    (1, "single"), (2, "dual"), (4, "multi4"), (8, "multi8"),
+)
+
+
+def _topology_ladder(num_gpus: int) -> list[str]:
+    """Topologies to try for a rig with ``num_gpus`` cards, BEST FIT FIRST.
+
+    The rule is *the largest topology that fits, then degrade*.  A topology needing
+    MORE cards than the rig has cannot run at all; one needing fewer always can.  So
+    4 cards → multi4, dual, single; 8 → multi8, multi4, dual, single; 1 → single.
+
+    Counts with no exact topology take the largest that fits rather than inventing a
+    slug: **3 → dual** (there are no multi3 composes) and **5-7 → multi4**.
+
+    The DEGRADING half matters as much as the exact fit.  Before this, a ≥2-card rig
+    asked only for "dual" and, when no dual option existed, fell through to "the first
+    option" — which sorts by ``_TOPO_ORDER``, i.e. a SINGLE-card slug.  A 4-card rig
+    with no multi4 default now lands on dual, which is both launchable and closer to
+    the hardware, instead of a one-card slug chosen by sort order.
+    """
+    n = max(1, int(num_gpus or 1))
+    fits = [topo for cards, topo in _TOPO_BY_CARDS if cards <= n]
+    return list(reversed(fits)) or ["single"]
+
+
 def default_profile_template(
     options: list["ProfileOption"], num_gpus: int
 ) -> Optional[str]:
     """A12 — pick the dropdown's default value for the rig's own topology.
 
     Rule (deterministic, meaningful): prefer the registry's CANONICAL slug for
-    the rig topology — a slug literally named ``<engine>/<topo>`` (``vllm/dual``
-    for ≥2 cards, ``vllm/single`` for 1 card), preferring a ``vllm/``-prefixed
-    slug; then any literal ``<engine>/<topo>`` slug; then any slug whose
-    topology matches; finally the first option.  NEVER an arbitrary alphabetical
-    (e.g. Gemma/beellama) slug.  Topology comes from the carried-through
-    ``ProfileOption.topology`` — never re-derived from the label.
+    the rig topology — a slug literally named ``<engine>/<topo>`` (``vllm/multi4``
+    on 4 cards, ``vllm/dual`` on 2, ``vllm/single`` on 1), preferring a
+    ``vllm/``-prefixed slug; then any literal ``<engine>/<topo>`` slug; then any
+    slug whose topology matches; finally the first option.  NEVER an arbitrary
+    alphabetical (e.g. Gemma/beellama) slug.  Topology comes from the
+    carried-through ``ProfileOption.topology`` — never re-derived from the label.
+
+    The rig topology is the largest that FITS the card count, degrading when it has
+    no option — see ``_topology_ladder``.
 
     **FIX 2 status floor — a Select default MUST be launchable.** The earlier
     rule returned the FIRST vllm-single option for a 1-card rig, which (since the
@@ -826,11 +903,15 @@ def default_profile_template(
     default to an absent value)."""
     if not options:
         return None
-    want = "single" if num_gpus <= 1 else "dual"
+    # ≥4-card rigs (#David412, 2026-09-08): this asked only for "single" or "dual",
+    # so a 4- or 8-GPU rig was offered DUAL templates and the multi4/multi8 slugs it
+    # actually wanted were reachable only through the custom escape hatch.  The
+    # ladder is best-fit-first with degradation — see _topology_ladder.
+    ladder = _topology_ladder(num_gpus)
 
-    def _pick(pool: list["ProfileOption"]) -> Optional[str]:
+    def _pick(pool: list["ProfileOption"], want: str) -> Optional[str]:
         """The original topology-preference order, applied to a pre-filtered
-        option pool (functional-only, then the full set)."""
+        option pool (functional-only, then the full set) for ONE topology."""
         same_topo = [o for o in pool if o.topology == want]
         # 1. the canonical vllm slug literally named "vllm/<topo>".
         canonical_vllm = f"vllm/{want}"
@@ -854,10 +935,19 @@ def default_profile_template(
 
     # Status floor: a functional default first.  Fall back to the full set, then
     # to the first option, so the return is always a real (selectable) value.
+    #
+    # ORDER MATTERS: the whole ladder is walked over the FUNCTIONAL pool before any
+    # of it is walked over the full set.  A launchable dual slug beats an
+    # incubating multi4 one on a 4-card rig — that is the FIX 2 status floor
+    # (a Select default MUST be launchable), and degrading topology is the cheaper
+    # concession of the two.
     functional = [o for o in options if _status_is_functional(o.status)]
-    return _pick(functional) or _pick(options) or (
-        functional[0].slug if functional else options[0].slug
-    )
+    for pool in (functional, options):
+        for want in ladder:
+            hit = _pick(pool, want)
+            if hit:
+                return hit
+    return functional[0].slug if functional else options[0].slug
 
 
 def _set_select_options(
@@ -907,7 +997,10 @@ class HelpScreen(ModalScreen):
        the box now takes a fixed fraction of the screen and the body SCROLLS
        (content identical). */
     HelpScreen > Vertical {
-        width: 76;
+        /* Fixed 76 on ANY terminal: on a wide screen the help wrapped and lost
+           its indentation for no reason, on a narrow one it overflowed. */
+        width: 100;
+        max-width: 90%;
         height: 85%;
         max-height: 90%;
         border: thick $accent;
@@ -946,11 +1039,12 @@ class HelpScreen(ModalScreen):
     _LANE_SECTION = """\
 [bold]Bring & Validate[/bold] (producer lane — the ① → ⑤ pipeline)
   ① Bring:   [cyan]f[/cyan] search HF (fills the repo field)   fit-check an HF model   [cyan]s[/cyan] Continue → ② Serve (weights on disk)   [cyan]D[/cyan] download weights
+  ①ᴋ Bring:  paste a COMPOSE PATH (*.yml) instead of a repo → Route-K: serves YOUR file, ⑤ registers it (no download, no HF call)
   ② Serve:   [cyan]⏎[/cyan]/[cyan]g[/cyan] serve untested (Route-C = your weights · else catalog reproduction)
   ③ Gate:    [cyan]⏎[/cyan] launch validation step (gated)   [cyan]F[/cyan] full battery report.sh --full (~43-min · confirm · uses serving model)   [cyan]K[/cyan] boot-log KV back-solve vs kv-calc (read)
   ④ Measure: [cyan]⏎[/cyan] open report   [cyan]m[/cyan] vs catalog bar (read)   [cyan]s[/cyan] submit to localmaxxing (gated · never auto)
-  ⑤ Promotion Preview: [cyan]P[/cyan] scaffold preview [yellow](preview only — no catalog write yet)[/yellow]
-  [cyan]v[/cyan] ▸ Evaluate via c3t [yellow](preview / mock this phase)[/yellow]
+  ⑤ Promote:  [cyan]P[/cyan] scaffold the registry entry — slug + port are yours to edit; ⏎ writes the LOCAL layer (confirm-gated)
+  [cyan]v[/cyan] ▸ Evaluate via c3t [yellow](confirm-gated · RUNS against the serving model)[/yellow]
   [cyan]Ctrl+n[/cyan] New bring — clear ①/② state and start over
   Happy path: [cyan]2[/cyan] → paste repo → Inspect → Fit-check → [cyan]D[/cyan]? → [cyan]s[/cyan] → ⏎ Serve → ③ Gate → ④ Measure → [cyan]P[/cyan]
 """
@@ -995,15 +1089,25 @@ class HelpScreen(ModalScreen):
             "  [cyan]e[/cyan] explain   [cyan]i[/cyan] model info (metadata popup for the selected slug)",
             "  [cyan]d[/cyan] set-default   [cyan]D[/cyan] clear-default",
             "  [cyan]O[/cyan] ▸ Optimize for my card (kv-calc recs, advisory)",
+            # These six are show=False bindings whose ONLY other teaching surface
+            # is the pane's own hint line — which is itself clipped on a narrow
+            # terminal.  Help is where they have to be findable.
+            "  [cyan]\\ [/cyan]model scope (dropdown)   [cyan]/[/cyan] filter   "
+            "[cyan]s[/cyan] sort — group-by-model → TPS ↓ → GB ↑ → ctx ↓",
+            "  [cyan]h[/cyan] reveal 🗑️ deprecated + hardware-incompatible slugs   "
+            "[cyan]w[/cyan] downloaded-only",
+            "  [cyan]|[/cyan] columns picker (show/hide + reorder; persisted)   "
+            "[cyan]u[/cyan] copy the serving API URL",
             "",
             "[bold]Run & Operate · Orchestration[/bold]",
             "  [cyan]⏎[/cyan] switch scene   [cyan]k[/cyan] stop THIS model   [cyan]b[/cyan] restart serving   [cyan]n[/cyan] switch model (→ Catalog tab)   (writes gated)",
             "  [cyan]o[/cyan] stop ALL (tears down the whole estate)   [cyan]c[/cyan] power cap… (default 230W / clear / custom W)   (all gated)",
             "  [cyan]N[/cyan] new pod (run several models on GPU subsets — name · slug · GPU set, fit-checked + gated)",
             "[bold]Run & Operate · Containers[/bold]",
-            "  [cyan]l[/cyan] logs   [cyan]t[/cyan] top (read)   [cyan]s[/cyan] restart   [cyan]x[/cyan] stop   [cyan]X[/cyan] rm   (writes gated)",
+            "  [cyan]l[/cyan] logs   [cyan]t[/cyan] top   [cyan]c[/cyan] compose   [cyan]f[/cyan] follow (arm/pause the live tail)   (all read)",
+            "  [cyan]s[/cyan] restart · start if stopped   [cyan]x[/cyan] stop   [cyan]X[/cyan] rm   (writes gated)",
             "[bold]Run & Operate · Doctor[/bold]  — is it serving correctly?",
-            "  [cyan]r[/cyan] health (read)   [cyan]v[/cyan] verify   [cyan]V[/cyan] verify-full   [cyan]R[/cyan] report   [cyan]F[/cyan] report --full   [cyan]w[/cyan] power-cap sweep (gated)",
+            "  [cyan]y[/cyan] health (read)   [cyan]v[/cyan] verify   [cyan]V[/cyan] verify-full   [cyan]R[/cyan] report   [cyan]F[/cyan] report --full   [cyan]w[/cyan] power-cap sweep (gated)",
         ]
         # Producer-only lane section — OMITTED on the lean surface (clean help).
         if producer:
@@ -1042,9 +1146,9 @@ class HelpScreen(ModalScreen):
             "",
             "[bold]Mouse & copy[/bold]",
             "",
-            "  click row = select + preview   double-click row = model info ([i])",
+            "  click row = select + preview   double-click row = model info (\\[i])",
             "  click column header = column picker ([|])",
-            "  [Y] copies the context-relevant text (OSC52 — needs an OSC52 terminal;",
+            "  \\[Y] copies the context-relevant text (OSC52 — needs an OSC52 terminal;",
             "  works over SSH). To drag-select raw text, hold SHIFT while dragging —",
             "  the terminal bypasses the app's mouse capture and selects natively.",
          ])
@@ -1052,7 +1156,7 @@ class HelpScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("club3090 serve cockpit — Help", classes="help-title")
+            yield Label("club3090 cockpit — Help", classes="help-title")
             with VerticalScroll():
                 yield Static(self.help_text)
 
@@ -1156,7 +1260,12 @@ class CatalogPane(Container):
         height: 1fr;
     }
     CatalogPane #catalog-status {
-        height: 1;
+        /* `width: auto` computed a 112-col region against a 46-col viewport, so
+           the line was truncated horizontally at every realistic width — the
+           "run bench.sh / quality-test.sh" nudge never finished rendering below
+           ~170 cols.  1fr + auto height makes it wrap instead of vanish. */
+        width: 1fr;
+        height: auto;
         color: $text-muted;
         padding: 0 1;
     }
@@ -1179,6 +1288,13 @@ class CatalogPane(Container):
     }
     CatalogPane DataTable {
         height: 1fr;
+        /* The table is the pane.  With `height: 1fr` alone it lost every row to
+           its auto-height siblings (status / preview / hint) plus the 12-row
+           #serve-live that appears after a Start: at 80x24 it collapsed to
+           height 1 — not even the header — so starting a model made the list
+           you started it from vanish.  Floor it; the preview strip already has
+           `overflow-y: auto` and is the right thing to squeeze. */
+        min-height: 6;
     }
     CatalogPane #catalog-preview {
         height: auto;
@@ -1194,7 +1310,12 @@ class CatalogPane(Container):
         color: $text;
     }
     CatalogPane #catalog-hint {
-        height: 1;
+        /* This one IS in the app-level `width: 1fr` list, so it wraps — but
+           `height: 1` then clipped every wrapped row but the first.  At 80 cols
+           that cut the line at "[c]", so `[s] sort` and `[|] columns` never
+           rendered at ANY width below ~159.  Those two keys have no other
+           teaching surface, which is why they read as nonexistent. */
+        height: auto;
         color: $text-muted;
         padding: 0 1;
     }
@@ -1228,8 +1349,9 @@ class CatalogPane(Container):
             id="catalog-preview",
         )
         yield Label(
-            "[dim]\\[\\\\] model   \\[/] filter   \\[⏎] serve   \\[e] explain   "
-            "\\[d] set-default   \\[D] clear-default   \\[s] sort   \\[|] columns[/dim]",
+            "[dim]\\[\\] model   \\[/] filter   \\[⏎] serve   \\[c] compose   "
+            "\\[e] explain   \\[d] set-default   \\[D] clear-default   "
+            "\\[s] sort   \\[|] columns[/dim]",
             id="catalog-hint",
         )
 
@@ -1260,8 +1382,11 @@ class CatalogPane(Container):
         # the user's picker state ([|]), applied at launch from the persisted
         # "catalog_columns" settings key via apply_persisted_settings (an app
         # constructed directly — tests — starts canonical).
+        # `width` folds the config/topology facets away on a narrow terminal —
+        # but ONLY when there is no persisted [|] preference (see #22 above).
         self._col_order, self._col_hidden = _sanitize_catalog_columns(
-            getattr(self.app, "catalog_columns_pref", None)
+            getattr(self.app, "catalog_columns_pref", None),
+            width=getattr(getattr(self.app, "size", None), "width", None),
         )
         self._apply_columns_to_table(table)
         # Full enriched catalog, and the current filter substring.
@@ -1296,7 +1421,7 @@ class CatalogPane(Container):
         self._free_gb_by_index: Optional[dict[int, float]] = None
         # Download UX banner: a non-empty note (set by the app when the model dir
         # is unset / missing) is prepended to the status line so the user is
-        # prompted to set it ([S]).
+        # prompted to set it (\\[S]).
         self._model_dir_note: str = ""
         # Degraded-catalog notice (C6): a non-empty note means the --json emit
         # failed but the raw-tab fallback still produced rows — they render with
@@ -2016,6 +2141,285 @@ class _CopyableModal:
         return self._copy_payload or ""
 
 
+# ── Compose viewer (READ) ────────────────────────────────────────────────────
+
+
+class ComposeViewScreen(_CopyableModal, ModalScreen):
+    """The compose behind whatever the user is looking at — READ-ONLY.
+
+    Catalog rows, container drills and lane stages all name a config the user has
+    only ever seen summarised. The serve confirm shows the CATALOG'S CLAIMS (ctx,
+    measured TPS, fit) — not the file — and a Route-K / generated serve shows the
+    docker command and nothing else, so the user commits a compose they have not
+    read and cannot reopen. This is that missing last look.
+
+    Two layers, in this order:
+      1. the `Profile (at-a-glance)` header + the mechanical facts derived from
+         the file (image / port / ctx / KV / TP), because the header is 15-40
+         lines of prose and `command:` sits ~100 lines down;
+      2. the raw YAML, pygments-highlighted via rich.syntax (present already —
+         no new dependency), wrapped so the page never scrolls sideways.
+
+    READ-ONLY BY DESIGN in this increment: no edit verb exists yet on any
+    provenance. The provenance line still states editability, because that is the
+    fact a reader needs before they go and change the file in their own editor —
+    and for a CURATED file the honest answer is "don't, it is git-tracked and
+    shared; a change here diverges your checkout from upstream".
+    """
+
+    DEFAULT_CSS = """
+    ComposeViewScreen {
+        align: center middle;
+    }
+    ComposeViewScreen > Vertical {
+        width: 92%;
+        max-width: 120;
+        height: 96%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    ComposeViewScreen .compose-title {
+        text-style: bold;
+        color: $accent;
+    }
+    ComposeViewScreen #compose-path {
+        color: $text-muted;
+    }
+    ComposeViewScreen #compose-provenance {
+        margin-bottom: 1;
+    }
+    ComposeViewScreen #compose-facts {
+        height: auto;
+        max-height: 12;
+        overflow-y: auto;
+        margin-bottom: 1;
+    }
+    ComposeViewScreen #compose-rule {
+        color: $text-muted;
+    }
+    ComposeViewScreen #compose-scroll {
+        height: 1fr;
+        /* NO border here, and a right gutter instead.
+           A compose is arbitrary user text: the inkling-small moecache header
+           alone carries 27 U+FE0F (VS16) characters plus ambiguous-width ones
+           (— → ≥ ─ • …). Rich reserves 2 cells for those; many terminals draw 1
+           — the documented misalignment class in this repo's AGENTS.md. Any
+           fixed-width chrome to the RIGHT of that text lands in the wrong column
+           on exactly the rows that contain them, so the border appeared to break
+           up as you scrolled. Sanitising the text is not an option in a viewer
+           whose job is to show the file faithfully, so the fragile element goes
+           instead: the rule line above already separates the YAML from the facts,
+           and the gutter absorbs a one-cell overrun before it reaches the modal's
+           own border. */
+        padding: 0 2 0 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("c", "dismiss", "Close"),
+        Binding("h", "toggle_header", "Header", show=True),
+        Binding("Y", "app.copy_context", "Copy", show=True),
+    ]
+
+    # Provenance kind → the accent colour of its banner.
+    _KIND_STYLE = {
+        "curated":   "yellow",
+        "local":     "green",
+        "generated": "cyan",
+        "external":  "green",
+        "missing":   "red",
+    }
+
+    def __init__(self, path: str, *, title: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._path = path
+        self._title = title or "Compose"
+        self._show_header = True
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(f"Compose · {self._title}", classes="compose-title")
+            yield Static("", id="compose-path")
+            yield Static("", id="compose-provenance")
+            yield Static("", id="compose-facts")
+            yield Static("", id="compose-rule")
+            with ScrollableContainer(id="compose-scroll"):
+                yield Static("", id="compose-body")
+            yield Footer()
+
+    def on_mount(self) -> None:
+        # Size the facts strip to the TERMINAL, not a fixed 12 rows. On an 80x24
+        # the modal is ~21 rows, and a fixed strip plus the header lines pushed
+        # the YAML — the thing the viewer exists to show — entirely below the
+        # fold, reachable only by pressing [h]. A third of the height keeps both
+        # visible; the strip scrolls when the header is long.
+        try:
+            avail = int(self.app.size.height)
+            self.query_one("#compose-facts", Static).styles.max_height = max(
+                4, min(12, avail // 4)
+            )
+        except Exception:
+            pass
+        self._load()
+
+    def action_toggle_header(self) -> None:
+        """[h] hides the facts strip — more rows of YAML on a short terminal."""
+        self._show_header = not self._show_header
+        for wid in ("#compose-facts", "#compose-provenance", "#compose-path"):
+            try:
+                self.query_one(wid).display = self._show_header
+            except Exception:
+                pass
+
+    def _load(self) -> None:
+        from pathlib import Path
+
+        from club3090_cockpit.data import (
+            classify_compose_provenance,
+            derive_compose_facts,
+            parse_profile_header,
+        )
+
+        root = getattr(self.app, "_repo_root", None) or Path(".")
+        prov = classify_compose_provenance(self._path, root)
+        colour = self._KIND_STYLE.get(prov.kind, "white")
+        try:
+            self.query_one("#compose-path", Static).update(prov.rel or prov.path)
+            self.query_one("#compose-provenance", Static).update(
+                f"[{colour}]┃ {prov.reason}[/{colour}]"
+            )
+        except Exception:
+            pass
+
+        if prov.kind == "missing":
+            try:
+                self.query_one("#compose-body", Static).update(
+                    "[red]file not found[/red]"
+                )
+                self.query_one("#compose-facts", Static).update("")
+            except Exception:
+                pass
+            return
+
+        try:
+            text = Path(prov.path).read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            try:
+                self.query_one("#compose-body", Static).update(
+                    f"[red]could not read:[/red] {exc}"
+                )
+            except Exception:
+                pass
+            return
+
+        self._copy_payload = text   # [Y] copies the RAW file, not the rendering
+        facts = derive_compose_facts(text, prov.path)
+        header = parse_profile_header(text)
+        try:
+            self.query_one("#compose-facts", Static).update(
+                self._facts_markup(header, facts)
+            )
+            self.query_one("#compose-rule", Static).update(
+                f"── yaml · {len(text.splitlines())} lines · "
+                f"[dim]h header · Y copy · Esc close[/dim] ──"
+            )
+        except Exception:
+            pass
+
+        # rich.syntax gives pygments highlighting with no new dependency, and
+        # word_wrap keeps a long `volumes:` line inside the modal instead of
+        # forcing a horizontal scroll.
+        try:
+            from rich.syntax import Syntax
+
+            body = Syntax(
+                text, "yaml", line_numbers=True, word_wrap=True, theme="ansi_dark"
+            )
+        except Exception:
+            body = text
+        try:
+            self.query_one("#compose-body", Static).update(body)
+        except Exception:
+            pass
+
+    def _facts_markup(self, header, facts) -> str:
+        """The header fields first, then what the file mechanically states.
+
+        Status is rendered with the catalog's own glyph so one status means one
+        symbol app-wide, and a REQUIRED-but-missing Caveats line is called out —
+        that combination reds `test-compose-status-drift` on the user's checkout,
+        so it is worth seeing here rather than at commit time.
+        """
+        from rich.markup import escape
+
+        from club3090_cockpit.data import COMPOSE_STATUS_EMOJI
+
+        rows: list[str] = []
+        if header.present:
+            status = header.status_word
+            glyph = _STATUS_GLYPH.get(status, "") if status else ""
+            shown = header.fields.get("Status", "")
+            # We render the catalog's own glyph, so drop the header's leading
+            # emoji rather than printing two symbols for one status.
+            if glyph:
+                for emoji in COMPOSE_STATUS_EMOJI:
+                    if shown.startswith(emoji):
+                        shown = shown[len(emoji):].strip()
+                        break
+            rows.append(f"[bold]Status[/bold]    {glyph} {escape(shown)}".rstrip())
+            if header.caveats_missing:
+                rows.append(
+                    "[yellow]Caveats   ⚠ REQUIRED for this status — missing[/yellow]"
+                )
+
+        # The mechanical facts go HIGH — above the prose fields. "What will this
+        # actually run" is the question the viewer exists to answer, and a long
+        # multi-line Caveats (675 chars is real, and 84 of 112 composes carry one)
+        # would otherwise push port/ctx/image below the fold of the facts box.
+        def shown(value: str) -> str:
+            """`${MAX_MODEL_LEN:-262144}` reads as `262144 ($MAX_MODEL_LEN)`.
+
+            The token is faithful to the file, but a strip of raw `${VAR:-x}` is
+            unreadable at a glance — and the effective value IS the default
+            unless the user overrides it, which is exactly what the reader is
+            here to learn. The variable name is kept, dimmed, because it is how
+            they would override it."""
+            m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-(.*)\}", value.strip())
+            if not m:
+                return f"[bold]{escape(value)}[/bold]"
+            var, default = m.group(1), m.group(2)
+            if not default:
+                return f"[dim]unset (${var})[/dim]"
+            return f"[bold]{escape(default)}[/bold] [dim](${var})[/dim]"
+
+        mech = []
+        for label, val in (
+            ("image", facts.image), ("port", facts.port), ("ctx", facts.max_ctx),
+            ("kv", facts.kv_dtype), ("tp", facts.tp), ("served-as", facts.served_name),
+        ):
+            if val:
+                mech.append(f"{label} {shown(str(val))}")
+        if mech:
+            rows.append("[dim]" + "  ·  ".join(mech) + "[/dim]")
+
+        if header.present:
+            # Caveats LAST: it is by far the longest field, so leading with it
+            # would bury everything else behind a scroll.
+            for key in ("Model", "Topology", "Drafter", "KV", "Vision",
+                        "Max ctx", "Genesis", "Best for", "Caveats"):
+                val = header.fields.get(key, "").strip()
+                if val:
+                    rows.append(f"[bold]{key}[/bold]{' ' * max(1, 10 - len(key))}{escape(val)}")
+        else:
+            rows.append("[dim]no `Profile (at-a-glance)` header in this file[/dim]")
+        return "\n".join(rows)
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
 # ── Explain detail modal ────────────────────────────────────────────────────────
 
 
@@ -2050,12 +2454,17 @@ class ExplainScreen(_CopyableModal, ModalScreen):
         Binding("Y", "app.copy_context", "Copy", show=True),
     ]
 
-    def __init__(self, slug: str, *, model: str = "", engine: str = "", **kwargs):
+    def __init__(self, slug: str, *, model: str = "", engine: str = "",
+                 status: str = "", **kwargs):
         super().__init__(**kwargs)
         self._slug = slug
-        # (model, engine) drive the cross-rig benchmark fold (Fold 3).
+        # (model, engine) drive the cross-rig benchmark fold (Fold 3).  They —
+        # and `status` — are ALSO the fallback for the identity rows: see
+        # `_rerender`.  The caller already holds these on the CatalogEntry, so
+        # the modal never has to show "—" for a fact the row behind it displays.
         self._model = model
         self._engine = engine
+        self._status = status
         # Cached detail (our-rig story) so the cross-rig benchmark rows folded in
         # from the retired Benchmarks tab can be appended once they arrive.
         self._detail: Optional[dict] = None
@@ -2095,15 +2504,38 @@ class ExplainScreen(_CopyableModal, ModalScreen):
         body = self.query_one("#explain-body", Static)
         detail, error = self._detail, self._detail_error
         if error or detail is None:
-            body.update(f"[red]explain failed:[/red] {error or 'no data'}")
+            # Even a hard failure should not hide what the caller already knows —
+            # the catalog row behind this modal is displaying these three fields.
+            known = [
+                f"  [bold]{label}[/bold]  {value}"
+                for label, value in (
+                    ("Model ", self._model),
+                    ("Engine", self._engine),
+                    ("Status", self._status),
+                )
+                if value
+            ]
+            head = f"[red]explain failed:[/red] {error or 'no data'}"
+            body.update("\n".join([head, "", *known]) if known else head)
             return
         reg = detail.get("registry", {}) or {}
         fit = detail.get("fit", {}) or {}
         benches = detail.get("benchmarks", []) or []
+        # `switch.sh --explain` can answer without a `registry` block (or with an
+        # empty one).  Reading it with a "—" default then rendered "Model — /
+        # Engine — / Status —" directly on top of a catalog row that was showing
+        # the real values — the modal contradicting the screen behind it.  The
+        # CatalogEntry's fields are the SAME registry facts, already in hand, so
+        # use them whenever explain doesn't carry its own.
+        model = reg.get("model") or self._model or "—"
+        engine = reg.get("engine") or self._engine or "—"
+        status = str(reg.get("status") or self._status or "")
         lines: list[str] = []
-        lines.append(f"  [bold]Model[/bold]   {reg.get('model', '—')}")
-        lines.append(f"  [bold]Engine[/bold]  {reg.get('engine', '—')}")
-        lines.append(f"  [bold]Status[/bold]  {_status_glyph(str(reg.get('status', '')))} {reg.get('status', '—')}")
+        lines.append(f"  [bold]Model[/bold]   {model}")
+        lines.append(f"  [bold]Engine[/bold]  {engine}")
+        lines.append(
+            f"  [bold]Status[/bold]  {_status_glyph(status)} {status or '—'}"
+        )
         if reg.get("status_note"):
             lines.append(f"  [bold]Caveat[/bold]  [yellow]{reg.get('status_note')}[/yellow]")
         lines.append(f"  [bold]Card[/bold]    {detail.get('card', '—')}")
@@ -2387,7 +2819,12 @@ class ModelInfoScreen(_CopyableModal, ModalScreen):
         p = self._profile
         lines: list[str] = []
         display = str(p.get("display_name") or e.model or "—")
-        lines.append(f"  [bold]Model[/bold]   {display} [dim]({e.model})[/dim]")
+        # "qwen3.6-27b (qwen3.6-27b)" — the id is only worth showing when it
+        # differs from the display name.
+        lines.append(
+            f"  [bold]Model[/bold]   {display}"
+            + (f" [dim]({e.model})[/dim]" if display != e.model else "")
+        )
         family = str(p.get("family") or "—")
         lines.append(f"  [bold]Family[/bold]  {family}")
         apb = p.get("active_params_b")
@@ -2504,24 +2941,34 @@ class SearchHFScreen(ModalScreen):
         Binding("Y", "app.copy_context", "Copy", show=True),
     ]
 
-    def __init__(self, data: "CockpitData", **kwargs):
+    def __init__(self, data: "CockpitData", initial_query: str = "", **kwargs):
         super().__init__(**kwargs)
         self._data = data
         self._row_ids: list[str] = []
+        # #1153: the modal used to open EMPTY even when ① already held a term,
+        # so the user retyped what they had just typed. Carry it in.
+        self._initial_query = (initial_query or "").strip()
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Search Hugging Face", classes="hf-search-title")
-            yield Input(
-                placeholder="org/Model or keywords — ⏎ to search",
-                id="hf-search-input",
-            )
+            # The search box had NO search button: the only way to run a query
+            # was ⏎, while the one button on screen ("Fill repo") did something
+            # else entirely and sat below the results. Put Search next to the
+            # thing it searches.
+            with Horizontal(classes="hf-search-query-row"):
+                yield Input(
+                    value=self._initial_query,
+                    placeholder="org/Model or keywords",
+                    id="hf-search-input",
+                )
+                yield Button("Search", id="hf-search-go-btn", variant="primary")
             yield Static("", id="hf-search-status")
             yield DataTable(id="hf-search-table")
             with Horizontal(classes="hf-search-actions"):
-                yield Button("Fill repo", id="hf-search-fill-btn", variant="primary")
+                yield Button("Use this model", id="hf-search-fill-btn")
             yield Static(
-                "[dim]⏎ search · ⏎ on a row fills the ① Bring repo field · Esc close[/dim]",
+                "[dim]⏎ in the box searches · ⏎ on a result row uses it · Esc close[/dim]",
                 classes="hf-search-hint",
             )
 
@@ -2530,6 +2977,11 @@ class SearchHFScreen(ModalScreen):
         table.cursor_type = "row"
         table.add_columns("model", "downloads", "likes", "updated", "fmt")
         self.query_one("#hf-search-input", Input).focus()
+        # Opening seeded and then waiting for ⏎ makes the user confirm a query
+        # they already typed — and when we open this panel FOR them (a bare term,
+        # or a failed inspect) there is nothing to confirm. Search on open.
+        if self._initial_query:
+            self.run_search(self._initial_query)
 
     @work(exclusive=True, group="hf-search")
     async def run_search(self, query: str) -> None:
@@ -2542,7 +2994,12 @@ class SearchHFScreen(ModalScreen):
         status.update(
             f"[dim]Searching Hugging Face for[/dim] [cyan]{query}[/cyan] [dim]…[/dim]"
         )
-        rows, err = await self._data.hf_search(query, limit=20)
+        # 20 was an arbitrary floor, not a constraint: the results table SCROLLS,
+        # so it is not bounded by panel height, and hf_search.py accepts up to
+        # _MAX_LIMIT=100 (the hub API's own page ceiling). Ask for the ceiling —
+        # a search that hides the model you wanted at rank 21 is a worse default
+        # than one row of scrolling.
+        rows, err = await self._data.hf_search(query, limit=100)
         # The modal may have been dismissed while the search ran.
         try:
             if self.app.screen is not self:
@@ -2576,8 +3033,8 @@ class SearchHFScreen(ModalScreen):
             )
         if rows:
             status.update(
-                f"[dim]{len(rows)} result(s) — ⏎ on a row fills the repo field"
-                " · GGUF rows pre-warn route-G[/dim]"
+                f"[dim]{len(rows)} result(s), best-downloaded first — scroll for "
+                f"more · ⏎ on a row uses it · GGUF rows pre-warn route-G[/dim]"
             )
             table.focus()
         else:
@@ -2616,7 +3073,12 @@ class SearchHFScreen(ModalScreen):
         self.action_pick()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "hf-search-fill-btn":
+        if event.button.id == "hf-search-go-btn":
+            try:
+                self.run_search(self.query_one("#hf-search-input", Input).value)
+            except Exception:
+                pass
+        elif event.button.id == "hf-search-fill-btn":
             self.action_pick()
 
     def action_dismiss(self) -> None:
@@ -3087,12 +3549,12 @@ class ConfirmActionScreen(ModalScreen):
         if self._thinking == "inherit":
             lines.append(
                 "  [bold]thinking[/bold] [dim]inherit[/dim] — no env injected "
-                "(entrypoint default: off → instruct row) · [t] force-on"
+                "(entrypoint default: off → instruct row) · \\[t] force-on"
             )
         elif self._thinking == "on":
             lines.append(
                 "  [bold]thinking[/bold] [green]FORCE-ON[/green] "
-                "([green]ENABLE_THINKING=true[/green]) · [t] cycle"
+                "([green]ENABLE_THINKING=true[/green]) · \\[t] cycle"
             )
             lines.append(
                 f"  [bold]sampler[/bold] thinking row: temp "
@@ -3106,26 +3568,26 @@ class ConfirmActionScreen(ModalScreen):
                 lines.append(
                     "  [bold]sampler[/bold] card defaults apply"
                     + (" — inherited overrides cleared" if self._sampler_reset else "")
-                    + " · [r] reset to card defaults"
+                    + " · \\[r] reset to card defaults"
                 )
             else:
                 shown = ", ".join(f"{k}={v}" for k, v in sorted(ovr.items()))
                 lines.append(
                     "  [yellow]⚠ shell overrides beat the card row:[/yellow] "
-                    f"{shown} · [r] reset to card defaults"
+                    f"{shown} · \\[r] reset to card defaults"
                 )
         else:
             lines.append(
                 "  [bold]thinking[/bold] FORCE-OFF "
                 "([yellow]ENABLE_THINKING=false[/yellow] — pins the instruct row even "
-                "if the shell exports true) · [t] cycle"
+                "if the shell exports true) · \\[t] cycle"
             )
         # Persisted default (#1014 follow-up) — what switch.sh will resolve on
         # later launches. inherit has nothing to save ([T] is gated off there).
         persisted = self._thinking_persisted()
         disp = persisted if persisted else "none"
         suffix = (
-            f" · [T] save '{self._thinking}' as default"
+            f" · \\[T] save '{self._thinking}' as default"
             if self._thinking != "inherit"
             else ""
         )
@@ -3368,25 +3830,25 @@ class ConfirmActionScreen(ModalScreen):
                     lines.append(
                         "  [bold]int8 acts[/bold] [green]ON[/green] "
                         "([green]VLLM_MARLIN_INPUT_DTYPE=int8[/green] — W4A8 prefill "
-                        f"win, quality-tied ⚑{learn}) · [a] toggle"
+                        f"win, quality-tied ⚑{learn}) · \\[a] toggle"
                     )
                 else:
                     lines.append(
                         "  [bold]int8 acts[/bold] [dim]off[/dim] "
-                        f"(W4A8 int8 activations ⚑ experimental{learn}) · [a] enable"
+                        f"(W4A8 int8 activations ⚑ experimental{learn}) · \\[a] enable"
                     )
             elif mode == "inverted":
                 if self._act8_on:
                     lines.append(
                         "  [bold]int8 acts[/bold] [green]ON[/green] "
                         "(shipped default — W4A8 int8 activations, quality-tied ⚑"
-                        f"{learn}) · [a] disable"
+                        f"{learn}) · \\[a] disable"
                     )
                 else:
                     lines.append(
                         "  [bold]int8 acts[/bold] [dim]off[/dim] "
                         "(W4A16 via [green]W4A8=0[/green] — gives up the int8 prefill "
-                        f"win{learn}) · [a] enable"
+                        f"win{learn}) · \\[a] enable"
                     )
             elif mode == "fixed":
                 lines.append(
@@ -3525,7 +3987,6 @@ class ConfirmActionScreen(ModalScreen):
         if rec.safe:
             lines.append("")
             lines.append("  [green]● gate clear[/green] — nothing live overlaps the requested GPUs.")
-            lines.append("  [dim]⏎ Confirm (streams below) · Esc Cancel[/dim]")
         else:
             lines.append("")
             lines.append("  [yellow]⚠ this will tear down / collide with:[/yellow]")
@@ -3954,10 +4415,10 @@ class OperateOrchPane(Container):
                 id="scene-preview",
             )
             yield Label(
-                "[dim]\\[k] stop this model (gated)   \\[b] restart serving (gated)   "
-                "\\[n] switch model   \\[⏎] switch scene (gated)   \\[o] stop all (gated)   "
-                "\\[c] power cap… (default / clear / custom, gated)   "
-                "[dim](per-service start/stop → Containers tab)[/dim][/dim]",
+                "[dim]\\[k] stop this model   \\[b] restart serving   \\[n] switch model   "
+                "\\[⏎] switch scene   \\[o] stop all   \\[c] power cap… "
+                "(default / clear / custom) — all writes confirm-gated   "
+                "(per-service start/stop → Containers tab)[/dim]",
                 id="orch-hint",
             )
             # FIX 3 — the host disk-usage bars + system-RAM line MOVED out of this
@@ -4053,6 +4514,20 @@ class OperateOrchPane(Container):
         url = (getattr(tgt, "url", "") or "").strip()
         port = getattr(tgt, "host_port", 0) or 0
         if not (slug or model):
+            # Do NOT print the calm "nothing is serving" while the Doctor line one
+            # row below says "● serving". Both lines render side by side from two
+            # unreconciled sources: this one from the estate detect (needs a
+            # registry slug match), Doctor's from health.sh (just probes the
+            # port). Anything served via `docker compose -f <path>` — every
+            # Route-K and generated serve — has no slug, so detect finds nothing
+            # while the endpoint is plainly up. Say the honest thing instead.
+            dr = getattr(state, "doctor", None)
+            if dr is not None and getattr(dr, "reachable", False) and getattr(dr, "serving", False):
+                line.update(
+                    "[green]●[/green] serving — [dim]not a catalog slug "
+                    "(started outside c3, or a Route-K / generated compose)[/dim]"
+                )
+                return
             line.update("[dim]○ no model serving[/dim]")
             return
         parts: list[str] = []
@@ -4228,6 +4703,68 @@ class OperateOrchPane(Container):
         except Exception:
             pass
 
+    @staticmethod
+    def _gpu_slot_count(gpus) -> int:
+        """How many card widgets a GPU snapshot needs.
+
+        Driven by the HIGHEST index present, not by ``len(gpus)``: with a gap in the
+        indices (card 1 fell off the bus, 0 and 2 remain) the slot count must still
+        cover index 2, so the surviving cards keep their real GPU numbers instead of
+        sliding down a slot.  Floors at 1 so an EMPTY read still has a card 0 for the
+        "nvidia-smi returned nothing" message to live on.
+        """
+        idxs = [
+            int(getattr(g, "index", -1)) for g in (gpus or [])
+            if isinstance(getattr(g, "index", None), int)
+        ]
+        return max(1, (max(idxs) + 1) if idxs else 0, len(gpus or []))
+
+    def _sync_gpu_cards(self, want: int) -> None:
+        """Mount/remove GPU cards so exactly ``want`` slots exist.
+
+        The panel used to compose exactly two cards, so a 4-GPU rig read all four and
+        rendered two — reported from the field as "c3 only detects 2 GPU of 4 while
+        nvtop detects everyone" (2026-09-08).  Detection was never the problem; these
+        widgets were.
+
+        Idempotent, and converges in BOTH directions so a count that changes between
+        polls (a card dropping off the bus, or appearing) does not leave stale cards.
+        Newly mounted cards carry the same "querying nvidia-smi…" placeholder they
+        would have had at startup and are filled by the caller on this same pass when
+        Textual has already processed the mount, otherwise on the next poll tick —
+        never left blank.
+        """
+        try:
+            scroll = self.query_one("#orch-scroll")
+        except Exception:
+            return
+        have = len(self.query(".gpu-card"))
+        want = max(1, int(want))
+        if want == have:
+            return
+        if want > have:
+            cards = [
+                Container(
+                    Label(f"GPU{i}", classes="gpu-card-title"),
+                    Static("[dim]querying nvidia-smi…[/dim]", id=f"gpu{i}-bar"),
+                    classes="gpu-card",
+                    id=f"gpu{i}-card",
+                )
+                for i in range(have, want)
+            ]
+            try:
+                # Anchored BEFORE #serving-line: the cards belong at the top of the
+                # pane, and a bare mount() would append them under the scene table.
+                scroll.mount_all(cards, before=scroll.query_one("#serving-line"))
+            except Exception:
+                pass
+            return
+        for i in range(want, have):
+            try:
+                self.query_one(f"#gpu{i}-card").remove()
+            except Exception:
+                pass
+
     def _populate_gpus(self, state: EstateState) -> None:
         # N2: when nvidia-smi returned NOTHING at all (no cards in the snapshot),
         # say so honestly on the first card rather than a calm "not present" per
@@ -4235,8 +4772,17 @@ class OperateOrchPane(Container):
         # GPU-less rig.  A per-index gap (one card present, the other not) still
         # uses the calm "not present".
         no_gpus_at_all = not state.gpus
-        for i, bar_id, title_id in ((0, "#gpu0-bar", "#gpu0-card"), (1, "#gpu1-bar", "#gpu1-card")):
-            bar = self.query_one(bar_id, Static)
+        slots = self._gpu_slot_count(state.gpus)
+        self._sync_gpu_cards(slots)
+        for i in range(slots):
+            bar_id = f"#gpu{i}-bar"
+            # A card mounted THIS pass may not be in the DOM yet (mount is async);
+            # it keeps its startup placeholder and fills on the next tick rather
+            # than raising and aborting the cards that ARE present.
+            try:
+                bar = self.query_one(bar_id, Static)
+            except Exception:
+                continue
             gpu = next((g for g in state.gpus if getattr(g, "index", -1) == i), None)
             if gpu is None:
                 if no_gpus_at_all and i == 0:
@@ -4508,13 +5054,17 @@ class OperateContainersPane(Container):
                     placeholder="Select a running container — its docker logs stream here.",
                 )
             with TabPane("Top", id="drill-tab-stats"):
-                yield Static("[dim]highlight a container (move cursor) or press [t] — docker top loads[/dim]", id="drill-stats")
+                yield Static("[dim]highlight a container (move cursor) or press \\[t] — docker top loads[/dim]", id="drill-stats")
             with TabPane("Config", id="drill-tab-config"):
                 yield Static("[dim]highlight a container (move cursor) to load its config[/dim]", id="drill-config")
+        # Two deliberate lines, not one long wrap.  At 80x24 this pane gets 46
+        # columns, and the old single run-on hint wrapped to FOUR of the 24 rows
+        # — which is what squeezed the Logs RichLog down to two lines.  Reads /
+        # writes are split so the gating fact is stated once, and the full
+        # per-key detail lives in ? (Help), which carries all seven keys.
         yield Label(
-            "[dim]move cursor or \\[l]/\\[t] to load detail · \\[l] logs   \\[t] top   "
-            "\\[f] follow   \\[s] restart · start if stopped (gated)   \\[x] stop (gated)   "
-            "\\[X] rm (reconcile-gated)[/dim]",
+            "[dim]\\[l] logs  \\[t] top  \\[c] compose  \\[f] follow\n"
+            "\\[s] restart  \\[x] stop  \\[X] rm  · gated[/dim]",
             id="containers-hint",
         )
 
@@ -4932,6 +5482,50 @@ class ValidateRunPane(Container):
         body.update("\n".join(lines))
 
 
+class DoctorScroll(ScrollableContainer):
+    """Doctor's scroll box, which is also its check LIST.
+
+    Arrows are handled in this widget's OWN ``on_key`` — the same scoping the
+    ModeSwitcher uses, and for the same reason: a focused widget sees key events
+    first, so ↑/↓ move the selection ONLY while Doctor's list holds focus and
+    reach the app's arrow model unchanged everywhere else.  Stopping the event
+    also suppresses ScrollableContainer's inherited ↑/↓ = scroll-a-line, which
+    this replaces: moving the selection scrolls it into view, so a line-scroll
+    that could strand the selection off-screen is not wanted.  PgUp/PgDn/Home/End
+    keep their inherited scrolling.
+
+    ⏎ is deliberately NOT handled here — it bubbles to the app's `primary_action`,
+    which dispatches per tab, so Doctor's ⏎ is declared the same way as Catalog's
+    and shows in the footer through the same path.
+    """
+
+    def on_key(self, event) -> None:
+        if event.key not in ("up", "down"):
+            return
+        pane = None
+        try:
+            pane = self.query_ancestor(DoctorPane)
+        except Exception:
+            return
+        if pane is None:
+            return
+        event.stop()
+        event.prevent_default()
+        # ↑ at the first check ascends to the tab bar, matching what a primary
+        # DataTable at cursor row 0 does (action_ascend_to_tabbar) — Doctor is not
+        # a DataTable, so that priority binding is gated off here and the same
+        # affordance has to be provided explicitly.
+        if event.key == "up" and pane.selected_index == 0:
+            try:
+                bar = self.app._active_tab_bar()   # type: ignore[attr-defined]
+            except Exception:
+                bar = None
+            if bar is not None:
+                bar.focus()
+            return
+        pane.move_selection(-1 if event.key == "up" else 1)
+
+
 class DoctorPane(Container):
     """Operate / Doctor tab: "is the running model serving correctly?".
 
@@ -4965,16 +5559,27 @@ class DoctorPane(Container):
         text-style: bold;
         margin-bottom: 1;
     }
+    /* Six cards at `padding: 1 2` + border + a title margin = 7 rows each for
+       two lines of content, so at 46 rows the last two cards AND the key hint
+       were below the fold — and ↓/PgDn did nothing because nothing had focus.
+       Trim the chrome; the cards still read as cards. */
     DoctorPane .doctor-card {
         border: solid $primary;
-        padding: 1 2;
+        padding: 0 1;
         margin-bottom: 1;
         height: auto;
+    }
+    /* The ↑/↓ selection. Doctor is a list of runnable checks, so the selected
+       one must be unmistakable — same accent-ring language as Button:focus. */
+    DoctorPane .doctor-card.-selected {
+        border: tall $accent;
+    }
+    DoctorPane .doctor-card.-selected .doctor-card-title {
+        text-style: bold reverse;
     }
     DoctorPane .doctor-card-title {
         text-style: bold;
         color: $accent;
-        margin-bottom: 1;
     }
     DoctorPane #doctor-hint {
         color: $text-muted;
@@ -4982,8 +5587,68 @@ class DoctorPane(Container):
     }
     """
 
+    # ── Check selection (↑/↓ navigate · ⏎ runs) ──────────────────────────────
+    # Doctor is a list of six runnable checks. Before this it was reachable only
+    # by hotkey: the arrows scrolled and ⏎ did nothing, so a user who did not
+    # already know v/V/R/F/w/y could read the cards and not run any of them.
+    selected_index: int = 0
+
+    def on_mount(self) -> None:
+        self.paint_selection()
+
+    def move_selection(self, delta: int) -> None:
+        """Move the selection by ``delta``, CLAMPED (no wrap).
+
+        Clamped, not wrapping: the last two cards are `report --full` (~43 min,
+        uses the serving GPUs) and the power-cap sweep (mutates the GPU cap).
+        Wrapping past the end would land the cursor on those by holding ↓, which
+        is the wrong thing to make effortless.
+        """
+        target = max(0, min(self.selected_index + delta, len(_DOCTOR_CHECKS) - 1))
+        if target == self.selected_index:
+            return
+        self.selected_index = target
+        self.paint_selection()
+
+    def paint_selection(self) -> None:
+        """Apply the -selected class and scroll the selected card into view."""
+        for idx, (card_id, _action, _label) in enumerate(_DOCTOR_CHECKS):
+            try:
+                card = self.query_one(f"#{card_id}")
+            except Exception:
+                continue
+            card.set_class(idx == self.selected_index, "-selected")
+            if idx == self.selected_index:
+                try:
+                    card.scroll_visible(animate=False)
+                except Exception:
+                    pass
+        # The footer's ⏎ label names the SELECTED check, so it has to resync.
+        # Both halves are required and the pairing is the one the tab-activation
+        # handler uses: _sync_footer_labels mutates the binding description, and
+        # refresh_bindings fires the `bindings_changed` signal that lets the
+        # footer decide to recompose. Without the second call nothing re-renders
+        # and the label silently keeps the previous check's name.
+        try:
+            self.app._sync_footer_labels()   # type: ignore[attr-defined]
+            self.app.refresh_bindings()
+        except Exception:
+            pass
+
+    def selected_check(self) -> tuple[str, str, str]:
+        idx = max(0, min(self.selected_index, len(_DOCTOR_CHECKS) - 1))
+        return _DOCTOR_CHECKS[idx]
+
     def compose(self) -> ComposeResult:
-        with ScrollableContainer(id="doctor-scroll"):
+        # #1153: a ScrollableContainer defaults to can_focus=True, so it sits in
+        # the Tab chain as a DEAD STOP — one extra Tab before every real control.
+        # Orchestration fixed this (orch_scroll) and the fix was never propagated.
+        # It still scrolls via its content and the mouse wheel.
+        # Doctor is the ONE exception to the non-focusable-scroll rule above: it
+        # has no table or list to Tab to — the scroll box IS the content, and
+        # without focus ↓/PgDn do nothing on a page that overflows at 46 rows.
+        # The lane panes keep can_focus=False because they have real controls.
+        with DoctorScroll(id="doctor-scroll"):
             yield Label(
                 "Doctor  [dim]— is the running model serving correctly?[/dim]",
                 id="doctor-heading",
@@ -5031,7 +5696,7 @@ class DoctorPane(Container):
                     "[dim]press [cyan]F[/cyan] — report.sh --full "
                     "([yellow]~43 min · uses the serving GPUs · confirm-gated[/yellow]): "
                     "streams into the ③ Gate; the artifact lands in results/ "
-                    "(viewable in Validate · Evidence)[/dim]",
+                    "(viewable in Bring & Validate · ④ Measure)[/dim]",
                     id="doctor-fullreport-body",
                 )
             with Container(classes="doctor-card", id="doctor-card-sweep"):
@@ -5046,9 +5711,11 @@ class DoctorPane(Container):
                     id="doctor-sweep-body",
                 )
             yield Label(
-                "[dim][cyan]y[/cyan] re-run health   ·   [cyan]v[/cyan] verify   ·   "
-                "[cyan]V[/cyan] verify-full   ·   [cyan]R[/cyan] report   ·   "
-                "[cyan]F[/cyan] report --full   ·   [cyan]w[/cyan] power-cap sweep[/dim]",
+                "[dim][cyan]↑↓[/cyan] pick a check   ·   [cyan]⏎[/cyan] run it   "
+                "[dim]— or jump straight to one:[/dim]   [cyan]y[/cyan] health   ·   "
+                "[cyan]v[/cyan] verify   ·   [cyan]V[/cyan] verify-full   ·   "
+                "[cyan]R[/cyan] report   ·   [cyan]F[/cyan] report --full   ·   "
+                "[cyan]w[/cyan] cap sweep[/dim]",
                 id="doctor-hint",
             )
 
@@ -5073,7 +5740,7 @@ class DoctorPane(Container):
             # here — a navigation pointer to the gated serve path.
             body.update(
                 "[red]✗[/red]  API not reachable\n"
-                "   [dim]→ fix: serve a model — Run · Catalog ([cyan]1[/cyan]), pick a "
+                "   [dim]→ fix: serve a model — Run & Operate · Catalog ([cyan]1[/cyan]), pick a "
                 "variant, [cyan]⏎[/cyan] (reconcile-gated)[/dim]"
             )
             return
@@ -5082,7 +5749,7 @@ class DoctorPane(Container):
         if not dr.serving:
             # Reachable endpoint but nothing served — point at the serve path.
             line += (
-                "\n   [dim]→ fix: serve a model — Run · Catalog ([cyan]1[/cyan]) "
+                "\n   [dim]→ fix: serve a model — Run & Operate · Catalog ([cyan]1[/cyan]) "
                 "[cyan]⏎[/cyan][/dim]"
             )
         body.update(line)
@@ -5104,7 +5771,7 @@ class DoctorPane(Container):
         if vs.error:
             body.update(
                 f"[red]✗[/red]  {vs.error}\n"
-                "   [dim]→ fix: serve a model — Run · Catalog ([cyan]1[/cyan]) "
+                "   [dim]→ fix: serve a model — Run & Operate · Catalog ([cyan]1[/cyan]) "
                 "[cyan]⏎[/cyan] (reconcile-gated)[/dim]"
             )
             return
@@ -5119,7 +5786,7 @@ class DoctorPane(Container):
                 lines.append(f"        [dim]→ {c.hint}[/dim]")
         if not vs.reachable:
             lines.append(
-                "   [dim]→ fix: serve a model — Run · Catalog ([cyan]1[/cyan]) "
+                "   [dim]→ fix: serve a model — Run & Operate · Catalog ([cyan]1[/cyan]) "
                 "[cyan]⏎[/cyan][/dim]"
             )
         body.update("\n".join(lines))
@@ -5418,9 +6085,13 @@ class EvidenceReportScreen(_CopyableModal, ModalScreen):
             return
         # Render the markdown body verbatim (escape Rich markup so [..] in the
         # report text isn't parsed as a tag).
-        from rich.markup import escape
+        # It is Markdown — `# Rebench report`, `**150.0**`, `| Pack | passed |`
+        # were rendered as literal text with their syntax showing. Rich renders
+        # Markdown properly; escaping was only ever protecting against Rich
+        # markup in the body, which Markdown() also avoids.
+        from rich.markdown import Markdown
 
-        body.update(escape(report.body))
+        body.update(Markdown(report.body))
         self._copy_payload = report.body   # raw markdown (the [Y] copy target)
 
     def action_dismiss(self) -> None:
@@ -5637,10 +6308,22 @@ class SettingsScreen(ModalScreen):
     }
     SettingsScreen > Vertical {
         width: 84;
+        /* An 80-col terminal is narrower than the card: without max-width the
+           right edge (and the Select's ▼) rendered off-screen. */
+        max-width: 100%;
         height: auto;
+        /* ~27 rows of fields on a 24-row terminal pushed BOTH the hint line and
+           the `^s Save / esc Cancel` Footer off the bottom of the screen — a
+           first-run user on a small terminal had no visible way to save.  Cap
+           the card at the viewport and let the fields scroll INSIDE it, so the
+           Footer stays pinned and reachable at every size. */
+        max-height: 100%;
         border: thick $accent;
         background: $surface;
         padding: 1 2;
+    }
+    SettingsScreen #settings-scroll {
+        height: auto;
     }
     SettingsScreen .settings-title {
         text-style: bold;
@@ -5682,40 +6365,50 @@ class SettingsScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Settings", classes="settings-title")
-            yield Label("Model dir  [dim](weights live under <dir>/huggingface/)[/dim]",
-                        classes="settings-field")
-            yield Input(value=self._model_dir, placeholder="/mnt/models/huggingface", id="set-model-dir")
-            tok_ph = ("hf_…  (leave blank to keep the current token)"
-                      if self._hf_token_set else "hf_…  (for gated / private repos)")
-            yield Label("HuggingFace token", classes="settings-field")
-            yield Input(value="", password=True, placeholder=tok_ph, id="set-hf-token")
-            yield Label("Director placement  [dim](ai-studio prompt-crafter · :8090)[/dim]",
-                        classes="settings-field")
-            yield Select(
-                [("GPU 0 — fast craft, ~4.6 GB (default)", "gpu0"),
-                 ("GPU 1 — only when free, not during video", "gpu1"),
-                 ("CPU — frees GPU0 for long video, slow craft", "cpu")],
-                value=self._director_device, allow_blank=False, id="set-director-device",
-            )
-            yield Label(
-                "Master logging  [dim](app + non-download commands · downloads always log)[/dim]",
-                classes="settings-field",
-            )
-            log_switch = Switch(value=self._log_enabled, id="set-c3-log")
-            log_switch.disabled = self._log_env_override
-            yield log_switch
-            if self._log_path:
-                yield Label(f"[dim]Active log: {self._log_path}[/dim]", classes="settings-field")
-            elif self._log_env_override:
+            # The fields scroll; the title and the Footer do not.  See the
+            # max-height note in DEFAULT_CSS.
+            with VerticalScroll(id="settings-scroll"):
+                yield Label("Model dir  [dim](weights live under <dir>/huggingface/)[/dim]",
+                            classes="settings-field")
+                yield Input(value=self._model_dir, placeholder="/mnt/models/huggingface",
+                            id="set-model-dir")
+                tok_ph = ("hf_…  (leave blank to keep the current token)"
+                          if self._hf_token_set else "hf_…  (for gated / private repos)")
+                yield Label("HuggingFace token", classes="settings-field")
+                yield Input(value="", password=True, placeholder=tok_ph, id="set-hf-token")
+                yield Label("Director placement  [dim](ai-studio prompt-crafter · :8090)[/dim]",
+                            classes="settings-field")
+                yield Select(
+                    [("GPU 0 — fast craft, ~4.6 GB (default)", "gpu0"),
+                     ("GPU 1 — only when free, not during video", "gpu1"),
+                     ("CPU — frees GPU0 for long video, slow craft", "cpu")],
+                    value=self._director_device, allow_blank=False, id="set-director-device",
+                )
                 yield Label(
-                    "[dim]C3_LOG controls this launch; change the shell override to alter it.[/dim]",
+                    "Master logging  [dim](app + non-download commands · downloads always log)[/dim]",
                     classes="settings-field",
                 )
-            yield Label(
-                "[dim]Ctrl+S save · Esc cancel · HF_HOME auto-derived under the model dir · "
-                "director change applies on next ai-studio start[/dim]",
-                classes="settings-field",
-            )
+                log_switch = Switch(value=self._log_enabled, id="set-c3-log")
+                log_switch.disabled = self._log_env_override
+                yield log_switch
+                if self._log_path:
+                    yield Label(f"[dim]Active log: {self._log_path}[/dim]",
+                                classes="settings-field")
+                elif self._log_env_override:
+                    yield Label(
+                        "[dim]C3_LOG controls this launch; change the shell override to "
+                        "alter it.[/dim]",
+                        classes="settings-field",
+                    )
+                # The "Ctrl+S save · Esc cancel" half of this line was a duplicate
+                # of the Footer directly below it, and duplicating it is what
+                # pushed the Footer off a 24-row screen.  Keep only what the
+                # Footer cannot say.
+                yield Label(
+                    "[dim]HF_HOME auto-derived under the model dir · "
+                    "director change applies on next ai-studio start[/dim]",
+                    classes="settings-field",
+                )
             yield Footer()
 
     def action_save(self) -> None:
@@ -5733,6 +6426,150 @@ class SettingsScreen(ModalScreen):
 
     def action_cancel(self) -> None:
         self.app.pop_screen()
+
+
+class LocalLayerScreen(ModalScreen):
+    """[L] Manage the LOCAL layer (#1153) — list, rename, edit, remove.
+
+    ⑤ Promote owned the WRITE half and nothing owned the rest: the layer was
+    write-only from the UI, so changing an entry meant hand-editing
+    registry.local.json — the exact friction the layer exists to remove.
+
+    Reads ``local_entries()``, NOT ``get_registry()``. The lookup view lets core
+    win a collision, so a SHADOWED row is absent from it by design — and that is
+    precisely the row a user needs to act on (registered, but unreachable by slug
+    until renamed). A management view that hides it would omit the one entry that
+    cannot be fixed any other way.
+
+    Per the modal rule this screen never mutates: it hands an intent back to the
+    caller, which routes it through ConfirmActionScreen like every other repo
+    write. The executor is scripts/catalog.sh, so the UI inherits the CLI's
+    refusals rather than re-implementing them — a curated slug is unreachable
+    from here for the same reason it is from the shell.
+    """
+
+    BINDINGS = [
+        Binding("r", "remove", "Remove", show=True),
+        Binding("n", "rename", "Rename", show=True),
+        Binding("e", "edit", "Edit field", show=True),
+        Binding("escape", "cancel", "Close", show=True),
+    ]
+
+    def __init__(self, entries: list, *, on_amend=None, **kwargs):
+        super().__init__(**kwargs)
+        self._entries = list(entries or [])
+        self._on_amend = on_amend
+        self._pending = ""          # "" | "rename" | "edit"
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Local layer — models you registered", classes="settings-title")
+            table: DataTable = DataTable(id="local-table")
+            table.cursor_type = "row"
+            yield table
+            inp = Input(placeholder="", id="local-input")
+            inp.display = False          # revealed only for rename / edit
+            yield inp
+            yield Label("", id="local-hint")
+            yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#local-table", DataTable)
+        table.add_columns("slug", "engine", "port", "max_ctx", "status", "")
+        self._refill()
+        self._set_hint()
+
+    def _refill(self) -> None:
+        table = self.query_one("#local-table", DataTable)
+        table.clear()
+        for e in self._entries:
+            # A shadowed row is registered but unreachable by slug: say so here,
+            # because nothing else in the UI can.
+            flag = "[yellow]shadowed[/yellow]" if e.get("shadowed") else ""
+            table.add_row(
+                str(e.get("slug") or ""),
+                str(e.get("engine") or ""),
+                str(e.get("port") or ""),
+                str(e.get("max_ctx") or ""),
+                str(e.get("status") or ""),
+                flag,
+                key=str(e.get("slug") or ""),
+            )
+
+    def _set_hint(self, msg: str = "") -> None:
+        if msg:
+            text = msg
+        elif not self._entries:
+            text = ("[dim]nothing registered yet — ⑤ Promote writes here, or "
+                    "`catalog.sh register --compose <path>`[/dim]")
+        else:
+            text = ("[dim]r remove · n rename · e edit field · esc close   "
+                    "(every action is confirm-gated; core is never touched)[/dim]")
+        try:
+            self.query_one("#local-hint", Label).update(text)
+        except Exception:
+            pass
+
+    def _selected(self):
+        if not self._entries:
+            return None
+        try:
+            i = int(self.query_one("#local-table", DataTable).cursor_row or 0)
+        except Exception:
+            i = 0
+        return self._entries[max(0, min(i, len(self._entries) - 1))]
+
+    def _prompt(self, kind: str, placeholder: str) -> None:
+        row = self._selected()
+        if row is None:
+            return
+        self._pending = kind
+        inp = self.query_one("#local-input", Input)
+        inp.placeholder = placeholder
+        inp.value = ""
+        inp.display = True
+        inp.focus()
+        self._set_hint(f"[dim]{kind} {row['slug']} — ⏎ to confirm, esc to cancel[/dim]")
+
+    def action_remove(self) -> None:
+        row = self._selected()
+        if row is not None:
+            self._emit("remove", row["slug"])
+
+    def action_rename(self) -> None:
+        self._prompt("rename", "new <engine>/<name>")
+
+    def action_edit(self) -> None:
+        self._prompt("edit", "KEY=VALUE  (workload, max_ctx, default_port, …)")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        row = self._selected()
+        val = (event.value or "").strip()
+        if row is None or not val:
+            return
+        if self._pending == "rename":
+            self._emit("rename", row["slug"], to=val)
+        elif self._pending == "edit":
+            self._emit("update", row["slug"], sets=[val])
+
+    def _emit(self, kind: str, slug: str, **kw) -> None:
+        """Hand the intent back; the caller confirms and runs it (modal rule)."""
+        self.app.pop_screen()
+        if self._on_amend is not None:
+            self._on_amend(kind, slug, kw)
+
+    def action_cancel(self) -> None:
+        # esc backs out of a prompt first, then closes the screen — otherwise a
+        # mistyped rename would need the whole screen reopened.
+        if self._pending:
+            self._pending = ""
+            inp = self.query_one("#local-input", Input)
+            inp.value = ""
+            inp.display = False
+            self.query_one("#local-table", DataTable).focus()
+            self._set_hint()
+            return
+        self.dismiss(None)
 
 
 class CatalogColumnsScreen(ModalScreen):
@@ -6217,8 +7054,8 @@ class FirstRunScreen(ModalScreen):
         lines += [
             "",
             " [cyan]1 · Pick[/cyan]     keys [1-3] choose the model above.",
-            " [cyan]2 · Download[/cyan] [d] — fetch its weights (resumable; the normal [D] action).",
-            " [cyan]3 · Launch[/cyan]   [l] — the usual reconcile-gated serve confirm.",
+            " [cyan]2 · Download[/cyan] \\[d] — fetch its weights (resumable; the normal \\[D] action).",
+            " [cyan]3 · Launch[/cyan]   \\[l] — the usual reconcile-gated serve confirm.",
         ]
         return "\n".join(lines)
 
@@ -6383,7 +7220,7 @@ class PromoteScaffoldScreen(_CopyableModal, ModalScreen):
         )
         with Vertical():
             yield Label(
-                f"⑤ Promotion Preview · {s.model_id or s.repo or '—'}  {badge}",
+                f"⑤ Promote · {s.model_id or s.repo or '—'}  {badge}",
                 classes="promote-title",
             )
             with ScrollableContainer(id="promote-scroll"):
@@ -6401,6 +7238,31 @@ class PromoteScaffoldScreen(_CopyableModal, ModalScreen):
                         placeholder="REQUIRED — real family tag (not inferred)",
                         id="promote-family-input",
                     )
+                # #1153: the slug and the port were GENERATED and never shown —
+                # the user could not choose, could not avoid a collision, and
+                # only learned of one when promote.py refused. Pre-fill and let
+                # them edit; the taken-slug list sits underneath.
+                with Horizontal():
+                    yield Label("slug")
+                    yield Input(
+                        value=str((self._scaffold.spec.get("registry_entry") or {})
+                                  .get("slug", "") or ""),
+                        placeholder="local/<name>",
+                        id="promote-slug-input",
+                    )
+                with Horizontal():
+                    yield Label("port")
+                    yield Input(
+                        value=str(((self._scaffold.spec.get("registry_entry") or {})
+                                   .get("kwargs") or {}).get("default_port", "") or ""),
+                        placeholder="202xx for LOCAL models",
+                        id="promote-port-input",
+                    )
+                yield Static(self._taken_slugs_text(), id="promote-taken")
+            # The screen's bindings are all show=True, but without a Footer none
+            # of them render: e (export PR bundle), y (copy YAML) and c (write
+            # core) were reachable and completely undiscoverable.
+            yield Footer()
             with Horizontal(id="promote-btn-row"):
                 yield Button(
                     "⏎ Write LOCAL layer",
@@ -6464,6 +7326,17 @@ class PromoteScaffoldScreen(_CopyableModal, ModalScreen):
 
     # ── Required inline edits ────────────────────────────────────────────────
 
+    def on_mount(self) -> None:
+        """Focus the first REQUIRED field, not the scroll box.
+
+        Both stage buttons stay disabled until display_name and family are
+        filled, so landing focus on a scroll container asked the user to Tab
+        into the only thing they can usefully do."""
+        try:
+            self.query_one("#promote-display-input", Input).focus()
+        except Exception:
+            pass
+
     def _edited_values(self) -> tuple[str, str]:
         try:
             display = self.query_one("#promote-display-input", Input).value.strip()
@@ -6490,7 +7363,33 @@ class PromoteScaffoldScreen(_CopyableModal, ModalScreen):
         spec = copy.deepcopy(self._scaffold.spec or {})
         spec["display_name"] = display
         spec["family"] = family
+        # #1153: the slug/port the user actually chose — not the generated ones
+        entry = spec.setdefault("registry_entry", {})
+        kwargs = entry.setdefault("kwargs", {})
+        try:
+            slug = self.query_one("#promote-slug-input", Input).value.strip()
+            if slug:
+                entry["slug"] = slug
+            port = self.query_one("#promote-port-input", Input).value.strip()
+            if port.isdigit():
+                kwargs["default_port"] = int(port)
+        except Exception:
+            pass
         return spec
+
+    def _taken_slugs_text(self) -> str:
+        """Slugs already registered locally — shown so a collision is AVOIDED,
+        not discovered when promote.py refuses (#1153)."""
+        try:
+            from scripts.lib.profiles.compose_registry import load_local_registry
+
+            taken = sorted(load_local_registry() or {})
+        except Exception:
+            return ""
+        if not taken:
+            return "[dim]no local models registered yet[/dim]"
+        shown = ", ".join(taken[:6]) + ("…" if len(taken) > 6 else "")
+        return f"[dim]already taken: {shown}[/dim]"
 
     def on_input_changed(self, event: Input.Changed) -> None:
         # Enable/disable BOTH stage buttons live as the required edits fill.
@@ -6501,6 +7400,13 @@ class PromoteScaffoldScreen(_CopyableModal, ModalScreen):
             return
         stage.disabled = not self._can_stage()
         core.disabled = not self._can_stage()
+        # Enabling the buttons is only HALF the state change: ``check_action``
+        # gates ⏎ / C on the same ``_can_stage()``, and the Footer caches that
+        # verdict.  Without this the footer keeps showing only "esc Close"
+        # after the required edits are filled, so the ⏎ that just became valid
+        # is invisible.  Mutating state never repaints the footer on its own —
+        # ``refresh_bindings()`` is the other half.
+        self.refresh_bindings()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "promote-stage-btn":
@@ -6548,6 +7454,20 @@ class PromoteScaffoldScreen(_CopyableModal, ModalScreen):
             )
             return
         spec = self._edited_spec()
+        # #1156: refuse BEFORE pop_screen, next to the maintainer gate above and
+        # for the same reason — promote.py rejects an empty spec.compose.content
+        # (exit 3), and that refusal reached only the RunLog, so a doomed write
+        # read as "dispatched". Refusing here keeps the user's filled-in
+        # display_name/family instead of dropping them with the screen.
+        if not ((spec.get("compose") or {}).get("content") or "").strip():
+            self.notify(
+                "Nothing to register: ⑤ writes the compose that was actually "
+                "served — serve the model at ② first, then promote.",
+                title="Promote",
+                severity="error",
+                timeout=7,
+            )
+            return
         self.app.pop_screen()
         if self._on_stage_write is not None:
             self._on_stage_write(layer, spec)
@@ -6624,7 +7544,7 @@ class ExportPrBundleScreen(_CopyableModal, ModalScreen):
             )
             yield Static(self._body_text(), id="export-body")
             yield Label(
-                "[dim][Y] copy bundle paths · Esc Close[/dim]",
+                "[dim]\\[Y] copy bundle paths · Esc Close[/dim]",
             )
 
     def _body_text(self) -> str:
@@ -6760,8 +7680,13 @@ class OptimizeScreen(ModalScreen):
         sel = self.query_one("#optimize-kv", Select)
         btn = self.query_one("#optimize-apply", Button)
         if not report.available:
-            sel.disabled = True
-            btn.disabled = True
+            # Hide the controls (absent, not merely greyed) and their rows, so
+            # the card is just the honest message — the KV label and advisory
+            # note go too, and ~6 rows of inert widgets don't sit under it.
+            sel.display = False
+            btn.display = False
+            for row in self.query(".optimize-row"):
+                row.display = False
             # Honest error / unsupported-engine card — never a fabricated rec.
             body.update(
                 f"  [red]{report.message}[/red]\n"
@@ -6772,6 +7697,12 @@ class OptimizeScreen(ModalScreen):
             )
             return
 
+        # A later available report must bring everything back (a screen that
+        # first showed an unavailable one must not render with no controls).
+        sel.display = True
+        btn.display = True
+        for row in self.query(".optimize-row"):
+            row.display = True
         lines = [
             f"  [bold]{report.slug}[/bold] · {report.engine or '—'} · card {report.card}",
             "",
@@ -7022,7 +7953,11 @@ class LaneBringPane(Container):
         margin-bottom: 1;
     }
     LaneBringPane #lane-bring-input-row {
-        height: 4;
+        /* was `height: 4` — exactly label(1) + input(3). When the action row
+           moved inside this container it was clipped out of existence: Textual
+           still reported valid button regions, so a region check said "visible"
+           while nothing drew. Size to content. */
+        height: auto;
         margin-bottom: 1;
     }
     LaneBringPane #lane-bring-stage2-row {
@@ -7042,14 +7977,30 @@ class LaneBringPane(Container):
     }
     LaneBringPane #lane-bring-url-input {
         width: 1fr;
+        /* The one editable control on this pane had NO border, while the
+           read-only #lane-bring-result-card below has `border: solid $primary`.
+           The result: the field looked like plain text and the card looked like
+           the field. Give the input the stronger affordance — it is the only
+           thing here you type into. */
+        border: tall $accent;
     }
-    LaneBringPane #lane-bring-inspect-btn {
-        width: 13;
+    LaneBringPane #lane-bring-url-input:focus {
+        border: tall $success;
+    }
+    LaneBringPane #lane-bring-actions {
+        height: auto;
+        margin-top: 1;
+    }
+    /* The three buttons were fixed at 16 / 20 / auto with `margin-left: 2` each
+       — 58 columns of demand in the 42 the pane gets at 80 wide.  The third
+       button overflowed the screen edge and "Validate compose" rendered as
+       "Va": still clickable, unreadable, and invisible as a control.  Share the
+       row instead (1fr each) with a floor that keeps every label legible, and
+       halve the gutters. */
+    LaneBringPane #lane-bring-actions Button {
+        width: 1fr;
+        min-width: 12;
         margin-left: 1;
-    }
-    LaneBringPane #lane-bring-search-btn {
-        width: auto;
-        margin-right: 1;
     }
     LaneBringPane #lane-bring-gguf-select {
         width: 36;
@@ -7112,24 +8063,43 @@ class LaneBringPane(Container):
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("① Bring — inspect an HF model", id="lane-bring-heading")
+        yield Label(
+            "① Bring — inspect an HF model, or bring a compose you already have",
+            id="lane-bring-heading",
+        )
         # Phase 2: scrollable dense post-fit state; stage-2 stacks vertically so
         # GGUF + catalog config don't crush each other at ~100 cols.
-        with ScrollableContainer(id="lane-bring-scroll"):
-            with Horizontal(id="lane-bring-input-row"):
-                with Vertical(classes="funnel-field funnel-field-grow"):
-                    yield Label("HF repo", classes="funnel-field-title")
-                    yield Input(
-                        placeholder="org/Model  (e.g. unsloth/Qwen3-27B-abliterated-GGUF)",
-                        id="lane-bring-url-input",
-                    )
-                with Vertical(classes="funnel-field"):
-                    yield Label(" ", classes="funnel-field-title")
+        # #1153: a ScrollableContainer defaults to can_focus=True, so it sits in
+        # the Tab chain as a DEAD STOP — one extra Tab before every real control.
+        # Orchestration fixed this (orch_scroll) and the fix was never propagated.
+        # It still scrolls via its content and the mouse wheel.
+        bring_scroll = ScrollableContainer(id="lane-bring-scroll")
+        bring_scroll.can_focus = False
+        with bring_scroll:
+            # #1153: the actions used to live in a narrow column pinned to the
+            # RIGHT edge — at 100 cols they sat at x=77-98, stacked vertically,
+            # the third one ending two characters from the screen edge. They
+            # rendered and were still missed. Put the field first, then the
+            # choice directly under it, left-aligned, in reading order.
+            with Vertical(id="lane-bring-input-row"):
+                yield Label("HF repo or compose path", classes="funnel-field-title")
+                yield Input(
+                    placeholder="org/Model  (e.g. unsloth/Qwen3-27B-abliterated-GGUF)  — or a compose path",
+                    id="lane-bring-url-input",
+                )
+                # One field, TWO verbs: the field alone cannot say what you meant.
+                with Horizontal(id="lane-bring-actions"):
+                    # Search comes FIRST: you search to FIND a repo, then inspect
+                    # the one you found. The reverse order asked people to inspect
+                    # something they did not have yet.
                     yield Button(
-                        "Search HF", id="lane-bring-search-btn", classes="lane-bring-search-btn"
+                        "Search HF…", id="lane-bring-search-btn", classes="lane-bring-search-btn"
                     )
                     yield Button(
-                        "Inspect", id="lane-bring-inspect-btn", variant="primary"
+                        "Inspect HF", id="lane-bring-inspect-btn"
+                    )
+                    yield Button(
+                        "Validate compose", id="lane-bring-validate-compose-btn"
                     )
             # Stage 2/3 — HIDDEN until Inspect; Vertical stack (not cramped row).
             with Vertical(id="lane-bring-stage2-row", classes="funnel-hidden"):
@@ -7173,20 +8143,24 @@ class LaneBringPane(Container):
                     )
             # Verdict / next-action first after fit (phase 2 hierarchy).
             yield Static(
-                "[dim]Enter an HF repo and Inspect — metadata only, no download. "
-                "Fit-check unlocks ② Serve.[/dim]",
+                "[dim]Type an HF repo above, then [b]Inspect[/b] — metadata only, no "
+                "download. [b]Search HF…[/b] fills the field for you.\n"
+                "Already have a working compose? Paste its PATH instead "
+                "(*.yml): Route-K serves YOUR file, no download or HF call.[/dim]",
                 id="lane-bring-result-card",
             )
             yield Static("", id="lane-bring-weights-line", classes="funnel-hidden")
             yield Button(
-                "Continue → ② Serve  [s]",
+                # Rich reads "[s]" as a strikethrough tag and EATS it; the label
+                # rendered as "Continue → ② Serve  ". Escape the bracket.
+                "Continue → ② Serve  \\[s]",
                 id="lane-bring-continue-btn",
                 variant="success",
                 classes="funnel-hidden",
             )
             yield Static("", id="lane-bring-slug-card", classes="funnel-hidden")
             yield Label(
-                "[dim]next: enter an HF repo and press Inspect[/dim]",
+                "[dim]next: ⏎ Inspect  ·  [b]f[/b] Search HF  ·  a compose path takes Route-K straight to ② Serve[/dim]",
                 id="lane-bring-hint",
             )
 
@@ -7251,7 +8225,10 @@ class LaneBringPane(Container):
             )
         else:
             self.set_next_hint(
-                "[dim]next: pick a catalog config · Fit-check (⏎)[/dim]"
+                # This said "Fit-check (⏎)" while ⏎ in the Input re-ran INSPECT
+                # (a second HF call). Name the key that actually fit-checks.
+                "[dim]next: pick a catalog config below, then [b]Fit-check[/b] "
+                "(Tab to it, or ⏎ on the config)[/dim]"
             )
         gtitle = self.query_one("#lane-bring-gguf-title", Label)
         if inv.has_gguf:
@@ -7346,6 +8323,12 @@ class LaneBringPane(Container):
                  downloading: bool = False) -> None:
         card = self.query_one("#lane-bring-result-card", Static)
         card.update(_byo_result_text(res, weights_present, downloading))
+        # At 80x24 the verdict lands below the fold — the answer to the question
+        # the user just asked would be off-screen with nothing saying so.
+        try:
+            card.scroll_visible(animate=False)
+        except Exception:
+            pass
         # Stateful next-hint: failure → repair; success → single valid next key.
         can_continue = False
         if getattr(res, "error", ""):
@@ -7581,7 +8564,13 @@ class LaneServePane(Container):
         from textual.widgets import Collapsible
 
         # Phase 2 wireframe: target card → primary Serve → collapsed overrides → details.
-        with ScrollableContainer(id="lane-serve-scroll"):
+        # #1153: a ScrollableContainer defaults to can_focus=True, so it sits in
+        # the Tab chain as a DEAD STOP — one extra Tab before every real control.
+        # Orchestration fixed this (orch_scroll) and the fix was never propagated.
+        # It still scrolls via its content and the mouse wheel.
+        serve_scroll = ScrollableContainer(id="lane-serve-scroll")
+        serve_scroll.can_focus = False
+        with serve_scroll:
             yield Label(
                 "② Serve — arm from ① Bring, then serve untested",
                 id="lane-serve-heading",
@@ -7695,7 +8684,24 @@ class LaneServePane(Container):
         else:
             if ov_wrap is not None:
                 ov_wrap.add_class("funnel-hidden")
-        if route == "C" and sibling:
+        if route == "K":
+            # Route-K has no sibling_slug and no profile_like — it does not need
+            # one, the compose IS the target. Without this branch it fell to the
+            # final else, which HID the Serve button and said "no servable target
+            # yet" while ⏎ served the file correctly: the pane contradicted the
+            # action.
+            compose = getattr(self, "_route_k_compose", "") or "your compose"
+            heading.update("② Serve · your compose · 👤 untested")
+            lines = [
+                f"[green]Serving[/green]  [bold]{compose}[/bold]  "
+                "[dim]· 👤 untested[/dim]",
+                f"  [dim]runs THIS file verbatim"
+                + (f" · port {port_s}" if host_port else "")
+                + "[/dim]",
+                "  [dim]no catalog recipe involved — ⑤ registers this compose"
+                "[/dim]",
+            ]
+        elif route == "C" and sibling:
             heading.update("② Serve · 👤 untested")
             lines = [
                 f"[green]Serving[/green]  [bold]{brought}[/bold]  "
@@ -7844,10 +8850,12 @@ class LaneServePane(Container):
 
 
 class LanePromotePane(Container):
-    """⑤ Promotion Preview / Scaffold — checklist + scaffold action.
+    """⑤ Promote — checklist + the scaffold/write action.
 
-    Hosts [P] / the Preview button → PromoteScaffoldScreen.  Write remains
-    mock-only this phase (preview badge is persistent)."""
+    Hosts [P] / the Preview button → PromoteScaffoldScreen.  The write is
+    real: it runs promote.py to register the served compose into the LOCAL
+    layer, confirm-gated like every other write (the preview badge is
+    persistent)."""
 
     DEFAULT_CSS = """
     LanePromotePane {
@@ -7891,13 +8899,19 @@ class LanePromotePane(Container):
     """
 
     def compose(self) -> ComposeResult:
-        with ScrollableContainer(id="lane-promote-scroll"):
+        # #1153: a ScrollableContainer defaults to can_focus=True, so it sits in
+        # the Tab chain as a DEAD STOP — one extra Tab before every real control.
+        # Orchestration fixed this (orch_scroll) and the fix was never propagated.
+        # It still scrolls via its content and the mouse wheel.
+        promote_scroll = ScrollableContainer(id="lane-promote-scroll")
+        promote_scroll.can_focus = False
+        with promote_scroll:
             yield Label(
-                "⑤ Promotion Preview / Scaffold",
+                "⑤ Promote — register this model",
                 id="lane-promote-heading",
             )
             yield Static(
-                "[yellow]preview only — no catalog write yet[/yellow]",
+                "[yellow]scaffold first — the write is confirm-gated[/yellow]",
                 id="lane-promote-badge",
             )
             yield Static(
@@ -7924,7 +8938,7 @@ class LanePromotePane(Container):
                     disabled=True,
                 )
             yield Label(
-                "[dim]\\[P] / button — preview only · no catalog write this phase[/dim]",
+                "[dim]\\[P] / button — scaffold, then ⏎ writes the LOCAL layer (confirm-gated)[/dim]",
                 id="lane-promote-hint",
             )
 
@@ -8013,14 +9027,124 @@ class RailStatus(Static):
         "\n"
         "[dim]detecting…[/dim]\n"
         "\n"
-        "[dim]open the Orchestration tab to poll[/dim]"
+        # Was "open the Orchestration tab to poll" — untrue: the estate poll runs
+        # mode-wide within ~3 s of start (15 s startup burst) and on every mode-0
+        # entry, and this placeholder renders ON the Orchestration tab too. It
+        # told the user to do something that was already happening.
+        "[dim](first poll in a moment)[/dim]"
     )
 
     def __init__(self, **kwargs):
         super().__init__(self.PLACEHOLDER, **kwargs)
+        # #1118 -- the parsed VRAM component split (CockpitData.vram_breakdown)
+        # and which slice the card shows: "estate" (aggregate) or a device name.
+        self._vram: Optional[dict] = None
+        self._vram_at: float = 0.0
+        self._vram_view: str = "estate"
+        self._last_state: Optional[EstateState] = None
+        self._last_as_of: str = ""
+
+    def set_vram_split(self, vram: Optional[dict]) -> None:
+        """Store the parsed VRAM split (#1118) and re-render.  ``vram`` is the
+        ok-payload of CockpitData.vram_breakdown, or None to fall back to the
+        plain used/total card (nothing serving / parse failed)."""
+        import time as _t
+
+        self._vram = vram or None
+        self._vram_at = _t.monotonic() if self._vram else 0.0
+        names = [d.get("device", "") for d in (self._vram or {}).get("devices", [])]
+        if self._vram_view != "estate" and self._vram_view not in names:
+            self._vram_view = "estate"
+        self._render_card()
+
+    def cycle_vram_view(self) -> None:
+        """[G] — estate-wide -> per-GPU -> back, over the devices the log named."""
+        names = [d.get("device", "") for d in (self._vram or {}).get("devices", [])]
+        if not names:
+            return
+        order = ["estate"] + names
+        i = order.index(self._vram_view) if self._vram_view in order else 0
+        self._vram_view = order[(i + 1) % len(order)]
+        self._render_card()
 
     def update_from_state(self, state: EstateState, *, as_of: str = "") -> None:
+        self._last_state = state
+        self._last_as_of = as_of
+        self._render_card()
+
+    def _vram_lines(self) -> list[str]:
+        """The #1118 breakdown block: aggregate across devices by default,
+        one card's slice after [G] cycles to it.  Empty when there is no
+        split (degrades to the plain used/total card)."""
+        vram = self._vram or {}
+        devices = vram.get("devices") or []
+        if not devices:
+            return []
+        import time as _t
+
+        age_min = max(0, int((_t.monotonic() - self._vram_at) // 60))
+        clamped = any("staler than the card" in w for w in vram.get("warnings", []))
+        lines: list[str] = []
+
+        def _dev_row(d: dict) -> None:
+            title = f"VRAM split · {self._vram_view}"
+            lines.append(f"[bold]{title}[/bold]")
+            if d.get("used") is not None and d.get("total"):
+                pct = int(d["used"] / d["total"] * 100)
+                lines.append(
+                    f"  used     {_human_gb(int(d['used']) * 1024 * 1024)} / "
+                    f"{_human_gb(int(d['total']) * 1024 * 1024)} ({pct}%)")
+            for label in ("model", "pool", "compute", "kv", "state"):
+                v = d.get(label)
+                if v is not None:
+                    lines.append(f"  {label:<8} {_human_gb(int(v) * 1024 * 1024)}")
+            raw = d.get("unaccounted")
+            if raw is not None:
+                # Never a negative `other`: the parser clamps, and the rail
+                # clamps again defensively; "≥" marks the clamp.
+                shown = max(0, int(raw))
+                ge = "≥ " if (int(raw) < 0 or clamped) else ""
+                lines.append(f"  other    {ge}{_human_gb(shown * 1024 * 1024)} ⚠")
+            lines.append(f"[dim]  split from boot log · {age_min}m old · \\[G] cycle[/dim]")
+
+        if self._vram_view == "estate":
+            agg: dict[str, float] = {}
+            used = total = 0
+            for d in devices:
+                for k in ("model", "pool", "compute", "kv", "state"):
+                    if d.get(k) is not None:
+                        agg[k] = agg.get(k, 0.0) + d[k]
+                if d.get("used") is not None and d.get("total"):
+                    used += int(d["used"])
+                    total += int(d["total"])
+            other = sum(max(0, d.get("unaccounted") or 0) for d in devices)
+            agg_row = dict(agg)
+            agg_row["device"] = "estate"
+            agg_row["unaccounted"] = other
+            agg_row["used"] = used
+            agg_row["total"] = total
+            _dev_row(agg_row)
+        else:
+            d = next((x for x in devices if x.get("device") == self._vram_view), None)
+            if d is not None:
+                _dev_row(d)
+        if clamped:
+            lines.append("[dim]  ⚠ components exceed the live total — split is from a staler boot log[/dim]")
+        if vram.get("warnings"):
+            # Full text -- Textual wraps to the rail width; a 60-char slice
+            # chopped the moe-cache warning mid-sentence.
+            for w in vram.get("warnings", []):
+                lines.append(f"[dim]  ⚠ {w}[/dim]")
+        return lines
+
+    def _render_card(self) -> None:
+        state, as_of = self._last_state, self._last_as_of
         lines: list[str] = ["[bold]Estate[/bold]", ""]
+        if state is None:
+            # set_vram_split before the first estate poll: breakdown-only card
+            # (nothing else is known yet).
+            self.update("\n".join(lines + self._vram_lines()))
+            return
         # A2/N2: a READ error (docker / nvidia-smi failure) shows as a distinct
         # red line at the top of the rail — the always-visible card must not
         # quietly read as a healthy idle rig when the read actually failed.
@@ -8034,7 +9158,7 @@ class RailStatus(Static):
             lines.append(f"[red]⚠ {_error_headline(err)}[/red]")
             lines.append("")
         for i in (0, 1):
-            gpu = next((g for g in state.gpus if getattr(g, "index", -1) == i), None)
+            gpu = next((g for g in (state.gpus or []) if getattr(g, "index", -1) == i), None)
             if gpu is None:
                 continue
             used = getattr(gpu, "mem_used_mib", 0) / 1024
@@ -8053,6 +9177,12 @@ class RailStatus(Static):
             lines.append(f"[dim]kv pool {dr.kv_pool_pct}%[/dim]")
         else:
             lines.append("[dim]kv pool —[/dim]")
+
+        # #1118 -- the VRAM component split, parsed from the serving
+        # container's boot log on a long stride.  Aggregate by default; [G]
+        # collapses to one card.  Degrades to the plain used/total card when
+        # there is no split (non-llama engine, nothing serving, parse failed).
+        lines += self._vram_lines()
         lines.append("")
         if state.matched_slug:
             # F9: a port/substring registry match is a SHAPE guess, not a verified
@@ -8368,8 +9498,13 @@ class FocusableFooter(Footer):
             active = self.screen.active_bindings
         except Exception:
             return ()
+        # `description` is part of the signature: the footer RENDERS it, so a
+        # recompose-suppression that ignored it made every `_relabel_binding`
+        # invisible whenever the visible key set was unchanged (③ Gate kept
+        # showing "⏎ Serve" from ② Serve indefinitely, and Doctor's ⏎ label could
+        # not follow the ↑/↓ selection at all).
         return tuple(
-            (binding.key, binding.action, enabled)
+            (binding.key, binding.action, enabled, binding.description)
             for (_node, binding, enabled, _tooltip) in active.values()
             if binding.show
         )
@@ -8411,15 +9546,17 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("mode_validate", "Bring & Validate mode", "Producer lane ① Bring → ⑤ Promote"),
     ("toggle_contribute", "Toggle lean view", "Hide / restore the Bring & Validate mode"),
     ("toggle_rail", "Toggle left rail", "Collapse / restore Modes + Estate rail"),
-    ("copy_context", "Copy current view", "Copy the highlighted slug / open report / selection to the clipboard ([Y])"),
-    ("settings", "Settings (model dir · HF token)", "Edit where weights download to + the HuggingFace token ([S])"),
+    ("copy_context", "Copy current view", "Copy the highlighted slug / open report / selection to the clipboard (\\[Y])"),
+    ("settings", "Settings (model dir · HF token)", "Edit where weights download to + the HuggingFace token (\\[S])"),
     ("refresh", "Refresh", "Re-read the live data layer for the active mode"),
     ("help", "Help", "Show the keybindings + phase help overlay"),
     # Run & Operate · Catalog tab.
     ("primary_action", "Serve selected / primary action", "⏎ — serve the selected slug (reconcile-gated)"),
     ("explain", "Explain selected slug", "Catalog — detail + cross-rig benchmarks"),
-    ("model_info", "Model info", "Catalog — metadata popup for the selected slug ([i])"),
+    ("model_info", "Model info", "Catalog — metadata popup for the selected slug (\\[i])"),
     ("filter_catalog", "Filter catalog", "Catalog — filter by slug / engine / status"),
+    ("toggle_catalog_model", "Model scope (Catalog)", "Catalog — narrow to one model (\\[\\] dropdown)"),
+    ("catalog_columns", "Catalog columns…", "Catalog — show/hide + reorder columns (\\[|] · persisted)"),
     ("toggle_catalog_deprecated", "Show/hide deprecated", "Catalog — reveal 🗑️ deprecated slugs (hidden by default)"),
     ("toggle_catalog_downloaded", "Show only downloaded", "Catalog — narrow to slugs whose weights are already on disk"),
     ("copy_endpoint", "Copy the serving API URL", "Run & Operate — copy http://<lan>:<port>/v1 for your agent/client (no auth by default)"),
@@ -8435,12 +9572,12 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("power_cap", "Power cap…", "Orchestration — power-cap menu: default 230W / clear / custom W (gated)"),
     ("power_cap_sweep", "Power cap sweep", "Doctor — sweep power caps + bench at each (gated)"),
     ("container_logs", "Container logs", "Containers — stream the selected container's logs"),
-    ("container_follow", "Container log follow", "Containers — [f] arm/pause the live log tail for the selected container"),
+    ("container_follow", "Container log follow", "Containers — \\[f] arm/pause the live log tail for the selected container"),
     ("doctor_rerun", "Re-run Doctor health", "Doctor — re-run the live health read (read-only)"),
     ("doctor_verify", "Verify serving", "Doctor — send a test query to the model (verify.sh · read)"),
     ("doctor_verify_full", "Verify-full battery", "Doctor — functional battery (verify-full.sh · ~1-2 min · read)"),
     ("full_report", "Full system report (report.sh --full)", "Doctor / ③ Gate — ~43-min battery (uses the serving GPUs · gated)"),
-    ("bootlog_solve", "Boot-log KV back-solve", "③ Gate — classify the serving container's boot log vs the kv-calc prediction ([K] · read)"),
+    ("bootlog_solve", "Boot-log KV back-solve", "③ Gate — classify the serving container's boot log vs the kv-calc prediction (\\[K] · read)"),
     # Share-back (consumer-resident — NOT producer-gated).
     ("rig_report", "Rig report", "Paste-ready rig/bench snapshot (read · no network)"),
     ("submit_bench", "Submit bench", "Submit the latest benched result (gated · never auto)"),
@@ -8448,9 +9585,9 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
     # Producer lane (Bring & Validate) — filtered out on the lean surface.
     ("serve_untested", "Serve untested (② Serve)", "Producer lane — generate a compose + serve it untested"),
     ("measure_vs_bar", "Compare vs catalog bar (④ Measure)", "Producer lane — read · flags protocol"),
-    ("evaluate_target", "Evaluate running target (preview)", "Producer lane — c3t evaluate (mock this phase)"),
-    ("promote_catalog", "Promotion scaffold preview (⑤)", "Producer lane — preview only, no catalog write yet"),
-    ("search_hf", "Search Hugging Face repos (① Bring)", "Producer lane — search HF and fill the repo field ([f])"),
+    ("evaluate_target", "Evaluate running target", "Producer lane — c3t evaluate (confirm-gated · runs against the serving model)"),
+    ("promote_catalog", "Promote this model (⑤)", "Producer lane — scaffold the registry entry; the write is confirm-gated"),
+    ("search_hf", "Search Hugging Face repos (① Bring)", "Producer lane — search HF and fill the repo field (\\[f])"),
 )
 
 # The producer-only subset — kept in sync with ``CockpitApp._PRODUCER_ONLY`` (a
@@ -8474,6 +9611,28 @@ _TAB_PRIMARY_LIST: dict[str, str] = {
     "tab-evidence":      "#evidence-table",
     "tab-orchestration": "#scene-table",
     "tab-containers":    "#containers-table",
+}
+# Doctor deliberately has NO entry above: _TAB_PRIMARY_LIST is the map of primary
+# DATATABLES and is shared with the ↓ descend / ↑ ascend gates, which need a list.
+# Doctor's scroll container is focused on tab activation instead (see
+# on_tabbed_content_tab_activated) so ↓/PgDn work on its overflowing page.
+# Operate · Doctor — the six check cards, in the order `compose` yields them.
+# ONE source of truth for three things that must never drift apart: the ↑/↓
+# navigation order, the ⏎ dispatch target, and the footer label.  A card added to
+# `DoctorPane.compose` without a row here is unreachable by keyboard; a row here
+# without a card raises on selection.  `test_doctor_registry_matches_compose_order`
+# asserts both directions against the rendered DOM.
+_DOCTOR_CHECKS: tuple[tuple[str, str, str], ...] = (
+    ("doctor-card-health",     "doctor_rerun",      "Re-run health"),
+    ("doctor-card-verify",     "doctor_verify",     "Verify serving"),
+    ("doctor-card-verifyfull", "doctor_verify_full", "Verify-full"),
+    ("doctor-card-report",     "rig_report",        "Rig report"),
+    ("doctor-card-fullreport", "full_report",       "Full report"),
+    ("doctor-card-sweep",      "power_cap_sweep",   "Cap sweep"),
+)
+
+_TAB_FOCUS_FALLBACK: dict[str, str] = {
+    "tab-doctor": "#doctor-scroll",
 }
 
 
@@ -8526,7 +9685,14 @@ class CockpitCommands(Provider):
 
 # ── Main application ──────────────────────────────────────────────────────────────
 
-# Containers log-follow ([f]) — docker-logs poll cadence while armed.  2s is
+# Footer width policy (#16): at/above this many columns the footer shows the
+# redundant global keys (r Refresh · S Settings); below it they are hidden so the
+# pane's own context key is not the one that gets clipped.  120 is the width at
+# which the WORST case — Doctor, the only pane with two context keys ("v Verify
+# serving" + "y Re-run health") — still fits alongside them; at 100 it did not.
+_FOOTER_WIDE_COLS = 120
+
+# Containers log-follow (\\[f]) — docker-logs poll cadence while armed.  2s is
 # imperceptible for a log tail and keeps the read-runner calls cheap.
 _LOG_FOLLOW_PERIOD = 2.0
 # Display-model cap for the follow pane — mirrors LivePane's own 2000-line
@@ -8539,7 +9705,10 @@ class CockpitApp(App):
     """club3090 serve cockpit — both modes (Run & Operate · Bring & Validate) wired to the live data layer."""
 
     TITLE = "club3090 cockpit"
-    SUB_TITLE = "wired"
+    # "wired" was a development artefact (it meant "the data layer is connected
+    # now"), shown to every user in the header forever. Say something the reader
+    # can use instead.
+    SUB_TITLE = "local LLM cockpit"
 
     # N6 — register the cockpit's action provider alongside Textual's built-in
     # system commands so Ctrl+P fuzzy-searches our verbs too.
@@ -8548,6 +9717,8 @@ class CockpitApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "help", "Help", show=True),
+        # r / S are width-gated in the footer by _apply_footer_width_policy:
+        # shown at >= _FOOTER_WIDE_COLS, hidden below it.  See that method.
         Binding("r", "refresh", "Refresh", show=True),
         # Sub-tab cycle — shown when the mode has sub-tabs (check_action gates).
         # Both brackets show=True so [ and ] are symmetric in the footer (the
@@ -8597,11 +9768,34 @@ class CockpitApp(App):
         # [i] model-info popup (C6) — local-data metadata modal, sibling of Explain.
         Binding("i", "model_info", "Model info", show=False),
         # 2-mode merge: [1] = merged Run & Operate, [2] = Bring & Validate lane.
-        Binding("1", "mode_run", "Run & Operate", show=True),
-        Binding("2", "mode_validate", "Bring & Validate", show=True),
+        # The footer renders global keys FIRST, so on a 100-120 col terminal the
+        # only keys that DIFFER per screen — the context ones (⏎, s, D, k, v) —
+        # were the ones clipped off the right edge. The Modes rail two inches to
+        # the left already teaches 1/2 permanently, so they do not need a second
+        # permanent home in the scarcest space on screen. Still bound, just not
+        # spending footer width.
+        Binding("1", "mode_run", "Run & Operate", show=False),
+        Binding("2", "mode_validate", "Bring & Validate", show=False),
         # Footer description is rewritten live by `_sync_footer_labels` (Fit-check /
         # Serve / Launch step / …) — "Select" is only the class default.
-        Binding("enter", "primary_action", "Select", show=True),
+        #
+        # show=False DELIBERATELY.  A focused DataTable declares its own
+        # `enter → select_cursor (show=False)`, and the deepest focused node
+        # wins the footer — so ⏎ silently vanished from the footer on every
+        # table-focused pane, which is the BOOT state of Catalog, Orchestration
+        # and ③ Gate.  The key itself always worked (RowSelected routes to
+        # `action_primary_action`); only the advertisement was inconsistent,
+        # present in some panes and absent in others for the same key.
+        #
+        # Rather than fight DataTable for the slot in the four primary tables,
+        # ⏎ is advertised in ONE consistent place instead: `#mode-action-hint`
+        # in the Modes rail, which `_sync_footer_labels` already writes with the
+        # SAME computed label ("⏎ Serve", "⏎ Fit-check", "⏎ Re-run health"), plus
+        # each pane's own hint line.  That is honest in every pane and frees
+        # ~14 columns of footer at 80 wide, where the footer is the scarcest
+        # space on screen.  `_relabel_binding` is still useful: it keeps the
+        # command-palette/tooltip text truthful.
+        Binding("enter", "primary_action", "Select", show=False),
         # Catalog (Run) — default pin management (.env write, gated=no GPU).
         Binding("d", "set_default", "Set default", show=False),
         Binding("D", "clear_default", "Clear default", show=False),
@@ -8621,16 +9815,29 @@ class CockpitApp(App):
         Binding("N", "new_pod", "New pod", show=False),
         # Operate · Orchestration — power-cap menu (default / clear / custom W).
         Binding("c", "power_cap", "Power cap", show=False),
+        # [c] view the compose behind the focused thing. A SECOND `c`, gated to a
+        # disjoint (mode, tab) set from power_cap above — the same dual-binding
+        # idiom v/k/f/D/w already use. Orchestration keeps power-cap; everywhere
+        # a compose is identifiable, `c` opens it.
+        Binding("c", "view_compose", "View compose", show=False),
         # Operate · Doctor — power-cap sweep (heavy A/B bench; gated rig write).
         Binding("w", "power_cap_sweep", "Cap sweep", show=False),
         # Operate · Containers / Validate — context-sensitive read keys.
         Binding("t", "context_t", "Top / Sort", show=False),
         # Phase 5 — the three v2 hooks:
-        #   [v] Evaluate via c3t (mock this phase — label says so)
+        #   [v] Evaluate via c3t (confirm-gated; the launch is REAL)
         #   [P] Promotion scaffold preview (no live catalog write this phase)
         #   [O] Optimize for my card (kv-calc brain; apply = gated stage)
-        Binding("v", "evaluate_target", "Evaluate (preview)", show=False),
+        Binding("v", "evaluate_target", "Evaluate via c3t", show=False),
         Binding("P", "promote_catalog", "Scaffold preview", show=False),
+        # [ctrl+l] — manage what you registered (#1153). ⑤ Promote owns the write
+        # half; this is the rest of it.
+        # ⚠️ NOT a bare "L". `l` is already bound at app level (container_logs),
+        # and adding the uppercase twin HANGS the headless suite — verified by
+        # bisection: "L" hangs test_force_button_reissues_forced_plan, "Z" and
+        # "ctrl+l" pass. Only `a` and `j` are free in both cases app-wide, and
+        # neither reads as "local layer".
+        Binding("ctrl+l", "local_layer", "Local layer", show=True),
         # R3b-1 — producer lane ② Serve: generate a compose + serve it untested
         # (also reachable via ⏎ on the ② Serve stage).
         Binding("g", "serve_untested", "Serve untested", show=False),
@@ -8648,7 +9855,7 @@ class CockpitApp(App):
         # (same duplicate-key + check_action pattern as the modal's k=stop /
         # k=cancel_download).
         Binding("k", "bring_cancel_download", "Cancel download", show=True),
-        # ① Bring HF search front-end ([f]) — opens SearchHFScreen; a picked
+        # ① Bring HF search front-end (\\[f]) — opens SearchHFScreen; a picked
         # result fills the repo field.  Context-gated to mode 1 · tab-bring via
         # _CONTEXT_KEYS (show=False like the other lane verbs — taught by Help).
         Binding("f", "search_hf", "Search HF", show=False),
@@ -8691,6 +9898,8 @@ class CockpitApp(App):
         # context-gated to mode 0 · Doctor in _CONTEXT_KEYS, so it only renders
         # there.
         Binding("y", "doctor_rerun", "Re-run health", show=True),
+        # #1118 — the estate VRAM split: estate-wide -> per-GPU -> back.
+        Binding("G", "estate_vram_cycle", "VRAM breakdown", show=True),
         # Batch 3 — Operate · Doctor: "is the model serving correctly?".  [v] sends
         # a test query (verify.sh), [V] runs the ~1-2 min functional battery
         # (verify-full.sh).  Both READ-only.  [v] DELIBERATELY shares its key with
@@ -8702,13 +9911,39 @@ class CockpitApp(App):
     ]
 
     CSS = """
+    /* Keyboard focus on a Button was INVISIBLE app-wide — there was not a single
+       `Button:focus` rule, so tabbing between actions moved focus with no visual
+       change at all. The only button that looked different was whichever carried
+       `variant="primary"`, which reads as "the active one" and makes the rest
+       look inert. Give focus an unmistakable ring; it applies to every button in
+       the app, not just the lane. */
+    Button:focus {
+        border: tall $accent;
+        text-style: bold;
+    }
+
     /* Per-pane control/hint lines must stay WITHIN the viewport — a Label is
        `width: auto` (sizes to its content), so a long control hint runs off the
        right edge and pushes the page into horizontal scroll, hiding the controls.
        Constrain every hint to the available width so it WRAPS (all controls stay
        visible, no h-scroll).  An id selector beats Label's type-level default. */
+    /* #pod-view was the only block in Orchestration rendered flush-left while
+       every sibling line is indented 2 — a ragged edge the eye catches
+       immediately. */
+    #pod-view {
+        padding: 0 1;
+        margin: 0 1;
+    }
     #catalog-hint, #orch-hint, #containers-hint, #run-hint, #doctor-hint,
     #evidence-hint, #lane-bring-hint, #lane-serve-hint, #lane-promote-hint {
+        width: 1fr;
+    }
+    /* Pane HEADINGS have exactly the same problem and were never added here:
+       being `width: auto` Labels they were TRUNCATED (not wrapped) at 80 cols —
+       "① Bring — inspect an HF model, or bring a co", "Doctor — is the running
+       model serving cor", "Gate (⏎ launches the selected step — confirm-".
+       Each loses the clause that says what the pane is for. */
+    #doctor-heading, #lane-bring-heading, #lane-serve-heading, #run-heading {
         width: 1fr;
     }
     #main-layout {
@@ -8752,6 +9987,14 @@ class CockpitApp(App):
     .mode-panel.active {
         display: block;
     }
+    /* The TabbedContent had NO height rule, so its `1fr` children expanded to
+       the whole panel and pushed #serve-live to y=49 on a 46-row terminal — the
+       boot log was OFF-SCREEN at every height. You started a model, got a
+       4-second toast, and never saw whether it booted. Constrain the tabs so the
+       revealed log has somewhere to live. */
+    #operate-tabs {
+        height: 1fr;
+    }
     /* Transient Run boot-output pane — hidden until a serve commits, then
        revealed (and given height) so the boot log streams below the catalog. */
     #panel-run > #serve-live {
@@ -8759,8 +10002,19 @@ class CockpitApp(App):
     }
     #panel-run > #serve-live.serving {
         display: block;
-        height: 12;
+        /* Was a fixed `height: 12`.  On a 24-row terminal that 13-row sibling
+           squeezed #operate-tabs until the catalog DataTable collapsed to
+           height 1 — not even its header row survived, so starting a model made
+           the list you started it from disappear.  Take the space only when
+           there is space: `1fr` up to the old 12, with a min-height on the tabs
+           so the table always keeps a usable number of rows. */
+        height: 1fr;
+        max-height: 12;
+        min-height: 5;
         margin: 0 1 1 1;
+    }
+    #panel-run > #operate-tabs {
+        min-height: 12;
     }
     /* FIX 1 — while a ModalScreen is topmost, suppress the BASE FocusableFooter
        (the main screen's footer renders UNDER/around the modal otherwise, showing
@@ -8839,6 +10093,10 @@ class CockpitApp(App):
         "estate_off":       ({0}, {"tab-orchestration"}),
         "new_pod":      ({0}, {"tab-orchestration"}),
         "power_cap":        ({0}, {"tab-orchestration"}),
+        # Disjoint from power_cap by construction: every tab here is one where a
+        # compose path is resolvable, and none of them is tab-orchestration.
+        "view_compose":     ({0, 1}, {"tab-catalog", "tab-containers",
+                                      "tab-bring", "tab-serve", "tab-promote"}),
         # power-cap sweep lives on Doctor now (a tuning/diagnostic bench, not a
         # live-estate control) — prune was removed from the cockpit entirely.
         "power_cap_sweep":  ({0}, {"tab-doctor"}),
@@ -8871,6 +10129,9 @@ class CockpitApp(App):
         #   report_problem — any merged-mode tab (surfaced AT a failed serve in
         #                    Catalog, and reachable while operating).
         "rig_report":       ({0}, None),
+        # #1118 — [G] cycles the estate-bar VRAM split; the rail is visible on
+        # every merged-mode tab, so no subtab restriction.
+        "estate_vram_cycle": ({0}, None),
         "submit_bench":     ({0}, None),
         "report_problem":   ({0}, None),
     }
@@ -8917,6 +10178,12 @@ class CockpitApp(App):
         4. Sub-tab cycle keys — True only in modes that have sub-tabs.
         5. Everything else — True (pass-through; modals handle their own capture).
         """
+        # [ctrl+l] is advertised only when the local layer has something in it —
+        # a footer entry that opens an empty table is noise on every rig that has
+        # never registered a model.
+        if action == "local_layer":
+            return self._has_local_entries()
+
         from textual.widgets import Input as _Input
 
         # Surface gate (R3a): producer-only actions are hidden on the consumer
@@ -8930,6 +10197,11 @@ class CockpitApp(App):
         # [k] cancels an in-flight ① Bring download — enabled ONLY in mode 1 with
         # a live download, so the shared "k" falls through to serving_stop
         # everywhere else (mode 1 is producer-only, so no surface leak).
+        # [G] VRAM breakdown view — only in the merged mode WITH a parsed
+        # split to cycle (no split -> nothing to show, key hidden).
+        if action == "estate_vram_cycle":
+            return self._active_mode == 0 and bool(self._vram_split)
+
         if action == "bring_cancel_download":
             # Cancelable when this session started a download (tracker) OR a
             # disk-truth download lock is live for the fit-checked repo (a
@@ -8978,7 +10250,7 @@ class CockpitApp(App):
                 bar = self._active_tab_bar()
                 if bar is None or focused is not bar:
                     return False
-                return self._primary_list_for_active_tab() is not None
+                return self._descend_target_for_active_tab() is not None
             # ascend_to_tabbar: [up] ascends in EXACTLY ONE case (priority binding):
             #   focus is the active tab's PRIMARY DataTable at cursor row 0 →
             #   ascend to the tab bar (above row 0 / off a primary list → the
@@ -9040,8 +10312,13 @@ class CockpitApp(App):
                 # Containers (docker restart) + Catalog ([s] sort cycle)
                 return self._current_subtab() in ("tab-containers", "tab-catalog")
             if self._active_mode == 1:
-                # ① Bring (advance → ② Serve) + ④ Measure (submit-to-localmaxxing)
-                return self._active_validate_tab() in ("tab-bring", "tab-evidence")
+                # ① Bring (advance → ② Serve) + ④ Measure (submit-to-localmaxxing).
+                # ① is offered ONLY when something is actually servable — see
+                # _bring_is_servable for why the two used to disagree.
+                tab = self._active_validate_tab()
+                if tab == "tab-bring":
+                    return self._bring_is_servable()
+                return tab == "tab-evidence"
             return False
 
         # Sub-tab cycle keys: both modes have sub-tabs (merged 0 = 4 tabs; lane 1
@@ -9110,8 +10387,30 @@ class CockpitApp(App):
     # Doctor / Containers (mode 0) have NO ⏎ primary, so ⏎ is hidden there.
     def _primary_action_enabled(self) -> bool:
         if self._active_mode == 0:
-            return self._current_subtab() in ("tab-catalog", "tab-orchestration")
+            # tab-doctor joined this set when Doctor's cards became ↑/↓ selectable
+            # and ⏎-runnable. It was excluded while Doctor was read-only — and the
+            # Modes rail said "⏎ Select" there anyway, which was simply untrue.
+            return self._current_subtab() in (
+                "tab-catalog", "tab-orchestration", "tab-doctor",
+            )
         if self._active_mode == 1:
+            # Per-stage, not a blanket True. The lane used to advertise ⏎ on every
+            # stage and then refuse: ② Serve with nothing armed said "Run ① Bring
+            # fit-check first"; ⑤ Promote offered "⏎ Scaffold preview" while its
+            # Preview button was disabled and answered "No model to promote"; ③
+            # Gate opened a dialog with an empty target. Each of those is now
+            # gated on the same condition its handler checks.
+            tab = self._active_validate_tab()
+            if tab == "tab-bring":
+                return True                      # ⏎ = fit-check, always available
+            if tab == "tab-serve":
+                return self._bring_is_servable()
+            if tab == "tab-run":
+                return bool(self._target_model or self._target_url)
+            if tab == "tab-evidence":
+                return True                      # ⏎ = open report; empty list is a no-op
+            if tab == "tab-promote":
+                return self._last_byo is not None
             return True
         return False
 
@@ -9129,6 +10428,64 @@ class CockpitApp(App):
         except Exception:
             pass
 
+    def _set_binding_show(self, action: str, show: bool) -> bool:
+        """Flip a BINDING's footer visibility in place; True if it changed.
+
+        Per-instance copy, same pattern as `_relabel_binding`.  Note this is the
+        only way to hide a key WITHOUT disabling it: returning False from
+        `check_action` would also stop the key firing, and None would grey it
+        out — neither of which is wanted for keys that must keep working."""
+        import dataclasses
+
+        changed = False
+        try:
+            for bindings in self._bindings.key_to_bindings.values():
+                for i, b in enumerate(bindings):
+                    if b.action == action and b.show != show:
+                        bindings[i] = dataclasses.replace(b, show=show)
+                        changed = True
+        except Exception:
+            pass
+        return changed
+
+    def _apply_footer_width_policy(self, width: Optional[int] = None) -> None:
+        """Width-gate the two redundant global keys so the CONTEXT key survives.
+
+        The footer renders bindings in declaration order and the six globals are
+        declared first, so at 80 columns the key that is actually about the pane
+        you are looking at is the one that gets cut — measured: "s Sort" → "s
+        So", "s Restart" → "s Re", "v Verify serving" → "v Ve", and on ④ Measure
+        "s Submit" lost its description entirely.  That is exactly backwards.
+
+        `r` (Refresh) and `S` (Settings) are the two globals with a full fallback
+        elsewhere — both are in the ? Help overlay AND in the ^p command palette —
+        so they are the right ~23 columns to reclaim below _FOOTER_WIDE_COLS.
+        The KEYS keep working at every width; only the footer advertisement is
+        gated.  Above the threshold everything is shown as before."""
+        try:
+            # `width` comes from the Resize EVENT.  `self.size` is not updated
+            # yet while the event is being handled, so reading it here gated on
+            # the PREVIOUS width — the footer lagged one resize behind (verified:
+            # 140 → 80 still showed r/S, 80 → 140 then hid them).
+            if width is None:
+                width = self.size.width
+            wide = width >= _FOOTER_WIDE_COLS
+        except Exception:
+            return
+        changed = False
+        for action in ("refresh", "settings"):
+            if self._set_binding_show(action, wide):
+                changed = True
+        if changed:
+            # Flipping `show` is only half of it — the Footer caches the
+            # displayed-binding signature and will not repaint on its own.
+            self.refresh_bindings()
+
+    def on_resize(self, event) -> None:
+        self._apply_footer_width_policy(
+            getattr(getattr(event, "size", None), "width", None)
+        )
+
     def _sync_footer_labels(self) -> None:
         """Phase 1.3 — mirror the live meaning of context keys in the footer.
 
@@ -9143,6 +10500,16 @@ class CockpitApp(App):
                 enter_label = "Serve"
             elif tab == "tab-orchestration":
                 enter_label = "Switch scene"
+            elif tab == "tab-doctor":
+                # Name the SELECTED check, so ⏎ says what it will actually run
+                # rather than a generic verb — the whole point of a list you
+                # arrow through is that the commit key tracks the cursor.
+                try:
+                    enter_label = self.query_one(
+                        "#doctor-pane", DoctorPane
+                    ).selected_check()[2]
+                except Exception:
+                    enter_label = "Run check"
         elif self._active_mode == 1:
             tab = self._active_validate_tab()
             enter_label = {
@@ -9153,6 +10520,13 @@ class CockpitApp(App):
                 "tab-promote": "Scaffold preview",
             }.get(tab or "", "Select")
         self._relabel_binding("primary_action", enter_label)
+        # The Modes rail showed a STATIC "⏎ Run stage" on every lane stage while
+        # the real ⏎ was Fit-check / Serve / Launch step / Open report / Scaffold.
+        # The correct label is already computed right here — use it.
+        try:
+            self.query_one("#mode-action-hint", Label).update(f"⏎ {enter_label}")
+        except Exception:
+            pass
 
         # ── s (Continue / Submit / Restart) ───────────────────────────────────
         s_label = "Restart / Submit"
@@ -9195,7 +10569,7 @@ class CockpitApp(App):
         self._c3_log_enabled = False
         self._c3_log_env_override = False
         self._active_mode = 0  # 0=Run & Operate (merged) · 1=Bring & Validate
-        # Containers log-follow ([f]) — three states: off / following / paused.
+        # Containers log-follow (\\[f]) — three states: off / following / paused.
         #   _log_follow_armed   True in BOTH following and paused
         #   _log_follow_paused  True only in paused
         #   _log_follow_timer   set_interval handle (None while paused)
@@ -9302,6 +10676,11 @@ class CockpitApp(App):
         # A3: the last estate snapshot, cached so the periodic as-of re-render can
         # re-stamp the rail's freshness WITHOUT a fresh subprocess poll.
         self._last_estate_state: Optional[EstateState] = None
+
+        self._vram_split: Optional[dict] = None          # #1118 parsed --json payload
+        self._vram_split_at: float = 0.0                 # monotonic ts of the last parse
+        self._vram_split_container: str = ""            # container the split was parsed for
+        self._estate_vram_view: str = "estate"               # rail view cycle state
         # Last GPU/host telemetry (cached for the video⊕voice guard — read in the
         # sync container-write path without a fresh async poll).
         self._last_telemetry: Optional[EstateTelemetry] = None
@@ -9399,7 +10778,7 @@ class CockpitApp(App):
                             yield ValidateRunPane(id="validate-run-pane")
                         with TabPane("④ Measure", id="tab-evidence"):
                             yield ValidateEvidencePane(id="validate-evidence-pane")
-                        with TabPane("⑤ Promotion Preview", id="tab-promote"):
+                        with TabPane("⑤ Promote", id="tab-promote"):
                             yield LanePromotePane(id="lane-promote-pane")
         # #5 — a Tab-traversable footer so keyboard users can reach the footer
         # affordances (in addition to the hotkeys).
@@ -9536,6 +10915,55 @@ class CockpitApp(App):
         # The heavy docker+host batch runs only on a due tick (burst/steady/idle).
         if self._docker_poll_due():
             self.load_estate()
+        # #1118 -- the VRAM component split re-parses on a LONG stride (600s)
+        # or when the serving container changes; the rail's totals stay per-tick.
+        self._maybe_reparse_vram_split()
+
+    _VRAM_REPARSE_SECS = 600       # #1118: boot-log re-parse stride (10 min)
+
+    def _maybe_reparse_vram_split(self) -> None:
+        """Re-parse the serving container's boot log only on a long stride or
+        when the serving container changed (#1118) -- the component split moves
+        at container-start and as the moe-cache pool grows, never per poll."""
+        import time as _t
+
+        con = self._serving_container()
+        name = con.name if con is not None else ""
+        if not name:
+            return
+        if (self._vram_split_container == name
+                and (_t.monotonic() - self._vram_split_at) < self._VRAM_REPARSE_SECS):
+            return
+        self._vram_split_container = name
+        self._vram_split_at = _t.monotonic()
+        self.run_vram_breakdown_worker(name)
+
+    @work(exclusive=True, group="vram-split")
+    async def run_vram_breakdown_worker(self, container: str) -> None:
+        try:
+            res = await self._data.vram_breakdown(container)
+        except Exception as exc:  # pragma: no cover - defensive
+            res = {"ok": False, "container": container, "devices": [],
+                   "warnings": [], "error": str(exc)}
+        # Cache the result either way: an ok=False payload renders the rail's
+        # degraded used/total card (the caller checks .ok for the view).
+        self._vram_split = res
+        import time as _t
+        self._vram_split_at = _t.monotonic()
+        try:
+            self.query_one("#rail-status", RailStatus).set_vram_split(
+                res if res.get("ok") else None)
+        except Exception:
+            pass
+
+    def action_estate_vram_cycle(self) -> None:
+        """[G] — cycle the estate-bar VRAM split: estate-wide -> per-GPU."""
+        if not self._vram_split:
+            return
+        try:
+            self.query_one("#rail-status", RailStatus).cycle_vram_view()
+        except Exception:
+            pass
 
     def _note_activity(self) -> None:
         """Reset the idle clock — any key/mouse/action keeps the docker poll out of the
@@ -9655,7 +11083,7 @@ class CockpitApp(App):
         # trusted otherwise) — a banner on the catalog status line ([S] to set).
         from pathlib import Path as _Path
         mdir = self._data.weights_model_dir()
-        note = "" if _Path(mdir).is_dir() else f"⚠ model dir not found ({mdir}) — press [S] to set it"
+        note = "" if _Path(mdir).is_dir() else f"⚠ model dir not found ({mdir}) — press \\[S] to set it"
         pane.set_model_dir_note(note)
         # First-run guide (fresh-rig onboarding): AFTER the weights join, an
         # all-absent catalog + no local measurements → the ONE-TIME dismissable
@@ -10325,7 +11753,31 @@ class CockpitApp(App):
         except Exception:
             return
         if not repo:
-            self.notify("Enter an HF repo (org/Model).", title="① Bring", severity="warning", timeout=3)
+            self.notify(
+                "Enter an HF repo (org/Model) — or paste the path to a compose "
+                "you already have (*.yml).",
+                title="① Bring", severity="warning", timeout=4,
+            )
+            return
+        # #1153: either ① key must accept a compose. Inspect hits the HF API, so
+        # a pasted path would fail with an HF error about something that was
+        # never an HF repo — route it to Route-K exactly as the fit-check does.
+        if self._looks_like_path_shape(repo):
+            # path-SHAPED: validate it as a compose. If it does not exist the
+            # validator says so — far better than an HF lookup failing on
+            # something that was never an HF id.
+            self._validate_compose_in_field()
+            return
+        # A bare term ("deepseek") is NOT a repo id — HF ids are provider/model.
+        # Inspecting one is guaranteed to fail, so treat it as what it plainly
+        # is: a search. Opens the search panel seeded with what was typed.
+        if "/" not in repo.strip("/"):
+            self.notify(
+                f"'{repo}' is not a full repo id (provider/model) — searching "
+                f"Hugging Face instead.",
+                title="① Bring", timeout=4,
+            )
+            self.action_search_hf()
             return
         self.run_bring_inspect(repo)
 
@@ -10356,6 +11808,29 @@ class CockpitApp(App):
         )
         return profile_select_options(opts)
 
+    def _focus_if_present(self, selector: str) -> None:
+        """Focus a widget if it exists and is displayed; silent no-op otherwise."""
+        try:
+            w = self.query_one(selector)
+            if w.display:
+                w.focus()
+        except Exception:
+            pass
+
+    def _scroll_bring_result_into_view(self) -> None:
+        """Bring ① Bring's verdict card on screen.
+
+        At 80x24 the result card sits below the fold after both Inspect and
+        Fit-check — the pane answers the user's question off-screen and nothing
+        indicates there is more to read.  Best-effort: a silent no-op when the
+        pane is not mounted."""
+        try:
+            self.query_one("#lane-bring-result-card", Static).scroll_visible(
+                animate=False
+            )
+        except Exception:
+            pass
+
     def _reveal_funnel_slugs(
         self, artifact_format: str, artifact_gb: Optional[float]
     ) -> None:
@@ -10384,6 +11859,22 @@ class CockpitApp(App):
             # Dogfood r2 — the pre-selected recommendation's details show
             # immediately (updates ride on_select_changed thereafter).
             pane.show_slug_details(self._funnel_slug_details(rec) if rec else "")
+            # Focus what was just revealed, and focus the thing ⏎ actually does.
+            #
+            # This used to focus #lane-bring-profile-input (the config Select).
+            # That put the user in a keyboard trap: the footer and the Modes rail
+            # both say "⏎ Fit-check", but ⏎ on a focused Select opens its
+            # dropdown, so the advertised primary action was unreachable from the
+            # focus the app itself had just set.  The Fit-check button is the
+            # correct target — the Select is one Shift+Tab away and is already
+            # pre-set to the ⭐ recommendation, so the common path (accept the
+            # recommendation, fit-check it) is now zero keys instead of a trap.
+            # Deferred: the widgets are not visible this cycle.
+            def _focus_and_reveal() -> None:
+                self._focus_if_present("#lane-bring-fit-btn")
+                self._scroll_bring_result_into_view()
+
+            self.call_after_refresh(_focus_and_reveal)
             # Bug A (2026-07-09): the §2b size floor can hide EVERY slug — a 54G
             # bf16 repo on a 48G rig — leaving only the ✎ sentinel with NO
             # explanation.  Surface an honest verdict, distinguishing "too big for
@@ -10487,6 +11978,15 @@ class CockpitApp(App):
         if lane_pane is not None:
             lane_pane.show_inventory(inv)
         if inv.error:
+            # A failed inspect used to be a dead end: the error rendered and the
+            # user was left holding a repo id that does not resolve. The next
+            # useful action is almost always "find the right one" — offer it.
+            self.notify(
+                f"Inspect failed for '{repo}'. Opening Hugging Face search — "
+                f"pick the right repo from the results.",
+                title="① Bring", severity="warning", timeout=6,
+            )
+            self.action_search_hf()
             return
         if inv.has_safetensors:
             # §2b-1: the safetensors set is the artifact — slugs reveal now.
@@ -10681,7 +12181,7 @@ class CockpitApp(App):
         # second 20+ GB fetch of the same repo (#617).  [k] cancels.
         if repo in self._active_bring_download():
             self.notify(
-                f"Already downloading {repo} — press [k] to cancel.",
+                f"Already downloading {repo} — press \\[k] to cancel.",
                 title="Download", timeout=4,
             )
             return
@@ -10692,7 +12192,7 @@ class CockpitApp(App):
         if _disk is not None:
             self.notify(
                 f"Already downloading {repo} (pid {_disk.get('pid')}) — "
-                "press [k] to cancel.",
+                "press \\[k] to cancel.",
                 title="Download", timeout=4,
             )
             return
@@ -10727,7 +12227,7 @@ class CockpitApp(App):
         if size_gb and size_gb > 0 and not fits:
             self.notify(
                 f"Disk may be tight ({free_gb:.0f} GB free / ~{need_gb:.0f} needed) "
-                "— starting anyway; free space or change Model Dir [S] if it fails.",
+                "— starting anyway; free space or change Model Dir \\[S] if it fails.",
                 title="Download", severity="warning", timeout=8,
             )
         # One download at a time (shared runner + exclusive worker): starting a
@@ -10864,7 +12364,17 @@ class CockpitApp(App):
             inp.value = repo
             inp.focus()
 
-        self.push_screen(SearchHFScreen(self._data), _fill)
+        # #1153: the modal used to open EMPTY, so anything already typed had to
+        # be typed again. Seed it — unless the field holds a path, which is not
+        # a search term.
+        seed = ""
+        try:
+            v = self.query_one("#lane-bring-url-input", Input).value.strip()
+            if v and not self._looks_like_compose_path(v):
+                seed = v
+        except Exception:
+            pass
+        self.push_screen(SearchHFScreen(self._data, initial_query=seed), _fill)
 
     def action_new_bring(self) -> None:
         """Phase 3 — Ctrl+n: clear ①/② funnel state and start over (no disk wipe)."""
@@ -11150,6 +12660,24 @@ class CockpitApp(App):
         }
         if plan.kind in _SYNC_REPOLL_KINDS:
             self.load_estate()
+        # A registry WRITE changes what the CATALOG lists, and nothing re-read
+        # it — so after ⑤ Promote registered a slug, or the local-layer view
+        # removed/renamed one, the table kept showing the OLD registry until the
+        # user pressed [r] themselves (reported on the first real use of the
+        # #1153 remove).  The estate re-poll above is the wrong instrument: the
+        # rig didn't change, the registry did.  Re-read it on the same
+        # successful-write path (a REFUSED write returned above and never
+        # reaches here).  load_catalog is @work(exclusive, group="catalog"), so
+        # this coalesces with any in-flight load rather than racing it, and it
+        # no-ops safely when the pane isn't mounted.
+        _REGISTRY_REPOLL_KINDS = {
+            "promote_catalog",   # ⑤ registers a NEW local entry
+            "local_remove",      # #1153 local-layer management
+            "local_rename",
+            "local_update",
+        }
+        if plan.kind in _REGISTRY_REPOLL_KINDS:
+            self.load_catalog()
         if plan.kind == "serve":
             if live is not None:
                 # Reveal the transient Run boot pane (Fold 2).  Do NOT print the
@@ -11549,6 +13077,15 @@ class CockpitApp(App):
         if self._surface != "producer":
             return
         self._switch_mode(1)
+        # Emphasise the verb that fits the field's CURRENT contents (empty on a
+        # fresh entry → Search), so the lane never opens with three
+        # identical-looking buttons and no hint where to start.
+        try:
+            self._sync_bring_action_emphasis(
+                self.query_one("#lane-bring-url-input", Input).value
+            )
+        except Exception:
+            pass
 
     def action_toggle_contribute(self) -> None:
         """[C] — the LEAN-view toggle (surface inversion).
@@ -12041,15 +13578,36 @@ class CockpitApp(App):
         except Exception:
             return None
 
+    def _descend_target_for_active_tab(self):
+        """What [down] on the tab bar descends INTO for the active tab.
+
+        The primary DataTable when the tab has one, else the tab's
+        _TAB_FOCUS_FALLBACK widget — Doctor has no table, but its scroll box IS
+        its check list, so [down] must reach it or the list is keyboard-reachable
+        only by Tab.  Kept separate from `_primary_list_for_active_tab`, which is
+        typed to DataTable and shared with the ↑-ascend gate.
+        """
+        table = self._primary_list_for_active_tab()
+        if table is not None:
+            return table
+        tab_id = self._current_subtab() or ""
+        selector = _TAB_FOCUS_FALLBACK.get(tab_id, "")
+        if not selector:
+            return None
+        try:
+            return self.query_one(selector)
+        except Exception:
+            return None
+
     def action_descend_to_content(self) -> None:
         """[down] on the tab bar → move focus INTO the active tab's primary list.
 
         Does NOT reset the list's cursor — the preserved row stays selected.  A
         no-op when there is no primary list (check_action also gates this away)."""
-        table = self._primary_list_for_active_tab()
-        if table is not None:
+        target = self._descend_target_for_active_tab()
+        if target is not None:
             try:
-                table.focus()
+                target.focus()
             except Exception:
                 pass
 
@@ -12085,7 +13643,14 @@ class CockpitApp(App):
             return
         # The screen loads its own detail + cross-rig on mount (so the body query
         # resolves against a fully-mounted modal — Fold 3 cross-rig fold included).
-        self.push_screen(ExplainScreen(entry.slug, model=entry.model, engine=entry.engine))
+        self.push_screen(
+            ExplainScreen(
+                entry.slug,
+                model=entry.model,
+                engine=entry.engine,
+                status=entry.status,
+            )
+        )
 
     def action_model_info(self) -> None:
         """[i] — the local-data model-info popup for the selected catalog row
@@ -12126,8 +13691,91 @@ class CockpitApp(App):
                 self._run_primary()
             elif tab == "tab-orchestration":
                 self._operate_primary()
+            elif tab == "tab-doctor":
+                self._doctor_primary()
         elif self._active_mode == 1:
             self._validate_primary()
+
+    def action_view_compose(self) -> None:
+        """[c] — open the compose behind whatever is focused, READ-ONLY.
+
+        Resolves per surface rather than from one global: Catalog and Containers
+        name a catalog slug whose registry row carries `compose_path`; the lane
+        stages name the file the user brought or staged. When nothing here
+        resolves a path, say which surface has one instead of opening an empty
+        modal."""
+        path, title = self._compose_target_for_focus()
+        if not path:
+            self.notify(
+                "No compose to show here — open one from Catalog (a slug), "
+                "Containers (a running service), or a lane stage after ① Bring.",
+                title="Compose", severity="warning", timeout=5,
+            )
+            return
+        self.push_screen(ComposeViewScreen(path, title=title))
+
+    def _compose_target_for_focus(self) -> tuple[str, str]:
+        """(compose path, human title) for the focused surface — ("","") if none."""
+        from pathlib import Path as _P
+
+        mode = self._active_mode
+        tab = self._current_subtab() if mode == 0 else self._active_validate_tab()
+
+        if mode == 0 and tab == "tab-catalog":
+            try:
+                entry = self.query_one("#catalog-pane", CatalogPane).selected_entry()
+            except Exception:
+                entry = None
+            if entry is not None:
+                row = getattr(entry, "row", None)
+                path = getattr(row, "compose_path", "") or ""
+                if path:
+                    return path, getattr(entry, "slug", "") or _P(path).name
+            return "", ""
+
+        if mode == 0 and tab == "tab-containers":
+            con = self._selected_container()
+            slug = getattr(con, "slug", "") if con is not None else ""
+            if slug:
+                row = next(
+                    (v for v in self._variants if getattr(v, "slug", "") == slug), None
+                )
+                path = getattr(row, "compose_path", "") if row is not None else ""
+                if path:
+                    return path, slug
+            return "", ""
+
+        # Lane: the compose in hand (Route-K) or the one staged for ⑤.
+        if mode == 1:
+            brought = getattr(self, "_bring_swap_compose", "") or ""
+            if brought:
+                return brought, _P(brought).name
+        return "", ""
+
+    def _doctor_primary(self) -> None:
+        """⏎ on Operate · Doctor — run the SELECTED check.
+
+        Dispatches to the very same action the check's hotkey fires, so the
+        confirm gates come along for free: `full_report` and `power_cap_sweep`
+        are confirm-gated at their action, and pressing ⏎ on those cards gets the
+        same dialog `F`/`w` would.  Nothing is special-cased here — a check that
+        gains a gate later gains it on both paths at once.
+        """
+        try:
+            _card_id, action, _label = self.query_one(
+                "#doctor-pane", DoctorPane
+            ).selected_check()
+        except Exception:
+            return
+        # check_action gates the hotkeys (e.g. producer-only verbs); honour the
+        # same verdict for ⏎ so the two paths can never disagree about whether a
+        # check is currently allowed.
+        if self.check_action(action, ()) is False:
+            return
+        handler = getattr(self, f"action_{action}", None)
+        if handler is None:
+            return
+        handler()
 
     def _validate_primary(self) -> None:
         """⏎ in the Bring & Validate lane — context-specific per stage (R3b-1):
@@ -12151,6 +13799,28 @@ class CockpitApp(App):
         elif tab == "tab-promote":
             self.action_promote_catalog()
 
+    def _bring_is_servable(self) -> bool:
+        """Is there a fit-checked target ② Serve could actually take?
+
+        ONE predicate, read by both `check_action("s_key")` and
+        `_bring_advance_to_serve`. They used to disagree: the gate returned True
+        for ① Bring unconditionally, so the footer advertised "s Continue → ②
+        Serve" on a lane that had never been fit-checked, and pressing it only
+        then said "Fit-check a model first". A key the UI offers should be a key
+        that works."""
+        byo = self._last_byo
+        return bool(
+            byo is not None
+            and not getattr(byo, "error", "")
+            and (
+                getattr(byo, "sibling_slug", "")
+                or getattr(byo, "profile_like", "")
+                # #1153 Route-K is servable BY ITSELF — the compose in hand is the
+                # thing served, so it needs no catalog sibling to reproduce.
+                or getattr(byo, "route", "") == "K"
+            )
+        )
+
     def _bring_advance_to_serve(self) -> None:
         """[s] on ① Bring — advance to the pre-armed ② Serve, but ONLY when the
         fit-checked target is servable AND its weights are on disk.  ⏎ stays
@@ -12159,24 +13829,32 @@ class CockpitApp(App):
           - no servable fit-check yet → ask the user to fit-check (⏎) first;
           - weights absent → [D] download is the next step, not ② Serve."""
         byo = self._last_byo
-        servable = bool(
-            byo is not None
-            and not getattr(byo, "error", "")
-            and (getattr(byo, "sibling_slug", "") or getattr(byo, "profile_like", ""))
-        )
-        if not servable:
+        if not self._bring_is_servable():
             self.notify(
                 "Fit-check a model first (⏎ on ① Bring).",
                 title="② Serve", severity="warning", timeout=3,
             )
             return
-        if not self._data.bring_weights_present(getattr(byo, "repo", "")):
+        # #1153: Route-K brought its OWN compose, which points at its own weights.
+        # bring_weights_present only probes c3's pull dir (<HF_HOME>/club3090/pulls),
+        # so weights living anywhere else — /mnt/models/huggingface, the rig
+        # convention — read as "not on disk" and offer a re-download the user does
+        # not need. The probe is meaningless for a compose in hand; skip it.
+        if getattr(byo, "route", "") != "K" and not self._data.bring_weights_present(
+            getattr(byo, "repo", "")
+        ):
             self.notify(
-                "Weights not on disk yet — press [D] to download first.",
+                "Weights not on disk yet — press \\[D] to download first.",
                 title="② Serve", severity="warning", timeout=4,
             )
             return
         self._advance_to_serve()
+
+    def _bring_pane_ready(self) -> None:
+        """Initial action emphasis — before any keystroke the field is empty, so
+        Search is the recommended verb. Without this the pane opens with three
+        identical-looking buttons and no hint where to start."""
+        self._sync_bring_action_emphasis("")
 
     def _advance_to_serve(self) -> None:
         """Advance the Bring & Validate lane from ① Bring to the pre-armed
@@ -12195,6 +13873,16 @@ class CockpitApp(App):
             kind = None
         if kind is None:
             self.notify("No validation step selected.", title="Validate", severity="warning", timeout=3)
+            return
+        # ③ used to open a full confirm dialog with an empty target — "GPUs —",
+        # no model, no URL — and only fail once committed. Say so before the
+        # dialog, and name the step that produces a target.
+        if not (self._target_model or self._target_url):
+            self.notify(
+                "No serving model to validate — finish ② Serve (or start a "
+                "catalog slug from Run & Operate) first.",
+                title="③ Gate", severity="warning", timeout=6,
+            )
             return
         slug = self._target_slug or (self._staged_entry.slug if self._staged_entry else None)
         plan = self._data.validation_plan(
@@ -12527,7 +14215,7 @@ class CockpitApp(App):
         self.stream_container_logs(con.name)  # snapshot — rebases the anchor (Task 4)
         self._log_follow_timer = self.set_interval(_LOG_FOLLOW_PERIOD, self._log_follow_tick)
         self._set_log_follow_title()
-        self.notify("Log follow armed — [f] to pause", title="Logs", timeout=3)
+        self.notify("Log follow armed — \\[f] to pause", title="Logs", timeout=3)
 
     def _log_follow_pause(self) -> None:
         """following → paused: stop the timer (anchor/name kept)."""
@@ -13435,11 +15123,13 @@ class CockpitApp(App):
         hook lives here); the live target is captured by the Operate estate poll
         and remains available via ``_target_obj``.
 
-        Confirm-gated, MOCK-ONLY launch — c3t runs the post-boot evaluator
-        against the live serving model (heavy).  The hand-off carries the SAME
-        ``ServingTarget`` object the Estate poll detected (design §4/§6.6); the
-        launch streams via ``launch_evaluate`` (write runner, NEVER live this
-        phase — conftest blocks the spawn, tests fake it)."""
+        Confirm-gated and REAL: the commit spawns ``scripts/c3t`` through the
+        production write runner and evaluates the live serving model (heavy).
+        This used to be labelled "mock this phase" in four places; the only thing
+        that made it a mock was ``conftest`` blocking the spawn in TESTS, which
+        does nothing in a real run.  The hand-off carries the SAME
+        ``ServingTarget`` object the Estate poll detected (design §4/§6.6) and
+        streams via ``launch_evaluate``."""
         if self._active_mode != 1:
             return
         handoff = self._data.evaluate_handoff(self._target_obj)
@@ -13461,18 +15151,19 @@ class CockpitApp(App):
 
     @work(exclusive=True, group="evaluate")
     async def launch_c3t_evaluate(self) -> None:
-        """Launch c3t scoped to the SHARED ServingTarget, streamed (MOCK-ONLY).
+        """Launch c3t scoped to the SHARED ServingTarget, streamed.
 
-        ⚠️  WIRED-BUT-MOCK-ONLY.  c3t runs tests against the live serving model;
-        the write runner is NEVER executed live this phase (conftest blocks the
-        spawn; tests inject a FakeWriteRunner).  The SAME ``ServingTarget`` the
-        Estate poll captured is passed by identity so c3t evaluates exactly what
-        is running."""
+        ⚠️  THIS RUNS FOR REAL — c3t runs tests against the live serving model
+        through the production write runner.  The former "NEVER executed live
+        this phase (conftest blocks the spawn)" note described the TEST
+        environment only; conftest does not run in a real session.  The SAME
+        ``ServingTarget`` the Estate poll captured is passed by identity so c3t
+        evaluates exactly what is running."""
         live = self._serve_live_pane()
         if live is not None:
             tgt = self._target_obj
             label = getattr(tgt, "model", "") or getattr(tgt, "url", "") or "target"
-            live.append_line(f"[green]▶ c3t evaluate[/green] {label} (mock-only this phase)")
+            live.append_line(f"[green]▶ c3t evaluate[/green] {label}")
 
         def _on_line(text: str) -> None:
             if live is not None:
@@ -13492,9 +15183,187 @@ class CockpitApp(App):
             return
         profile = self._selected_profile_like("#lane-bring-profile-input")
         if not repo:
-            self.notify("Enter an HF repo (org/Model).", title="① Bring", severity="warning", timeout=3)
+            self.notify(
+                "Enter an HF repo (org/Model) — or the path to a compose you "
+                "already have.",
+                title="① Bring", severity="warning", timeout=4,
+            )
+            return
+        # #1153 Route-K: the most common BYOM position is "weights on disk +
+        # a working compose", and the funnel had no door for it. A value that
+        # looks like a compose FILE takes the K route; anything else is an HF
+        # repo exactly as before.
+        if self._looks_like_path_shape(repo):
+            self._validate_compose_in_field()
+            return
+        if "/" not in repo.strip("/"):
+            self.notify(
+                f"'{repo}' is not a full repo id (provider/model) — searching "
+                f"Hugging Face instead.",
+                title="① Bring", timeout=4,
+            )
+            self.action_search_hf()
             return
         self.run_byo_check(repo, profile)
+
+    @staticmethod
+    def _looks_like_path_shape(value: str) -> bool:
+        """Does this LOOK like a filesystem path? (no disk access)
+
+        Separate from _looks_like_compose_path, which additionally requires the
+        file to EXIST — correct for deciding what to DO, wrong for deciding what
+        to EMPHASISE: while you are still typing `/mnt/models/foo.yml` the file
+        does not exist yet, so an existence test keeps pointing at "Inspect HF"
+        for something that is plainly not an HF id.
+
+        An HF repo id is `provider/model` — exactly ONE slash, no extension, no
+        leading / ~ or . — so any of these means "path":
+          · 2+ slashes            (/mnt/models/x.yml)
+          · a .yml/.yaml suffix   (compose.yml)
+          · a leading / ~ ./ ../
+        """
+        v = (value or "").strip().strip('"').strip("'")
+        if not v:
+            return False
+        if v.lower().endswith((".yml", ".yaml")):
+            return True
+        if v.startswith(("/", "~", "./", "../")):
+            return True
+        return v.strip("/").count("/") >= 2
+
+    @staticmethod
+    def _looks_like_compose_path(value: str) -> bool:
+        """A compose path, not an HF repo (#1153). Deliberately narrow: it must
+        END in .yml/.yaml AND exist on disk. `org/Model` never matches, and a
+        typo'd path falls through to the HF check, whose error names the repo —
+        better than a confident 'file not found' about something that was never
+        meant to be a file."""
+        from pathlib import Path as _Path
+
+        v = (value or "").strip().strip('"').strip("'")
+        if not v.lower().endswith((".yml", ".yaml")):
+            return False
+        try:
+            return _Path(v).expanduser().is_file()
+        except OSError:
+            return False
+
+    def _validate_compose_in_field(self) -> None:
+        """[Validate compose] on ① — the explicit compose verb (#1153).
+
+        Validation used to happen implicitly, with its result announced in a
+        TOAST: the weakest surface there is, gone in seconds and absent from the
+        pane a user is reading. Render what the compose actually states, and what
+        it does not, into the result card — then ② unlocks."""
+        try:
+            raw = self.query_one("#lane-bring-url-input", Input).value.strip()
+        except Exception:
+            return
+        if not raw:
+            self.notify(
+                "Paste the path to your compose file (*.yml) first.",
+                title="① Bring", severity="warning", timeout=4,
+            )
+            return
+        from pathlib import Path as _Path
+
+        p = _Path(raw.strip('"').strip("'")).expanduser()
+        if not p.is_file():
+            self._set_bring_card(
+                f"[red]Not a file:[/red] {p}\n"
+                "[dim]Paste a path to a compose YAML. For a HuggingFace model use "
+                "[b]Inspect HF[/b] instead.[/dim]"
+            )
+            return
+        if p.suffix.lower() not in (".yml", ".yaml"):
+            self._set_bring_card(
+                f"[red]Not a compose:[/red] {p.name} is not .yml/.yaml"
+            )
+            return
+        self._bring_compose_in_hand(str(p))
+
+    def _set_bring_card(self, markup: str) -> None:
+        """Write into ① Bring's result card — the surface the user is reading."""
+        try:
+            self.query_one("#lane-bring-result-card", Static).update(markup)
+        except Exception:
+            pass
+
+    def _bring_compose_in_hand(self, path: str) -> None:
+        """① Route-K — ingest a compose the user already wrote (#1153).
+
+        Reads what the compose mechanically states (engine/model/ctx/KV/tp/port)
+        and arms ② with it. No download, no HF call, no catalog reproduction: the
+        compose IS the thing that will be served, and later the thing ⑤ registers."""
+        from pathlib import Path as _Path
+
+        from club3090_cockpit.data import ByoResult, derive_compose_facts
+
+        p = _Path(path.strip().strip('"').strip("'")).expanduser()
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as exc:
+            self.notify(f"Cannot read {p}: {exc}", title="① Bring",
+                        severity="error", timeout=6)
+            return
+        facts = derive_compose_facts(text, path=str(p))
+        if not facts.ok:
+            self.notify(
+                f"Not usable as a compose: {facts.error}",
+                title="① Bring", severity="error", timeout=6,
+            )
+            return
+        self._bring_swap_compose = str(p)
+        self._bring_compose_facts = facts
+        res = ByoResult(
+            repo=facts.served_name or p.stem,
+            profile_like="",
+            route="K",
+            arch=facts.engine,
+            eligible=True,
+            fit_verdict="compose in hand",
+            note=(
+                f"Route-K — your compose: {p.name} · engine {facts.engine or '?'}"
+                + (f" · ctx {facts.max_ctx}" if facts.max_ctx else "")
+                + (f" · KV {facts.kv_dtype}" if facts.kv_dtype else "")
+                + (f" · TP {facts.tp}" if facts.tp else "")
+                + (f" · port {facts.port}" if facts.port else "")
+                + ". ② Serve runs THIS file; ⑤ registers it."
+            ),
+        )
+        self._last_byo = res
+        try:
+            self.query_one("#lane-bring-pane", LaneBringPane).populate(res)
+        except Exception:
+            pass
+        # What it states, and what it does NOT — a validation that only says
+        # "ok" teaches nothing about what ⑤ will still have to ask for.
+        rows = [
+            ("engine", facts.engine), ("model", facts.model_path),
+            ("served name", facts.served_name), ("ctx", facts.max_ctx),
+            ("KV", facts.kv_dtype), ("TP", facts.tp), ("port", facts.port),
+        ]
+        got = "  ".join(f"[b]{k}[/b] {v}" for k, v in rows if v)
+        missing = [k for k, v in rows if not v]
+        card = (
+            f"[green]✓ compose validated[/green]  {p.name}\n{got}\n"
+            + (f"[dim]not stated in the compose: {', '.join(missing)} — "
+               f"⑤ Promote will ask.[/dim]\n" if missing else "")
+            + "[dim]② Serve runs THIS file. ⑤ Promote registers it "
+              "(you choose the slug + port there).[/dim]"
+        )
+        self._set_bring_card(card)
+        self.notify(
+            f"Route-K: {p.name} validated — ② Serve will run this compose.",
+            title="① Bring", timeout=5,
+        )
+        # ARM ② before jumping to it — otherwise the pane renders its
+        # "arm from ① Bring" empty state while the action serves fine.
+        try:
+            self._arm_serve_pane(res)
+        except Exception:
+            pass
+        self._advance_to_serve()
 
     def action_serve_untested(self) -> None:
         """[g] / ⏎ in the Bring & Validate lane ② Serve: serve an untested
@@ -13535,8 +15404,11 @@ class CockpitApp(App):
         # the sibling compose (--model at the BROUGHT weights + MTP per the head),
         # serve THAT directly — not a reproduction of the sibling's own catalog
         # compose. This is the bring-your-own weight-swap, now wired.
+        # #1153 Route-K rides the branch Route-C already has: ② serves a compose
+        # path verbatim via `docker compose -f <path> up -d`. Nothing else in
+        # ②③④ changes — the gate and measure stages are endpoint-driven.
         swap_compose = getattr(self, "_bring_swap_compose", "")
-        if swap_compose and getattr(self._last_byo, "route", "") == "C":
+        if swap_compose and getattr(self._last_byo, "route", "") in ("C", "K"):
             self._serve_generated_compose(swap_compose)
             return
         # Route-C with the weights ALREADY on disk but no swap compose emitted yet
@@ -13618,7 +15490,7 @@ class CockpitApp(App):
         if not swap_compose:
             self.notify(
                 "② Serve: apply-swap --emit-only produced no compose — see the log. "
-                "You can still press [D] to download + emit.",
+                "You can still press \\[D] to download + emit.",
                 title="② Serve", severity="warning", timeout=6,
             )
             return
@@ -13706,7 +15578,18 @@ class CockpitApp(App):
                 or getattr(byo, "profile_like", "")
             )
             port = self._host_port_for_slug(slug)
-        self.query_one("#lane-serve-pane", LaneServePane).set_armed(
+        pane = self.query_one("#lane-serve-pane", LaneServePane)
+        # Route-K: the compose IS the target, so give the pane its filename and
+        # the port the file itself declares (not a catalog slug's).
+        if getattr(byo, "route", "") == "K":
+            facts = getattr(self, "_bring_compose_facts", None)
+            from pathlib import Path as _P
+            pane._route_k_compose = (
+                _P(getattr(self, "_bring_swap_compose", "") or "").name or "your compose"
+            )
+            if facts is not None and getattr(facts, "port", "").isdigit():
+                port = int(facts.port)
+        pane.set_armed(
             byo,
             self._armed_overrides_defaults(byo),
             host_port=port,
@@ -13739,7 +15622,7 @@ class CockpitApp(App):
             weights_file = ""
         if not weights_file:
             self.notify(
-                "No .gguf on disk yet — press [D] to download the selected quant.",
+                "No .gguf on disk yet — press \\[D] to download the selected quant.",
                 title="② Serve", severity="warning", timeout=5,
             )
             return
@@ -13815,7 +15698,15 @@ class CockpitApp(App):
         if byo is not None and not getattr(byo, "error", ""):
             brought = (getattr(byo, "repo", "") or "").rsplit("/", 1)[-1]
         if url or model:
-            src = "from ② Serve" if brought else "Catalog"
+            # `brought` is truthy after ANY fit-check, so this used to claim
+            # "from ② Serve" while a completely unrelated catalog slug was the
+            # thing serving — mis-attributing the target's provenance on the one
+            # screen whose job is to say what is about to be validated. Claim ②
+            # only when the serving model actually IS the brought one.
+            from_serve = bool(
+                brought and self._identity_matches(self._norm_identity(brought), model or url)
+            )
+            src = "from ② Serve" if from_serve else "Catalog"
             who = model or slug or brought or "serving"
             pane.set_target_banner(
                 f"Target: [cyan]{who}[/cyan]  @  [green]{url or '—'}[/green]  "
@@ -13826,6 +15717,42 @@ class CockpitApp(App):
                 "[dim]Target: (no serving model yet — finish ② Serve or start a "
                 "catalog slug)[/dim]"
             )
+
+    @staticmethod
+    def _norm_identity(value: str) -> str:
+        """Lowercase alphanumeric core of a model name, for loose matching.
+
+        Served names, HF repo tails and rebench tags spell the same model
+        differently (`Qwen3.8-Flash-Next` / `qwen3.8-flash-next` /
+        `qwen38_flash_next-20260903`), so compare on the alphanumeric core."""
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+    def _brought_identity(self) -> str:
+        """Normalised identity of the model ① Bring is holding, or ""."""
+        byo = self._last_byo
+        if byo is None:
+            return ""
+        repo = getattr(byo, "repo", "") or ""
+        tail = repo.rsplit("/", 1)[-1] if repo else ""
+        if not tail:
+            # Route-K brought a compose, not a repo — its served name is the
+            # only identity it has.
+            facts = getattr(self, "_bring_compose_facts", None)
+            tail = getattr(facts, "served_name", "") if facts is not None else ""
+        return self._norm_identity(tail)
+
+    def _identity_matches(self, brought: str, candidate: str) -> bool:
+        """Does `candidate` (a served name, URL or run tag) name the brought model?
+
+        Substring either way: a run tag carries a date suffix, and a served name
+        is often the repo tail with the quant dropped. Requires a non-trivial
+        `brought` so a short or empty identity cannot match everything."""
+        if not brought or len(brought) < 4:
+            return False
+        cand = self._norm_identity(candidate)
+        if not cand:
+            return False
+        return brought in cand or cand in brought
 
     def _refresh_promote_prereqs(self) -> None:
         """Phase 2 — ⑤ prerequisites checklist from live funnel state."""
@@ -13843,11 +15770,25 @@ class CockpitApp(App):
                 )
             except Exception:
                 weights_ok = False
-        served_ok = bool(self._target_url or self._target_model)
+        # ⚠️ These three used to be RIG-GLOBAL: served_ok was true if ANYTHING was
+        # serving, measured_ok if ANY rebench tag existed on the rig, gated_ok if
+        # ANY step had passed this session against ANY target. On a rig with
+        # history ⑤ therefore opened showing ✓ served / ✓ measured / ✓ gated for a
+        # model that had earned none of them — and that display is what the user
+        # promotes on. They are now scoped to the BROUGHT model, and when identity
+        # cannot be established they read ○ rather than ✓: under-claiming is
+        # recoverable, a false ✓ is not.
+        brought = self._brought_identity()
+        served_ok = bool(
+            brought
+            and self._identity_matches(brought, self._target_model or self._target_url)
+        )
         gated_ok = False
         try:
             run = self.query_one("#validate-run-pane", ValidateRunPane)
-            gated_ok = any(
+            # Same scoping: a ladder step gates whatever is SERVING, so a pass
+            # only speaks for the brought model when that is what is served.
+            gated_ok = served_ok and any(
                 st in ("passed", "warn")
                 for st in (getattr(run, "_outcomes", {}) or {}).values()
             )
@@ -13856,7 +15797,10 @@ class CockpitApp(App):
         measured_ok = False
         try:
             ev = self.query_one("#validate-evidence-pane", ValidateEvidencePane)
-            measured_ok = bool(getattr(ev, "_tags", None))
+            measured_ok = bool(brought) and any(
+                self._identity_matches(brought, getattr(t, "tag", ""))
+                for t in (getattr(ev, "_tags", None) or [])
+            )
         except Exception:
             pass
         pane.set_prereqs(
@@ -13911,7 +15855,32 @@ class CockpitApp(App):
             )
             return
         meas = self._measurement_for_promote()
-        scaffold = self._data.promote_scaffold(byo=self._last_byo, measurement=meas)
+        # #1156: the scaffold's spec.compose.content was NEVER filled — the app
+        # called promote_scaffold() without compose_text, data.py defaulted it to
+        # "", and promote.py refuses an empty content (exit 3). Every "Write LOCAL
+        # layer" from this screen was refused, and the refusal only reached the
+        # RunLog, so it read as a success. Pass the compose ②③④ actually served.
+        compose_text, _compose_src = self._promote_compose_text()
+        scaffold = self._data.promote_scaffold(
+            byo=self._last_byo, measurement=meas, compose_text=compose_text,
+        )
+        # #1153: for Route-K the compose ALREADY declares the port that will be
+        # served. The scaffold's deterministic 202xx value would register a
+        # different port than the thing actually running — a mismatch the user
+        # would only find at launch. The served file wins.
+        facts = getattr(self, "_bring_compose_facts", None)
+        if (
+            getattr(self._last_byo, "route", "") == "K"
+            and facts is not None
+            and getattr(facts, "port", "")
+            and scaffold.computed
+        ):
+            try:
+                kw = (scaffold.spec.setdefault("registry_entry", {})
+                      .setdefault("kwargs", {}))
+                kw["default_port"] = int(facts.port)
+            except (ValueError, AttributeError):
+                pass
         if not scaffold.computed:
             self.notify(
                 f"Cannot scaffold: {scaffold.error or 'incomplete BYO facts'}",
@@ -13925,10 +15894,8 @@ class CockpitApp(App):
         self.push_screen(
             PromoteScaffoldScreen(
                 scaffold,
-                on_stage_write=lambda layer, spec: self.push_screen(
-                    ConfirmActionScreen(
-                        self._data.promote_write_plan(scaffold, layer=layer, spec=spec)
-                    )
+                on_stage_write=lambda layer, spec: self._stage_promote_write(
+                    scaffold, layer, spec
                 ),
                 on_export_pr=lambda spec: self.push_screen(
                     ConfirmActionScreen(
@@ -13938,6 +15905,88 @@ class CockpitApp(App):
                 ),
             )
         )
+
+    def _has_local_entries(self) -> bool:
+        """Is there anything in the local layer to manage?
+
+        Drives whether [ctrl+l] is advertised in the footer. A user who has
+        registered a model looks for the remove action ON THE ROW and does not
+        find it — the affordance existed but only behind a hidden key, which is
+        barely shipping it. Showing the binding exactly when it does something is
+        the cheap half of that fix."""
+        try:
+            from scripts.lib.profiles.compose_registry import local_entries
+
+            return bool(local_entries())
+        except Exception:
+            return False
+
+    def action_local_layer(self) -> None:
+        """[L] — list the LOCAL layer and act on it (#1153)."""
+        try:
+            from scripts.lib.profiles.compose_registry import local_entries
+
+            entries = local_entries()
+        except Exception:
+            entries = []
+        self.push_screen(
+            LocalLayerScreen(entries, on_amend=self._stage_local_amend)
+        )
+
+    def _stage_local_amend(self, kind: str, slug: str, kw: dict) -> None:
+        """Route a local-layer amendment through the SAME confirm gate as every
+        other repo write. The screen only expresses intent; nothing mutates until
+        the user confirms, and the executor (catalog.sh) re-asserts every refusal
+        independently — a curated slug is unreachable from here regardless."""
+        try:
+            plan = self._data.local_amend_plan(kind, slug, **(kw or {}))
+        except ValueError as exc:
+            self.notify(str(exc), title="Local layer", severity="warning", timeout=5)
+            return
+        self.push_screen(ConfirmActionScreen(plan))
+
+    def _stage_promote_write(self, scaffold, layer: str, spec: dict) -> None:
+        """Gate the ⑤ write on having a compose to register (#1156).
+
+        The PREVIEW is allowed without one — ⑤ is advertised as a preview and [P]
+        must still open after a bare fit-check. The WRITE is not: promote.py
+        refuses an empty ``spec.compose.content`` (exit 3), and that refusal used
+        to reach only the RunLog, so a doomed write reported as "dispatched".
+        Say it here, where the user is looking."""
+        if not ((spec.get("compose") or {}).get("content") or "").strip():
+            self.notify(
+                "Nothing to register: ⑤ writes the compose that was actually "
+                "served — serve the model at ② first, then promote.",
+                title="⑤ Promote",
+                severity="warning",
+                timeout=7,
+            )
+            return
+        self.push_screen(
+            ConfirmActionScreen(
+                self._data.promote_write_plan(scaffold, layer=layer, spec=spec)
+            )
+        )
+
+    def _promote_compose_text(self) -> tuple[str, str]:
+        """The compose ⑤ should register — the one ②③④ actually served (#1156).
+
+        Returns (text, source-path). ("", "") when nothing has been served, which
+        the caller turns into a visible refusal rather than a doomed write plan.
+
+        NOTE: only the CONTENT travels. `sibling_compose_path` is deliberately NOT
+        passed — it overrides the DESTINATION path, and promote.py requires a local
+        write to land under scripts/lib/profiles-local/composes/ (it refuses
+        anything outside the layer)."""
+        from pathlib import Path as _Path   # module-scope Path is not imported here
+
+        path = getattr(self, "_bring_swap_compose", "") or ""
+        if not path:
+            return "", ""
+        try:
+            return _Path(path).read_text(encoding="utf-8"), path
+        except OSError:
+            return "", path
 
     def _measurement_for_promote(self) -> Optional[Measurement]:
         """Best-effort Evidence measurement for the Promote scaffold: the matched
@@ -14072,6 +16121,79 @@ class CockpitApp(App):
         except Exception:
             pass
 
+    def _focus_tab_primary(self, widget_id: str, origin_screen: object = None) -> None:
+        """Deferred body of the tab-activation focus move (see FIX B below).
+
+        Runs one render cycle AFTER ``on_tabbed_content_tab_activated`` decided to
+        move focus into the newly active tab's primary widget, so it MUST re-check
+        the decision against live state rather than trust the one taken at event
+        time.
+
+        FIX B (deferred half) — the "don't yank focus off the TAB BAR" guard is
+        evaluated twice: once in the handler (cheap, skips scheduling) and again
+        HERE.  Evaluating it only at event time was a real ordering bug: between
+        the ``TabActivated`` and this callback, focus can legitimately land on the
+        tab bar — the outgoing pane's focused widget is hidden and Textual
+        re-homes focus, the user Tab/Shift+Tabs (or clicks) onto the bar while the
+        UI is busy, or a caller calls ``.focus()`` (itself deferred via
+        ``call_later``, so it can drain either side of this callback).  Whenever
+        that happened, this callback overrode it and dragged the user back down
+        into the list.  Re-checking here is what makes "the tab bar keeps focus"
+        an invariant instead of a race — and it is why the keyboard-economy tests
+        (one Tab from the tab bar reaches the primary list) are deterministic
+        rather than order-dependent.
+
+        Query WITHOUT a type constraint.  This used to be
+        ``query_one(widget_id, DataTable)``, which raised for any non-DataTable
+        target and was swallowed by the ``except`` — so the Doctor entry
+        (#doctor-scroll, a focusable ScrollableContainer: the scroll box IS the
+        content there) silently focused nothing and left ↓/PgDn dead on a page
+        that overflows at 46 rows.
+
+        #3/NH1: the Containers tab is CALM on entry — focus the table but do NOT
+        auto-load the highlighted row's drill detail.  No arming is needed here:
+        the row-0 echo from the entry populate fired while Orchestration was
+        active (guarded out of the highlight handler), and focusing the table does
+        not re-fire a reaching RowHighlighted.  The flag is managed entirely by
+        the populate path ([r]-refresh) + the highlight handler.
+        """
+        # FIX B (screen half) — bail if a screen was pushed after we were scheduled.
+        # ``self.set_focus`` acts on the ACTIVE screen, and ``self.query_one`` will
+        # happily find a widget on the screen underneath a modal.  Between the
+        # ``TabActivated`` and this callback a modal can be pushed (``?`` help, the
+        # first-run screen), and without this guard we reach past it, steal focus
+        # from the modal, and its own bindings (``escape`` to dismiss, ``q``
+        # suppression) stop receiving keys — the modal is left on screen with no way
+        # out.  The focus guard below cannot catch this: focus is legitimately NOT a
+        # ``Tabs`` at that moment, it is the modal's own widget.
+        if origin_screen is not None and self.screen is not origin_screen:
+            return
+        if isinstance(self.focused, Tabs):
+            return
+        try:
+            # ``self.set_focus`` (App -> Screen.set_focus), NOT ``widget.focus()``.
+            # ``Widget.focus()`` does not focus: it queues ``set_focus`` on the APP
+            # message queue via ``call_later``.  That second deferral re-opens the
+            # very window the guard above closes — this callback is drained off the
+            # SCREEN's post-refresh callback list, so it can run while a
+            # ``.focus()`` queued earlier by a caller is still sitting unapplied on
+            # the app queue: the guard reads the stale focus, misses the tab bar,
+            # and our own queued focus then lands BEHIND the caller's and wins.
+            # Setting focus synchronously makes the check and its effect one
+            # indivisible step.  Same acceptance rule either way (Screen.set_focus
+            # honours ``widget.focusable``), and we are already one render cycle
+            # late, so the pane is displayed and the target is focusable.
+            # Query from the ACTIVE SCREEN, not the app.  ``App.query_one`` searches
+            # the whole DOM and will find the tab's widget on the screen underneath a
+            # modal; ``Screen.query_one`` cannot, so a modal that does not contain
+            # ``widget_id`` raises NoMatches and we correctly do nothing.  This is the
+            # case the screen-identity guard above cannot catch: the first-run screen
+            # is pushed BEFORE the tab activation is scheduled, so origin and active
+            # screen are the same object and only the query scope distinguishes them.
+            self.set_focus(self.screen.query_one(widget_id))
+        except Exception:
+            pass
+
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Refresh footer bindings whenever a sub-tab changes so context keys
         show/hide correctly (e.g. [/] appears only on Run·Catalog).  Also move
@@ -14166,21 +16288,35 @@ class CockpitApp(App):
         # their table as before.
         if isinstance(self.focused, Tabs):
             return
-        widget_id = _focus_map.get(tab_id, "")
+        widget_id = _focus_map.get(tab_id, "") or _TAB_FOCUS_FALLBACK.get(tab_id, "")
         if widget_id:
-            def _do_focus() -> None:
-                try:
-                    self.query_one(widget_id, DataTable).focus()
-                except Exception:
-                    pass
-                # #3/NH1: the Containers tab is CALM on entry — focus the table
-                # but do NOT auto-load the highlighted row's drill detail.  No
-                # arming is needed here: the row-0 echo from the entry populate
-                # fired while Orchestration was active (guarded out of the
-                # highlight handler), and focusing the table does not re-fire a
-                # reaching RowHighlighted.  The flag is managed entirely by the
-                # populate path ([r]-refresh) + the highlight handler.
-            self.call_after_refresh(_do_focus)
+            self.call_after_refresh(self._focus_tab_primary, widget_id, self.screen)
+            return
+
+        # No primary list for this tab — the table-less lane stages (① Bring /
+        # ② Serve / ⑤ Promote) and mode-0 Doctor.  The comment above says focus
+        # should simply STAY on the tab bar here, and that is right whenever the
+        # focused widget survives the switch.  It does NOT when the OUTGOING tab
+        # owned it: a user typing in ① Bring's repo field who presses [s] to
+        # advance to ② Serve has their focused Input hidden, `app.focused` goes
+        # None, and the next Tab lands on the ModeSwitcher at the very top of the
+        # DOM instead of anywhere in the stage they just opened.  Re-home to the
+        # lane tab bar — the same target `_focus_mode_primary` uses for mode 1,
+        # and a ContentTabs rather than an Input so 1/2 and [ ] keep routing.
+        #
+        # Guarded on `focused is None` so this can only ever FILL a hole; it must
+        # never yank focus off a widget that is still live.
+        def _rehome_focus() -> None:
+            if self.focused is not None:
+                return
+            try:
+                bar = self._active_tab_bar()
+                if bar is not None:
+                    bar.focus()
+            except Exception:
+                pass
+
+        self.call_after_refresh(_rehome_focus)
 
     # ── Widget event handlers ─────────────────────────────────────────────────────────
 
@@ -14254,6 +16390,15 @@ class CockpitApp(App):
                 custom.add_class("profile-custom-hidden")
         except Exception:
             pass
+        # Before the registry-derived default has been applied, any Changed is the
+        # initial-mount/placeholder seeding — not a user pick.
+        #
+        # This guard used to sit BELOW the detail-card update, so seeding the
+        # (hidden) Select painted a full catalog slug card — "vllm/dual · ✅
+        # production · ctx 262K · port 8010" — onto a blank ① Bring page before
+        # the user had typed anything, implying a selection they never made.
+        if not getattr(self, "_profile_default_applied", False):
+            return
         # Dogfood r2 — the detail card follows the selection (a custom-slug
         # sentinel has no catalog row → hide).
         try:
@@ -14264,10 +16409,6 @@ class CockpitApp(App):
                 pane.show_slug_details(self._funnel_slug_details(str(new_val)))
         except Exception:
             pass
-        # Before the registry-derived default has been applied, any Changed is the
-        # initial-mount/placeholder seeding — not a user pick.
-        if not getattr(self, "_profile_default_applied", False):
-            return
         # Blank / no-selection sentinel isn't a meaningful pick.
         if new_val is None or new_val is Select.BLANK:
             return
@@ -14483,6 +16624,8 @@ class CockpitApp(App):
             self._trigger_lane_inspect()
         elif bid == "lane-bring-search-btn":
             self.action_search_hf()
+        elif bid == "lane-bring-validate-compose-btn":
+            self._validate_compose_in_field()
         elif bid == "lane-bring-continue-btn":
             self._bring_advance_to_serve()
         elif bid == "lane-serve-btn":
@@ -14508,6 +16651,42 @@ class CockpitApp(App):
         if event.input.id == "catalog-filter":
             try:
                 self.query_one("#catalog-pane", CatalogPane).set_filter(event.value)
+            except Exception:
+                pass
+        elif event.input.id == "lane-bring-url-input":
+            self._sync_bring_action_emphasis(event.value)
+
+    def _sync_bring_action_emphasis(self, value: str = "") -> None:
+        """Point at the action that fits what is in the field.
+
+        The three ① actions used to differ in colour for a STATIC reason —
+        "Inspect HF" carried variant="primary" and the others did not — so the
+        emphasis said nothing about what you should do next, and read as "this
+        is the button that works". Keep all three VISIBLE (a hidden action is one
+        nobody learns exists) and move the emphasis instead:
+
+            empty / a bare term  -> Search HF…      (you must find it first)
+            provider/model       -> Inspect HF
+            a *.yml path         -> Validate compose
+        """
+        v = (value or "").strip()
+        if self._looks_like_path_shape(v):
+            # SHAPE, not existence — the emphasis must track what you are typing,
+            # not whether you have finished typing it.
+            want = "lane-bring-validate-compose-btn"
+        elif v and "/" in v.strip("/"):
+            want = "lane-bring-inspect-btn"
+        else:
+            want = "lane-bring-search-btn"
+        for bid in (
+            "lane-bring-search-btn",
+            "lane-bring-inspect-btn",
+            "lane-bring-validate-compose-btn",
+        ):
+            try:
+                self.query_one(f"#{bid}", Button).variant = (
+                    "primary" if bid == want else "default"
+                )
             except Exception:
                 pass
 

@@ -36,7 +36,12 @@ def root(tmp_path):
         shutil.copytree(
             REPO / rel,
             tmp_path / rel,
-            ignore=shutil.ignore_patterns("__pycache__"),
+            # #1142: `models/` accumulates ROOT-OWNED torch_compile caches written
+            # by containers, and copytree dies on them with Permission denied —
+            # taking every test in this file down on any rig that has served a
+            # model. They are pure build artifact (1 tracked file under those
+            # paths), so skip them.
+            ignore=shutil.ignore_patterns("__pycache__", "cache"),
         )
     return tmp_path
 
@@ -249,6 +254,95 @@ class TestCoreGate:
         assert "my-model" not in (
             root / "scripts/lib/profiles/registry.yaml"
         ).read_text()
+
+    # ── #1142 item 6: the written layer must be stated, and the default posed ──
+
+    def test_promote_ok_states_the_layer(self, root):
+        """PROMOTE_OK alone never said WHERE the model went."""
+        res = _run_cli(root, _spec())
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "[layer=local]" in res.stdout, res.stdout
+
+    def test_core_write_states_the_layer_too(self, root):
+        res = _run_cli(
+            root, _spec(layer_local=False), "--layer", "core",
+            env_extra={"C3_ALLOW_CORE_PROMOTE": "1"},
+        )
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "[layer=core]" in res.stdout, res.stdout
+
+    def test_no_confirm_when_stdin_is_not_a_tty(self, root):
+        """The confirm must never fire for scripts, CI or the cockpit — which
+        always passes --layer explicitly (services.py) and has its own gate."""
+        res = _run_cli(root, _spec())          # no --layer, stdin not a TTY
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "write the LOCAL layer?" not in res.stderr
+        assert "write the LOCAL layer?" not in res.stdout
+
+    # ── BYOM ports must not land in the curated band ────────────────────────
+    #
+    # A local slug on a curated port turns the repo's OWN
+    # test-compose-port-conflicts guard red on the user's checkout, and its
+    # remediation text invites reassigning "one side" — i.e. editing a curated
+    # entry they must never touch. Refuse at promote time instead.
+
+    def test_local_port_in_curated_band_is_refused(self, root):
+        spec = _spec()
+        spec["registry_entry"]["kwargs"]["default_port"] = 8101  # dual-ultrafast
+        res = _run_cli(root, spec)
+        assert res.returncode == promote.EXIT_COLLISION, res.stdout + res.stderr
+        assert "already used by the curated catalog" in res.stderr
+        assert "202xx" in res.stderr
+        # it must NAME the deterministic replacement, not just complain
+        import zlib
+        assert str(20200 + (zlib.crc32(b"my-model") % 100)) in res.stderr
+        assert not (root / "scripts/lib/profiles-local/registry.local.json").exists()
+
+    def test_local_port_outside_the_curated_band_is_fine(self, root):
+        res = _run_cli(root, _spec())          # the fixture already uses 20242
+        assert res.returncode == 0, res.stderr + res.stdout
+
+    # ── #1142: the repo-root .env must reach the gate ───────────────────────
+    #
+    # Before the fix these tools read only the real environment, so a maintainer
+    # putting C3_ALLOW_CORE_PROMOTE=1 in .env got a SILENT no-op: no error, no
+    # effect, and a core promote that kept refusing for no visible reason.
+
+    def test_core_gate_honoured_from_dotenv(self, root):
+        """.env alone satisfies the gate — and the tool SAYS where it came from."""
+        (root / ".env").write_text(
+            "# maintainer rig\nexport C3_ALLOW_CORE_PROMOTE=1\n", encoding="utf-8"
+        )
+        res = _run_cli(root, _spec(layer_local=False), "--layer", "core")
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "PROMOTE_OK" in res.stdout
+        assert "read from" in res.stderr and "C3_ALLOW_CORE_PROMOTE" in res.stderr
+
+    def test_dotenv_does_not_override_the_real_environment(self, root):
+        """Environment WINS over .env — the shell-launcher precedence."""
+        (root / ".env").write_text("C3_ALLOW_CORE_PROMOTE=1\n", encoding="utf-8")
+        res = _run_cli(
+            root, _spec(layer_local=False), "--layer", "core",
+            env_extra={"C3_ALLOW_CORE_PROMOTE": "0"},
+        )
+        assert res.returncode == promote.EXIT_COLLISION
+        assert "maintainer-gated" in res.stderr
+
+    def test_dotenv_absent_or_malformed_still_refuses_cleanly(self, root):
+        """A junk .env must neither crash the tool nor open the gate."""
+        (root / ".env").write_text(
+            "not-a-pair\n\n#c\nC3_ALLOW_CORE_PROMOTE=0\n", encoding="utf-8"
+        )
+        res = _run_cli(root, _spec(layer_local=False), "--layer", "core")
+        assert res.returncode == promote.EXIT_COLLISION
+        assert "maintainer-gated" in res.stderr
+        assert "Traceback" not in res.stderr
+
+    def test_local_layer_needs_no_dotenv_and_stays_the_default(self, root):
+        """The safe path is unaffected by any of this."""
+        res = _run_cli(root, _spec())
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "C3_ALLOW_CORE_PROMOTE" not in res.stderr
 
     def test_core_with_flag_writes_curated_catalog(self, root):
         res = _run_cli(

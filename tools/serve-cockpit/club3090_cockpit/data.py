@@ -2374,6 +2374,295 @@ def _quant_slug_for_arch(byo: Optional["ByoResult"]) -> str:
     return "autoround-int4"
 
 
+# Compose `Status:` header emoji → registry status word.  DUPLICATED from
+# scripts/lib/profiles/compose_registry.COMPOSE_STATUS_EMOJI on purpose: data.py
+# is stdlib-only and importable on the launcher's no-PyYAML path, so it must not
+# import the profiles package.  `test_status_emoji_map_parity` asserts the two
+# stay identical.
+COMPOSE_STATUS_EMOJI = {
+    "✅": "production",
+    "⚠️": "caveats",
+    "🧪": "experimental",
+    "🐣": "incubating",
+    "👁️": "preview",
+    "⏸️": "upstream-gated",
+    "🗑️": "deprecated",
+}
+
+# Statuses whose profile header MUST carry a Caveats: line (AGENTS.md Status enum).
+_CAVEATS_REQUIRED = frozenset({"caveats", "incubating", "preview", "upstream-gated", "deprecated"})
+
+# Canonical field order of the `# Profile (at-a-glance):` block.
+_HEADER_FIELDS = (
+    "Model", "Topology", "Drafter", "KV", "Vision", "Max ctx", "Genesis",
+    "Status", "Caveats", "Quality", "Best for",
+)
+
+
+@dataclass
+class ProfileHeader:
+    """The `# Profile (at-a-glance):` block, parsed.
+
+    Block-SCOPED, matching compose_registry.compose_header_status: fields are read
+    only between `# Profile (at-a-glance):` and the `# ---` separator, so a
+    free-form `# Status: ...` line further down cannot be mistaken for the schema.
+    ComposeFacts.status_header uses a looser any-line regex, which is fine for its
+    job (a quick Route-K sniff) but too loose to render as "the header".
+
+    Continuation-aware: an indented comment line inside the block that has no
+    `Key:` prefix appends to the previous field — 84 of 112 live composes carry a
+    multi-line `Caveats:` and dropping the continuations would show a truncated
+    caveat, which is worse than showing none.
+    """
+
+    present: bool = False
+    fields: dict = field(default_factory=dict)   # ordered, as encountered
+    status_word: str = ""                        # STATUS_VALUES word, or ""
+    line_of: dict = field(default_factory=dict)  # field -> 1-based line number
+
+    @property
+    def caveats_required(self) -> bool:
+        return self.status_word in _CAVEATS_REQUIRED
+
+    @property
+    def caveats_missing(self) -> bool:
+        return self.caveats_required and not self.fields.get("Caveats", "").strip()
+
+
+def parse_profile_header(text: str) -> ProfileHeader:
+    """Parse the profile-schema block. Never raises."""
+    hdr = ProfileHeader()
+    try:
+        lines = text.splitlines()
+    except Exception:
+        return hdr
+    in_block = False
+    last_key = ""
+    for idx, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        if not in_block:
+            if stripped.startswith("# Profile (at-a-glance):"):
+                in_block = True
+                hdr.present = True
+            continue
+        if stripped.startswith("# --") or stripped.startswith("#--"):
+            break
+        if not stripped.startswith("#"):
+            # The block is a comment run; a non-comment line ends it.
+            break
+        body = stripped.lstrip("#").strip()
+        if not body:
+            continue
+        key = ""
+        for cand in _HEADER_FIELDS:
+            if body.startswith(cand + ":"):
+                key = cand
+                break
+        if key:
+            hdr.fields[key] = body[len(key) + 1:].strip()
+            hdr.line_of[key] = idx
+            last_key = key
+        elif last_key:
+            # Continuation of the previous field (the multi-line Caveats shape).
+            hdr.fields[last_key] = (hdr.fields[last_key] + " " + body).strip()
+    value = hdr.fields.get("Status", "")
+    for emoji, word in COMPOSE_STATUS_EMOJI.items():
+        if value.startswith(emoji):
+            hdr.status_word = word
+            break
+    return hdr
+
+
+@dataclass
+class ComposeProvenance:
+    """WHERE a compose came from — which decides whether c3 may edit it.
+
+    The asymmetry this exists to make legible: a CURATED compose is git-tracked
+    and shared, governed by the profile-schema gates, and changed through a PR.
+    Editing one in place silently diverges the user's checkout from upstream —
+    the failure is not a bad edit, it is a checkout that quietly serves something
+    the catalog misdescribes. A LOCAL-layer or EXTERNAL (Route-K) compose is the
+    user's own and freely editable.
+    """
+
+    kind: str = "missing"     # curated | local | generated | external | missing
+    path: str = ""            # absolute
+    rel: str = ""             # repo-relative when inside the root, else ""
+    editable: bool = False
+    reason: str = ""          # one user-facing line
+
+
+def classify_compose_provenance(path: str, repo_root) -> ComposeProvenance:
+    """Classify a compose path. Pure: no git, no I/O beyond exists()."""
+    from pathlib import Path
+
+    try:
+        root = Path(repo_root).resolve()
+        target = Path(path).expanduser()
+        target = (root / target) if not target.is_absolute() else target
+        target = target.resolve()
+    except Exception:
+        return ComposeProvenance(kind="missing", path=str(path), reason=f"MISSING · {path}")
+
+    prov = ComposeProvenance(path=str(target))
+    try:
+        prov.rel = str(target.relative_to(root))
+    except Exception:
+        prov.rel = ""
+
+    if not target.is_file():
+        prov.kind = "missing"
+        prov.reason = f"MISSING · {prov.rel or target}"
+        return prov
+
+    name = target.name
+    if name.startswith("c3-genc-") or name.startswith("_brought-"):
+        prov.kind = "generated"
+        prov.editable = True
+        prov.reason = "GENERATED · ephemeral — regenerated by ② Serve"
+        return prov
+    if prov.rel:
+        parts = Path(prov.rel).parts
+        if parts[:1] == ("models",):
+            prov.kind = "curated"
+            prov.editable = False
+            prov.reason = "CURATED · git-tracked · read-only here"
+            return prov
+        if parts[:3] == ("scripts", "lib", "profiles-local"):
+            prov.kind = "local"
+            prov.editable = True
+            prov.reason = "LOCAL LAYER · yours"
+            return prov
+    prov.kind = "external"
+    prov.editable = True
+    prov.reason = "YOUR FILE · outside the curated catalog"
+    return prov
+
+
+def _compose_facts_mod():
+    """Shared compose-facts implementation (#1202 P1).
+
+    It used to live here, which made it unreachable from the CLI — the local
+    layer was write-only from the UI *because the UI owned the only
+    implementation* (#1153). It now lives in scripts/lib/profiles/.
+
+    The cockpit venv does NOT carry the repo root on sys.path (services.py
+    inserts it at runtime for exactly this reason), so resolve it from this
+    file's own location — cwd- and caller-independent."""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    root = str(_Path(__file__).resolve().parents[3])
+    if root not in _sys.path:
+        _sys.path.insert(0, root)
+    from scripts.lib.profiles import compose_facts as _cf
+
+    return _cf
+
+
+def derive_compose_facts(text: str, path: str = ""):
+    """See scripts/lib/profiles/compose_facts.derive_compose_facts."""
+    return _compose_facts_mod().derive_compose_facts(text, path)
+
+
+def __getattr__(name):
+    """Keep ComposeFacts importable from this module after the P1 move."""
+    if name == "ComposeFacts":
+        return _compose_facts_mod().ComposeFacts
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    f.image = ""
+    m = _re.search(r"^\s*image:\s*(\S+)", text, _re.M)
+    if m:
+        f.image = m.group(1).strip().strip('"').strip("'")
+    low = f.image.lower()
+    for needle, eng in _ENGINE_BY_IMAGE:
+        if needle in low:
+            f.engine = eng
+            break
+    else:
+        f.engine = "unknown" if f.image else ""
+
+    m = _re.search(r"^services:\s*\n\s{2,}([A-Za-z0-9_.-]+):", text, _re.M)
+    if m:
+        f.service = m.group(1)
+
+    # ── token stream ────────────────────────────────────────────────────────
+    toks: list[str] = []
+    for raw in text.splitlines():
+        ln = raw.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        if ln.startswith("- "):
+            ln = ln[2:].strip()
+        elif ln == "-":
+            continue
+        # exec form: command: ["--model=/w/x", "--max-model-len=32768"]
+        if ln.startswith(("command:", "entrypoint:")) and "[" in ln:
+            ln = ln[ln.index("[") + 1:]
+        ln = ln.replace("[", " ").replace("]", " ").replace(",", " ")
+        ln = ln.strip('"').strip("'")
+        if not ln or ln.endswith(":"):
+            continue
+        toks.extend(t.strip('"').strip("'") for t in ln.split() if t.strip('"').strip("'"))
+
+    # YAML block-scalar introducers. A flag whose "value" is one of these did not
+    # get a value at all — the next line starts a literal block.
+    _BLOCK_SCALARS = {"|", ">", "|-", ">-", "|+", ">+"}
+    # A short flag directly after a shell is the SHELL's flag, not the engine's:
+    # `entrypoint: [bash, -c, |...]` is the standard vLLM compose shape, and its
+    # bash -c was being read as llama.cpp's -c (ctx-size), so max_ctx came back
+    # as "|" for every such compose.
+    _SHELLS = {"bash", "sh", "zsh", "/bin/bash", "/bin/sh"}
+
+    def flag(*names: str) -> str:
+        # Alias PRIORITY, not token order: callers list the canonical name first
+        # (e.g. "--max-model-len" before "-c"), so an unrelated short flag
+        # appearing earlier in the file must not win over the real one.
+        for name in names:
+            for i, t in enumerate(toks):
+                base = t.split("=", 1)[0]
+                if base != name:
+                    continue
+                if i > 0 and toks[i - 1] in _SHELLS and not name.startswith("--"):
+                    continue
+                if "=" in t:                      # --flag=value
+                    v = t.split("=", 1)[1]
+                elif i + 1 < len(toks):           # --flag value
+                    v = toks[i + 1]
+                else:
+                    continue
+                v = v.strip().strip('"').strip("'")
+                if v and not v.startswith("-") and v not in _BLOCK_SCALARS:
+                    return v
+        return ""
+
+    f.model_path  = flag("--model", "-m", "GGUF_FILE")
+    f.served_name = flag("--served-model-name", "-a", "--alias")
+    f.max_ctx     = flag("--max-model-len", "-c", "--ctx-size")
+    f.kv_dtype    = flag("--kv-cache-dtype", "-ctk", "--cache-type-k")
+    f.tp          = flag("--tensor-parallel-size", "-tp", "-ts")
+    if not f.tp:
+        m = _re.search(r"CUDA_VISIBLE_DEVICES[=:\s]+\"?([0-9,]+)", text)
+        if m:
+            f.tp = str(len([x for x in m.group(1).split(",") if x.strip()]))
+
+    m = (_re.search(r"\$\{PORT:-([0-9]+)\}", text)
+         or _re.search(r"^\s*-\s*\"?([0-9]{2,5}):[0-9]+", text, _re.M))
+    if m:
+        f.port = m.group(1)
+
+    m = _re.search(r"^#\s*Status:\s*(.+)$", text, _re.M)
+    if m:
+        f.status_header = m.group(1).strip()
+
+    if not f.image:
+        f.error = "no image: found — is this a compose file?"
+        return f
+    f.ok = True
+    return f
+
+
 def compute_promote_scaffold(
     *,
     byo: Optional["ByoResult"],
@@ -2470,15 +2759,20 @@ def compute_promote_scaffold(
     _moe = getattr(mspec, "moe", None)  # rendered into the preview below
     vision_hint = _vis.value if _vis is not None else None
     short = mid.replace("qwen3.6-", "qwen-").replace("gemma-4-", "gemma-")
+    # HARD-CUT (#1202 P3): a local slug carries the ENGINE namespace, exactly like
+    # a curated one — `local/` used to squat in that slot. Provenance is the
+    # `origin` field now, stamped by the loader, so the layer still decides where
+    # the FILES go; it no longer decides what the slug is CALLED. A user model
+    # whose name happens to match a shipped slug is shadowed (core wins) and
+    # marked, not refused.
+    registry_slug = f"vllm/{short}-dual-{quant}"
     if layer == "local":
-        registry_slug = f"local/{short}-dual-{quant}"
         profile_path = f"scripts/lib/profiles-local/models.d/{mid}.yml"
         compose_path = (
             sibling_compose_path
             or f"scripts/lib/profiles-local/composes/{mid}/vllm/compose/dual/{quant}/base.yml"
         )
     else:
-        registry_slug = f"vllm/{short}-dual-{quant}"
         profile_path = f"scripts/lib/profiles/models/{mid}.yml"
         compose_path = (
             sibling_compose_path

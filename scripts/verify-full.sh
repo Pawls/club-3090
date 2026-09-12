@@ -184,7 +184,14 @@ fi
 # would then fire instead. Scale both together. Every model with a detected
 # switch is unaffected: the multiplier is 1 and the timeouts are unchanged.
 TOK_SCALE=1
-[[ "$THINK_CONTROL" == none* ]] && TOK_SCALE="${VERIFY_TOK_SCALE:-64}"
+# Widen for BOTH "no switch at all" and "switch exists but has no OFF position".
+# The second case is a thinking-only model (GLM-5.3-Flash: the dial accepts only
+# low|high and every level still reasons). It used to fall through to TOK_SCALE=1
+# and got a 30-token budget against ~30 tokens of unavoidable reasoning, which
+# surfaces as "empty completion" and reads as a model fault rather than a budget.
+if [[ "$THINK_CONTROL" == none* || "${THINK_ALWAYS_ON:-0}" == "1" ]]; then
+  TOK_SCALE="${VERIFY_TOK_SCALE:-64}"
+fi
 MT_BASIC=$(( 30 * TOK_SCALE ))
 MT_STREAM=$(( 120 * TOK_SCALE ))
 if (( TOK_SCALE > 1 )); then
@@ -350,8 +357,23 @@ except Exception as e:
     print(f'__PARSE_ERROR__: {e}')
 " 2>&1)"
   if echo "$tool_calls" | grep -q "__INLINED__"; then
-    fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
-         "Known issue: MTP × TurboQuant incompat. Use docker-compose.tools.yml or .tools-text.yml. See README Known issues."
+    # This hint was hardcoded to the Qwen3.6/vLLM cause and printed on EVERY engine.
+    # A GLM-on-llama.cpp reporter was told "MTP x TurboQuant incompat, use
+    # docker-compose.tools.yml" — a file that does not exist for that model, naming a
+    # mechanism absent from their stack (club-3090#1250). A hint that confidently names
+    # the WRONG cause is worse than no hint: it sends the reporter to fix something that
+    # was never broken, and they cannot tell it is wrong without knowing the codebase.
+    case "$ENGINE_KIND" in
+      llamacpp)
+        fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
+             "llama.cpp builds its tool parser by statically walking the chat template. If the template uses constructs minja cannot evaluate, parser generation FAILS and the tags stay in content. Re-send a request WITH tools and look for HTTP 400 'Unable to generate parser for this template' — if present this is template/minja, not the model or the quant (GLM-5.3-Flash hits it at _args.items(): club-3090#1250). Otherwise check --jinja and --chat-template-file." ;;
+      sglang)
+        fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
+             "Check --tool-call-parser matches the model family (qwen3_coder on the Qwen3.x composes) and that the chat template emits the format that parser expects." ;;
+      *)
+        fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
+             "On the Qwen3.6 vLLM tiers this is the MTP x TurboQuant incompat - use docker-compose.tools.yml or .tools-text.yml (README Known issues). On other stacks check --tool-call-parser and the chat template first." ;;
+    esac
   elif echo "$tool_calls" | grep -qi "get_weather"; then
     pass "tool_calls[] populated with get_weather"
   else
@@ -553,7 +575,12 @@ check_output_quality() {
 import sys, json, re
 try:
     d = json.load(sys.stdin)
-    c = d['choices'][0]['message'].get('content') or ''
+    msg = d['choices'][0]['message']
+    c = msg.get('content') or ''
+    # Thinking models put the reasoning elsewhere; an empty content with a
+    # non-empty reasoning trace is a spent budget, not a dead generator.
+    r = msg.get('reasoning_content') or msg.get('reasoning') or ''
+    rlen = len(r)
     finish = d['choices'][0].get('finish_reason') or 'n/a'
     clen = len(c)
     cascade = 'tool_call_cascade' if '<tool_call>' in c else 'none'
@@ -570,14 +597,20 @@ try:
     words = re.findall(r\"[A-Za-z']+\", c.lower())
     sample = words[:200]
     variety = (len(set(sample)) / len(sample)) if sample else 0.0
-    print(f'{clen}|{cascade}|{max_repeat}|{variety:.3f}|{finish}')
+    print(f'{clen}|{cascade}|{max_repeat}|{variety:.3f}|{finish}|{rlen}')
 except Exception as e:
-    print(f'err|{e}|0|0|n/a')
+    print(f'err|{e}|0|0|n/a|0')
 " 2>/dev/null)"
 
-  IFS='|' read -r clen cascade max_repeat variety finish <<< "$analysis"
+  IFS='|' read -r clen cascade max_repeat variety finish rlen <<< "$analysis"
   if [[ "$clen" == "err" ]]; then
     fail "couldn't parse response: $cascade" "$(echo "$resp" | head -c 200)"
+  elif [[ "${clen:-0}" == "0" && "$finish" == "length" ]]; then
+    # finish=length means tokens WERE generated — they just never reached content.
+    # On a thinking model whose thinking switch is inert, the reasoning trace eats
+    # the whole budget. That is not a silent generation failure and must not be
+    # scored as one (see GLM-5.3-Flash: no per-request thinking switch takes effect).
+    skip "coherence INCONCLUSIVE — no content but ${rlen:-0} reasoning chars, finish=length (budget spent on reasoning; raise max_tokens or disable thinking)"
   elif [[ "${clen:-0}" == "0" ]]; then
     fail "empty completion (finish=${finish})" "Likely silent generation failure"
   elif [[ "$cascade" == "tool_call_cascade" ]]; then
@@ -615,7 +648,45 @@ check_mtp_acceptance() {
   # generalized harness).
   case "$ENGINE_KIND" in
     llamacpp) skip "llama.cpp engine — MTP acceptance check is vLLM-log-format-specific (run engine-side verification separately)"; return 0 ;;
-    sglang)   skip "SGLang engine — MTP acceptance check is vLLM-log-format-specific";   return 0 ;;
+    sglang)
+      # ⚠ THIS USED TO `skip`, AND THAT IS HOW A DEAD DRAFTER PASSED verify-full.
+      # sglang#39087: a compressed-tensors DFlash2 drafter drafts garbage — accept
+      # len 1.03 vs 3.71 for identical BF16 weights, decode ~38 vs ~171 tok/s — with
+      # no error and no warning, because speculative decoding REJECTS bad drafts:
+      # the output stays correct, it is just slow. This check was the only gate that
+      # could have caught it, and it was skipping on the one engine where it happened.
+      # SGLang's wording is `accept len: N.NN, accept rate: N.NN` (scheduler
+      # metrics_reporter.py) — parseable, just not vLLM's.
+      if ! container_is_real; then
+        skip "container '${CONTAINER}' not found (CONTAINER=none for host endpoints)"
+        return 0
+      fi
+      curl -sf -m 60 "${URL}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"model\": \"${MODEL}\",
+          \"messages\": [{\"role\": \"user\", \"content\": \"Count from 1 to 80, one number per line.\"}],
+          \"max_tokens\": 500,
+          \"temperature\": 0.0,
+          ${THINK_OFF_STD}\"chat_template_kwargs\": ${THINK_OFF_KW}
+        }" >/dev/null 2>&1 || { fail "metrics-trigger request failed" "Check docker logs"; return 1; }
+      sleep 3
+      local sgl_al
+      sgl_al="$(docker logs --tail 400 "${CONTAINER}" 2>&1 \
+                | grep -oE 'accept len: [0-9]+\.[0-9]+' | tail -5 \
+                | grep -oE '[0-9]+\.[0-9]+' \
+                | awk '{s+=$1; n++} END{if(n) printf "%.3f", s/n}')"
+      if [[ -z "$sgl_al" ]]; then
+        skip "no 'accept len' in the last 400 log lines (spec-dec off for this compose?)"
+        return 0
+      fi
+      if awk -v a="$sgl_al" -v m="${MTP_ACCEPT_MIN:-2.0}" 'BEGIN{exit !(a+0 >= m+0)}'; then
+        pass "acceptance length ${sgl_al} >= ${MTP_ACCEPT_MIN:-2.0} (SGLang)"
+      else
+        fail "acceptance length ${sgl_al} < ${MTP_ACCEPT_MIN:-2.0} (SGLang)" \
+             "A drafter near 1.0 is drafting garbage and being rejected — output stays correct but decode collapses (sglang#39087). Check the drafter checkpoint is UNQUANTIZED and that --speculative-draft-model-quantization is 'unquant'."
+      fi
+      return 0 ;;
   esac
   if ! command -v docker >/dev/null 2>&1; then
     skip "docker not in PATH (host engine build? — see #87 for generalized harness work)"

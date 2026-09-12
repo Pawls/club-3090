@@ -86,40 +86,6 @@ patches:
       drop_when: "DONE — #40361 closed-superseded by #45295 (native in v0.24.0); vllm-stable pinned v0.24.0; no live compose mounts it. Entry retained as history."
     status: verified
 
-  - id: qwen-vllm-pr35936-required-fallback
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback
-    load_bearing_when:
-      - composes:
-          - vllm/minimal
-          - vllm/dual
-        reason: "Qwen3-Coder tool_choice=required returns empty tool_calls[] unless the configured parser fallback is honored."
-        evidence: "docs/UPSTREAM.md#35936 row; models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback/README.md"
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: true
-      entrypoint_invoke: true
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: install_script
-    delivery_spec:
-      script: models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback/install.sh
-      mounted_at: /etc/club3090/install-pr35936.sh
-      invoke: "bash /etc/club3090/install-pr35936.sh"
-      invoked_before: vllm-import
-      wired_at: [volumes, entrypoint]
-    drift_guard:
-      kind: behavioral
-      check: "tool_choice=required returns non-empty tool_calls[] on the selected nightly after the overlay copies the fallback serving.py"
-      on_fail: capability-degraded
-    capability: tool-choice-required
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#35936
-      status: open
-      drop_when: "merged or equivalent behavior lands in the selected vLLM nightly"
-    status: verified
-
   - id: qwen-vllm-pr40798-rebased
     deprecated_on: "2026-06-05"
     deprecation_reason: "negative-local-result; abandoned, no functional compose uses it (#254)."
@@ -170,12 +136,18 @@ patches:
     model: [qwen3.6-27b]
     files:
       - models/qwen3.6-27b/vllm/patches/local/qwen3coder_tool_parser_deferred_commit.py
-    load_bearing_when:
-      - composes:
-          - vllm/minimal
-          - vllm/dual
-        reason: "Qwen3-Coder streaming parser can silence SSE when prose mentions literal <tool_call>."
-        evidence: "docs/UPSTREAM.md#qwen3coder-tool-parser-sse-silence-on-prose-tool_call"
+    # ⛔ NOT LOAD-BEARING -- was claimed for [vllm/minimal, vllm/dual] until
+    # 2026-09-06 (club-3090#1012). Verified:
+    #   1. THE TARGET FILE DOES NOT EXIST. The sidecar patches
+    #      vllm/tool_parsers/qwen3coder_tool_parser.py, GONE on BOTH v0.25.1 and
+    #      v0.27.1 -- and the parser was REPLACED, not moved: `qwen3_coder` now
+    #      resolves through the lazy registry to
+    #      vllm.tool_parsers.qwen3_engine_tool_parser:Qwen3EngineToolParser.
+    #      The sidecar's ORIG anchor cannot match on either pin.
+    #   2. NEITHER NAMED COMPOSE MOUNTS IT (0 references).
+    # ⚠️ Whether the SSE-silencing behaviour recurs on the replacement parser is
+    # untested; tracked separately rather than implied by a dead sidecar.
+    load_bearing_when: []
     delivery:
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -199,7 +171,7 @@ patches:
     foundational: false
     upstream:
       ref: club-3090#72
-      status: local-workaround
+      status: dead-target
       drop_when: "upstream vLLM parser fixes the deferred-start state machine and pinned engines include it"
     status: verified
 
@@ -312,6 +284,58 @@ patches:
       ref: froggeric/Qwen-Fixed-Chat-Templates (v19 via #150/#157; v21.3 re-vendored 2026-07-17 via the #671 arc - engine-gated 07-11 rejection superseded on the v0.25.1 pin)
       status: local-vendored
       drop_when: "upstream Qwen ships a corrected default chat template and the pinned engines bundle it, OR the override is re-vendored (the same drift_guard must clear the next re-vendor)"
+    status: verified
+
+  - id: qwen38-reasoning-effort-template
+    model: [qwen3.8-27b]
+    files:
+      - models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/chat_template.jinja
+    load_bearing_when:
+      - composes:
+          - vllm/qwen38-27b-dual-max
+          - vllm/qwen38-27b-multi4-max
+          - vllm/qwen38-27b-multi8-max
+          - vllm/qwen38-27b-dual-supermax
+          - vllm/qwen38-27b-multi4-supermax
+          - vllm/qwen38-27b-multi8-supermax
+          - vllm/qwen38-27b-dual-ultramax
+          - vllm/qwen38-27b-multi4-ultramax
+          - vllm/qwen38-27b-multi8-ultramax
+          - vllm/qwen38-27b-dual-fast
+          - vllm/qwen38-27b-multi4-fast
+          - vllm/qwen38-27b-multi8-fast
+          - vllm/qwen38-27b-dual-superfast
+          - vllm/qwen38-27b-multi4-superfast
+          - vllm/qwen38-27b-multi8-superfast
+          - vllm/qwen38-27b-dual-ultrafast
+          - vllm/qwen38-27b-multi4-ultrafast
+          - vllm/qwen38-27b-multi8-ultrafast
+          - vllm/qwen38-27b-single-nvfp4
+          - vllm/qwen38-27b-dual-nvfp4
+        reason: "Qwen3.8 renamed the conventional top reasoning rung: its ladder is low/medium/xhigh with NO `high`, and the stock template raise_exception()s on any other value. Both OpenAI and Anthropic use low/medium/high, so a generic client sending the standard top rung gets a Jinja TemplateError surfaced as HTTP 500 -- while /v1/models and /health both return 200 and the model is demonstrably serving, which makes the endpoint look healthy while every thinking-mode chat request fails. Observed on the reference rig 2026-08-16 through vLLM's Anthropic-compatible POST /v1/messages?beta=true, i.e. the exact surface a drop-in Claude-API client talks to. Load-bearing on EVERY vLLM slug because the template is byte-identical across all three checkpoints (FP8, AutoRound INT4, NVFP4 -- same 8,952-byte file, sha256 c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041), so the defect and the fix are quantiser-independent. The override is the model's OWN template plus seven lines mapping high -> MEDIUM, bind-mounted OVER the checkpoint's own chat_template.jinja (mount-only, no --chat-template arg -- see delivery_spec.note); the documented xhigh/medium/low behaviour is unchanged and invalid values are still rejected. medium is chosen over xhigh DELIBERATELY: medium is the un-nudged baseline (no template branch, no injected preamble) whereas xhigh injects a 'think carefully, validate assumptions, consider alternatives' preamble that is slow and timeout-prone -- and a Claude-API client sends `high` on EVERY request, so mapping it to the top rung would silently put all agent traffic in the slowest mode on a single-stream rig. SCOPE 2026-08-21: all TWENTY vLLM slugs, not the original eight — #1072 added the DFlash2 super/ultra tiers, and every one of them rendered the stock template. RE-VERIFIED the same day after #1070 swapped the FAST-tier weights Avuja -> Frozenlock: chat_template.jinja is STILL sha256 c3cf9e34…81041 on all three served checkpoints (Qwen/Qwen3.8-27B-FP8, Frozenlock/Qwen3.8-27B-int4-AutoRound, RadixArk/Qwen3.8-27B-NVFP4), so one vendored file still covers every slug. ⚠️ syvai/Qwen3.8-27B-DFlash2-W4A16 ships a DIFFERENT template (f36668dd…ba59) — it is the DFlash2 drafter, never the render source, so it is deliberately not vendored."
+        evidence: "models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/PROVENANCE.md (carries the regenerable diff and the cross-checkpoint sha256 comparison)"
+    delivery:               # DEPRECATED/READ-ONLY (test-only) -- see header
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: chat_template
+    delivery_spec:
+      jinja: models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/chat_template.jinja
+      mounted_at: /chat_template.jinja
+      mount_mode: ro
+      wired_at: [volumes]
+      note: "MOUNT-ONLY, like the carnice override and unlike froggeric: the vendored .jinja is bind-mounted OVER the served checkpoint's own chat_template.jinja and vLLM auto-loads it from the model dir, so NO --chat-template arg is passed and the compose `command:` list is untouched. That is a deliberate rebase-surface choice -- upstream edits those args constantly (11 commits touched these composes in the 7 days to 2026-08-23, and one of them collided with the arg this patch used to insert), whereas the volumes block is quiet. ⚠️ The container-side target therefore DIFFERS PER WEIGHTS VARIANT and there are three of them: /root/.cache/huggingface/qwen3.8-27b-autoround-int4/chat_template.jinja (9 composes), /root/.cache/huggingface/qwen3.8-27b-fp8/chat_template.jinja (9), /root/.cache/huggingface/qwen3.8-27b-nvfp4/chat_template.jinja (2). `mounted_at` takes ONE string, so it declares the suffix those three share; it is the coverage marker _spec_wiring_present greps for, and it appears only on this patch's mount line. Data-only mount, NOT an engine-code overlay, so vllm-stable's overlay-free CONTRACT-5 status (and its usability as a derived-emission base) is unaffected."
+    drift_guard:
+      kind: behavioral
+      check: "A thinking-mode chat request carrying reasoning_effort='high' must return HTTP 200 (not a 500 TemplateError) with the template mounted; low/medium/xhigh must keep their stock behaviour and an invalid value must still be rejected. Re-diff the jinja against models-cache/qwen3.8-27b-*/chat_template.jinja after any weights re-pull -- a silent upstream template re-push is the drift this guards, and because the file is identical across checkpoints, ONE re-diff covers every slug. Any behavioral/TPS comparison the guard performs MUST use the SELF-CONTAINED symmetric restart+settle protocol: identical `docker restart <container>` on BOTH arms -> wait for /v1/models healthy -> fixed 60s settle -> >=3 bench.sh runs/arm -> compare the GRAND MEAN of the SAME canonical bench segment (NARRATIVE 800-word essay + CODE; never mix segments, never a single run); flag ONLY a deterministic regression reproduced across ALL 3 runs. (An asymmetric-restart harness fabricated a phantom -7% on #150; a non-symmetric guard flaps and gets ignored.)"
+      on_fail: capability-degraded   # serves the stock template, 500-ing every reasoning_effort=high request
+    capability: chat-template-override
+    foundational: false
+    upstream:
+      ref: "Qwen/Qwen3.8-27B-FP8 chat_template.jinja (fetched 2026-08-16); no upstream Qwen issue filed yet; re-diffed against the live upstream file 2026-08-21 — the vendored copy is that 8,952-byte template plus exactly the seven alias lines, nothing else"
+      status: local-vendored
+      drop_when: "upstream Qwen accepts `high` as a valid rung at all (costs them nothing), OR vLLM's Anthropic router stops forwarding a `high` it cannot know is unsupported. Re-vendor from the model dir if Qwen ships a corrected template and re-run the drift guard."
     status: verified
 
   - id: vllm-pr48375-mamba-drop-eagle-block
@@ -1060,3 +1084,131 @@ patches:
   - <<: *genesis_env_patch
     id: genesis-pn59-streaming-gdn
     genesis_env: GENESIS_ENABLE_PN59_STREAMING_GDN
+  - id: glm53-minja-numeric-index
+    model: [glm-5.3-flash]
+    status: unverified
+    files:
+      - models/glm-5.3-flash/llamacpp-club3090/patches/glm53-minja-numeric-index
+    load_bearing_when:
+      - composes: null
+        reason: >-
+          Without it EVERY request carrying `tools` returns HTTP 400 ("Unable to generate
+          parser for this template") and /props reports supports_tools:false — so the tool
+          path is dead on all 18 GLM composes, which is why this is load-bearing for tool
+          traffic on every one of them rather than an optimisation. minja does not implement
+          numeric dotted attribute access (`x.0`); Jinja2 defines it as `x[0]`. The GGUF's
+          embedded template uses it in 4 places, so the jinja caps probe throws, infers
+          NOTHING, and leaves every capability false — including supports_object_arguments,
+          which gates the JSON-string -> object conversion of tool arguments in chat.cpp.
+          Arguments then stay a string and the autoparser dies on `.items()`. The `.items()`
+          line named in the error is the CRASH SITE, not the cause — GLM-4.7-Flash.jinja
+          carries the identical construct and passes upstream. Override = vendor template
+          with `.0.` -> `[0].` in 4 places + a null-tool guard; wire format unchanged.
+        evidence: >-
+          models/glm-5.3-flash/llamacpp-club3090/patches/glm53-minja-numeric-index/README.md;
+          club-3090#1250 (@paulp83); ggml-org/llama.cpp#27754 (same symptom reported upstream
+          2026-09-07, unanswered); verified with llama.cpp's own llama-template-analysis —
+          all four capabilities flip false -> true
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: false
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: chat_template
+    delivery_spec:
+      jinja: models/glm-5.3-flash/llamacpp-club3090/patches/glm53-minja-numeric-index/chat_template.jinja
+      mounted_at: /etc/glm53-chat-template.jinja
+      mount_mode: ro
+      invoke: --chat-template-file /etc/glm53-chat-template.jinja
+      wired_at: [volumes, command]
+      note: >-
+        The vendor template (zai-org/GLM-5.3-Flash, as embedded in the GGUFs) with `.0.` ->
+        `[0].` in 4 places plus a null-tool guard on the tools loop. Semantics-identical under
+        Jinja2, which defines `x.0` as `x[0]`; the WIRE FORMAT is untouched. Mounted read-only
+        and selected with --chat-template-file; `use_jinja` defaults to true in this engine
+        build so no --jinja flag is required.
+    drift_guard:
+      kind: behavioral
+      check: >-
+        The override must contain NO `.0.` numeric dotted access — re-vendoring a fresh vendor
+        template without re-applying the fix silently returns every jinja capability to false
+        and makes tool calls 400, while boot and /health stay green. Assert positively rather
+        than by absence: llama-template-analysis --template-file <this> must report
+        supports_tools / supports_tool_calls / supports_parallel_tool_calls /
+        supports_string_content ALL true, and GET /props on a booted server must agree. Then a
+        tool-call smoke (auto tool choice, one get_weather-class call) must return
+        finish_reason=tool_calls with valid JSON arguments, and a 3-turn tool loop must replay
+        without 400s. Any behavioral/TPS comparison the guard performs MUST use the
+        SELF-CONTAINED symmetric restart+settle protocol: identical docker restart on BOTH
+        arms -> healthy -> fixed 60s settle -> >=3 bench.sh runs/arm -> compare the grand mean,
+        never a single run (boot-to-boot noise on this rig is ~2.8%, run-to-run ~0.2%).
+      on_fail: tool-calls-silently-dead
+    capability: glm53-tool-calling
+    upstream:
+      ref: https://github.com/ggml-org/llama.cpp/issues/28786
+      status: reported
+      drop_when: >-
+        minja implements `x.0` as `x[0]`, or the caps probe degrades gracefully instead of
+        inferring nothing when a probe throws. Closest prior art: ggml-org/llama.cpp#28509
+        (Gemma 4 misclassified supports_typed_content), same subsystem, closed completed.
+  - id: qwen38-sglang-autoround-w4a8-v0519
+    model: [qwen3.8-27b]
+    status: unverified
+    files:
+      - models/qwen3.8-27b/sglang/patches/sglang-autoround-w4a8-v0.5.19
+    load_bearing_when:
+      - composes:
+          - sgl/qwen38-27b-dual-fast
+          - sgl/qwen38-27b-dual-superfast
+          - sgl/qwen38-27b-dual-max
+          - sgl/qwen38-27b-multi4-fast
+          - sgl/qwen38-27b-multi4-superfast
+          - sgl/qwen38-27b-multi4-max
+          - sgl/qwen38-27b-multi4-supermax
+          - sgl/qwen38-27b-multi8-fast
+          - sgl/qwen38-27b-multi8-superfast
+          - sgl/qwen38-27b-multi8-max
+          - sgl/qwen38-27b-multi8-supermax
+        reason: >-
+          Enables the serve-time W4A8 toggle (W4A8=1 -> int8 activations on the int4 weights) on every
+          registry-wired sgl/ slug. Unlike vLLM, SGLang has NO env-gated W4A8 path, so here APPLYING THE
+          PATCH IS THE ACTIVATION: each compose mounts this dir at /etc/club3090/w4a8 and the entrypoint
+          runs install.sh + install.sh --verify before launch. The patch is a re-cut of @jb-seo's
+          0004-autoround-w4a8.patch (cut against v0.5.19's predecessor v0.5.18) onto v0.5.19 by @A1RM4X
+          (club-3090#1226); its substantive addition is the per-shard K%128==0 / N%64==0 shape guard that
+          jb-seo's eligibility gate omitted -- without it Qwen3.8-27B's merged GDN in_proj_ba (N=96 ->
+          48/rank at TP=4) crashes in gptq_marlin_repack with 'size_n=48 is not divisible by 64'; the
+          guard routes non-conformant shards to standard Marlin W4A16 instead. DORMANT AT THE DEFAULT:
+          W4A8=0 ships, the installer is never invoked, and the composes serve stock W4A16 -- so this is
+          load-bearing only for the W4A8=1 path, and the toggle hard-fails rather than silently serving
+          W4A16 if the mount does not resolve. Measured on the reference 2x3090 PCIe rig: dual-fast
+          prefill@10K 1183 -> 1710 (+44.5%, n=3 CV 0.8%) and @90K 953 -> 1276 (+33.9%) for -11.1% code
+          decode; dual-superfast prefill@10K 1234 -> 1779 (+44.1%, n=3 CV 0.4%) and @90K 973 -> 1345
+          (+38.3%), decode ~flat, MTP accept unchanged 3.71 -> 3.72. A trade, not a free win. NOT load-
+          bearing for the two unregistered composes (dual/autoround-int4/dflash2-bf16.yml,
+          dual/fp8/dflash2.yml), which carry the same toggle but have no slug.
+        evidence: >-
+          models/qwen3.8-27b/sglang/patches/sglang-autoround-w4a8-v0.5.19/README.md; club-3090#1226
+          (@A1RM4X's re-cut + shape guard, cherry-picked with authorship preserved); BENCHMARKS.md 'Quad-
+          card (4x RTX 3090, TP=4) - SGLang' row (@A1RM4X's own 4-card numbers)
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: install_script
+    delivery_spec:
+      script: models/qwen3.8-27b/sglang/patches/sglang-autoround-w4a8-v0.5.19/install.sh
+      mounted_at: /etc/club3090/w4a8
+      invoke: "bash /etc/club3090/w4a8/install.sh"
+      invoked_before: sglang-launch
+      wired_at: [volumes, entrypoint]
+    drift_guard:
+      kind: marker
+      check: "install.sh hard-fails (exit 1) if any of the 3 content markers is missing after apply, or if a partial 1-2/3 state is detected — a re-pinned image that drops a W4A8 hook serves nothing, not a half-wired mix"
+      on_fail: refuse-to-boot
+    capability: sglang-w4a8-dense-gemm
+    upstream:
+      ref: jb-seo/club-3090 (0004-autoround-w4a8.patch, cut against SGLang v0.5.18)
+      status: ours
+      drop_when: "SGLang lands AutoRound W4A8 with the K%128/N%64 shape guard natively in the AutoRoundConfig eligibility gate — then this re-cut + guard is retired (keep the compose, drop the mount)."

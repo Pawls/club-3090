@@ -274,6 +274,7 @@ OTHER_TOOL_OK = {
     "--dry-run",                         # quality-baseline.sh / report.sh
     "--clear-default", "--set-default", "--profile-like",       # switch.sh
     "--env-file",                        # docker compose (AGENTS.md wsl2-env section)
+    "--spec-file",                       # promote.py / export_pr.py (#1143)
 }
 allowed = known | PASS_THROUGH_OK | OTHER_TOOL_OK
 

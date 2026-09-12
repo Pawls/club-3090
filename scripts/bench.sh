@@ -1604,7 +1604,19 @@ if (( CAP_ENABLED )); then
         }'
       fi
     else
-      echo "  no drafter output in the log (spec-dec off, or the engine does not log acceptance)"
+      # ⚠ THREE DIFFERENT STATES USED TO PRINT THIS ONE LINE. Until 2026-09-11 the
+      # parser knew only vLLM's "draft acceptance rate =" wording, so every SGLang
+      # run landed here — including a DEAD DFlash2 drafter (accept len ~1.0,
+      # sglang#39087), which is slow but never wrong and passes every functional
+      # test. "Nothing to report" and "I cannot read this engine" must not look the
+      # same. Recognised wordings: vLLM `draft acceptance rate = X`; SGLang
+      # `accept len: X, accept rate: Y`.
+      echo "  no acceptance data in the measured window. Either spec-dec is OFF for this"
+      echo "  run, or this engine words its acceptance line differently and the parser"
+      echo "  (scripts/lib/capture.sh, mode=acceptance) has not been taught it."
+      echo "  ⚠ Do NOT read this as 'the drafter is fine' — verify it fired:"
+      echo "      docker logs <container> 2>&1 | grep -oE 'accept len: [0-9.]+' | tail"
+      echo "      healthy is 2-5; ~1.0 means the drafter is drafting garbage"
     fi
   fi
 
@@ -1780,16 +1792,34 @@ print(f"{sum(xs)/len(xs):.2f}" if xs else "")
         fi
         unset CAP_LINE_LIMIT
 
-        _ram=""; _ram_scope=""; _ram_arith=""; _ram_caveat=""
+        _ram=""; _ram_scope=""; _ram_arith=""; _ram_caveat=""; _ram_why=""
+        # #1137: `|| true` used to turn an un-derivable figure into an EMPTY string
+        # and then into a silently ABSENT report block — the caveat line vanished
+        # and the only downstream symptom was a test complaining the caveat TEXT
+        # was missing, pointing at formatting rather than at the empty input.
+        # Capture the reason instead, and print it below.
         if [[ -n "$_exp" ]] && (( _win_ok )) && (( _win_secs > 0 )) && (( _win_miss > 0 )); then
-          _ram="$(cap_ram_rd_mbps "$_win_miss" "$_exp" "$_win_secs" || true)"
+          _ram_errf="$(mktemp)"
+          _ram="$(cap_ram_rd_mbps "$_win_miss" "$_exp" "$_win_secs" 2>"$_ram_errf")" \
+            || _ram_why="$(cat "$_ram_errf" 2>/dev/null)"
+          rm -f "$_ram_errf"
           _ram_scope="(DECODE WINDOW)"
           _ram_arith="= ${_win_miss} misses x ${_exp} KiB / ${_win_secs}s of decode"
         elif [[ -n "$_exp" && -n "$_miss" && "${_miss:-0}" -gt 0 ]]; then
-          _ram="$(cap_ram_rd_mbps "$_miss" "$_exp" "$CAP_ELAPSED" || true)"
+          _ram_errf="$(mktemp)"
+          _ram="$(cap_ram_rd_mbps "$_miss" "$_exp" "$CAP_ELAPSED" 2>"$_ram_errf")" \
+            || _ram_why="$(cat "$_ram_errf" 2>/dev/null)"
+          rm -f "$_ram_errf"
           _ram_scope="(WHOLE RUN — diluted)"
           _ram_arith="= ${_miss} misses x ${_exp} KiB / ${CAP_ELAPSED}s"
           _ram_caveat="dilution"
+        else
+          _ram_why="inputs unavailable — expert_kib=${_exp:-<none>} win_miss=${_win_miss:-<none>} miss=${_miss:-<none>}"
+        fi
+        if [[ -z "$_ram" && -n "$_ram_why" ]]; then
+          # SAY SO. An absent derivation is a fact about the run, not a reason to
+          # print nothing — silence here is what made #1137 unreadable.
+          echo "  derived host-RAM read demand: NOT DERIVED — ${_ram_why}"
         fi
         if [[ -n "$_ram" ]]; then
           CAP_RAM_DEMAND="$_ram"
@@ -2157,7 +2187,14 @@ if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
    && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
   echo ""
   echo "=== Last 3 SpecDecoding metrics ==="
-  docker logs "${CONTAINER}" 2>&1 | grep "SpecDecoding metrics" | tail -3 || true
+  # vLLM tags these "SpecDecoding metrics"; SGLang writes "accept len: N, accept rate: N"
+  # on its decode-batch line and llama.cpp writes "draft acceptance = N". Grepping only
+  # the vLLM string printed an EMPTY block on the other two — which reads as "spec-dec
+  # produced nothing" rather than "I only know one engine's wording". Seen in the wild on
+  # club-3090#1251 (2x 5090, sgl/qwen38-27b-dual-fast): the section came back blank while
+  # the drafter was running fine.
+  docker logs "${CONTAINER}" 2>&1 \
+    | grep -E "SpecDecoding metrics|accept len:|draft acceptance" | tail -3 || true
 fi
 
 # Repeated at the END on purpose (#832): a reader who tails the log, or who

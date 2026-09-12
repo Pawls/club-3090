@@ -735,6 +735,20 @@ preflight_compose_gpu_fit() {
   echo "[preflight]        — or persistently, in the .env NEXT TO the compose file (read by both" >&2
   echo "[preflight]        this check and docker compose): $(dirname -- "$compose")/.env" >&2
   echo "[preflight]        — then retry.  (Bypass this check with --force.)" >&2
+    # club-3090#1134: on WSL the advice above is a dead end. nvidia-smi INSIDE the
+    # VM reports "No running processes found" while the card is nearly full,
+    # because the VRAM is held by WINDOWS-side processes it cannot see -- and
+    # `docker ps` will not show them either. A user following the Linux advice
+    # finds nothing and concludes the gate is wrong, then reaches for --force.
+    if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+      echo "[preflight]        WSL DETECTED -- the advice above needs adjusting:" >&2
+      echo "[preflight]          nvidia-smi in WSL says 'No running processes found' even when the card" >&2
+      echo "[preflight]          is full. The VRAM is held on the WINDOWS side and is invisible here;" >&2
+      echo "[preflight]          'docker ps' will not show it. Check Windows Task Manager > Performance" >&2
+      echo "[preflight]          > GPU instead, and close browsers (hardware acceleration), games and" >&2
+      echo "[preflight]          launchers, and anything driving the display." >&2
+      echo "[preflight]          --force does NOT free memory: vLLM will still abort after loading." >&2
+    fi
   if [[ "$force" == "1" ]]; then
     echo "[preflight] WARN:  --force set — launching anyway; vLLM may still abort at the free-memory check." >&2
     return 0
@@ -1742,13 +1756,21 @@ except Exception:
 # python3 — callers keep working defaults. Overridden by VERIFY_THINK_OFF /
 # VERIFY_THINK_ON (plain JSON objects).
 _preflight_probe_thinking_key() {
+  # ⚠️ THE PROBE'S OWN BUDGET MUST CLEAR THE MINIMUM REASONING, or a
+  # thinking-only model is undetectable BY CONSTRUCTION. At 24 tokens
+  # GLM-5.3-Flash at its lowest level returns finish=length with 98 chars of
+  # reasoning and EMPTY content -- so every level scores 0, the ladder finds no
+  # working level, and the model is declared switch-less. Measured at
+  # reasoning_effort=low: 24 tok -> content='' (length); 256 tok -> content='OK.'
+  # (stop). 256 still discriminates, because a high-effort level burns straight
+  # through it (max: 1367 chars of reasoning, no content, at 300 tok).
   # Echo the content length a trivial question returns under the given kwargs.
   # A working off-switch answers in a few tokens; an ignored one burns the whole
   # budget reasoning and returns empty content.
   local url="$1" model="$2" kwargs="$3"
   curl -sf -m 90 "${url%/}/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 24, \"temperature\": 0.0, \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
+    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 256, \"temperature\": 0.0, \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
     | python3 -c "import sys,json; print(len((json.load(sys.stdin)['choices'][0]['message'].get('content') or '').strip()))" 2>/dev/null \
     || echo 0
 }
@@ -1763,6 +1785,32 @@ _preflight_probe_thinking_reasoning_both() {
     -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 96, \"reasoning_effort\": \"${effort}\", \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
     | python3 -c "import sys,json; print(len((json.load(sys.stdin)['choices'][0]['message'].get('reasoning_content') or '')))" 2>/dev/null \
     || echo 0
+}
+
+_preflight_probe_thinking_pair() {
+  # Echo "<content_len>:<reasoning_len>" from ONE request.
+  #
+  # ⚠️ CONTENT PRESENCE DOES NOT DISCRIMINATE EFFORT LEVELS. The sibling probe
+  # asks "Say OK." and checks whether any content came back, and the OFF ladder
+  # used that to decide whether a level turns thinking off. On a trivial prompt
+  # with a workable budget EVERY level answers -- including max -- so the test is
+  # blind exactly where it matters. It also flipped behaviour when the budget was
+  # raised from 24 to 256: at 24 no level answered (ladder ran, found nothing,
+  # model declared switch-less); at 256 the scan's own value answered (gate went
+  # false and the ladder was skipped entirely). Same symptom, different cause.
+  #
+  # "Did thinking stop?" is a question about REASONING length, so ask that.
+  local url="$1" model="$2" kwargs="$3"
+  curl -sf -m 90 "${url%/}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 256, \"temperature\": 0.0, \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)['choices'][0]['message']
+c = (d.get('content') or '').strip()
+r = (d.get('reasoning_content') or d.get('reasoning') or '').strip()
+print(f'{len(c)}:{len(r)}')" 2>/dev/null \
+    || echo "0:0"
 }
 
 _preflight_probe_thinking_reasoning() {
@@ -1823,6 +1871,18 @@ preflight_detect_thinking_control() {
       # (scenario 3's no-regression promise holds). Only a demonstrably-IGNORED
       # switch is downgraded to `none` — which is what makes the caller widen its
       # token budgets instead of blaming the model.
+      # ⚠️ The scan proves a template NAMES a key. Its SILENCE proves nothing:
+      # in endpoint-first mode (--url, no container) there is no template to scan
+      # at all, and a reasoning_effort-only model is then declared switch-less.
+      # That is how a GLM-5.3-Flash run reported `thinking-control=none off={}
+      # on={}` while the dial worked perfectly -- and the resulting TOK_SCALE=64
+      # then masked it on the short checks while [8] still failed. When the scan
+      # comes back empty, ask the SERVER before believing it.
+      if [[ "$THINK_CONTROL" == "none" ]] && [[ "${THINK_PROBE:-0}" == "1" ]] \
+         && [[ -n "$model" ]] && curl -sf -m 5 "${url%/}/v1/models" >/dev/null 2>&1 \
+         && [[ "$(_preflight_probe_thinking_key "$url" "$model" '{"reasoning_effort": "low"}')" != "0" ]]; then
+        THINK_CONTROL="reasoning_effort"
+      fi
       if [[ "$THINK_CONTROL" != "none" ]] && [[ "${THINK_PROBE:-0}" == "1" ]] \
          && [[ -n "$model" ]] && curl -sf -m 5 "${url%/}/v1/models" >/dev/null 2>&1; then
         local _off_probe_kw=""
@@ -1830,8 +1890,28 @@ preflight_detect_thinking_control() {
           enable_thinking)  _off_probe_kw='{"enable_thinking": false}'   ;;
           reasoning_effort) _off_probe_kw='{"reasoning_effort": "none"}' ;;
         esac
-        if [[ -n "$_off_probe_kw" ]] \
-           && [[ "$(_preflight_probe_thinking_key "$url" "$model" "$_off_probe_kw")" == "0" ]]; then
+        # Ask whether the scan's off-value actually STOPS the reasoning. If it
+        # leaves reasoning behind it is not an off-switch, whatever it is named,
+        # and we must walk the ladder. Asymmetric on purpose, as before: a value
+        # that genuinely silences thinking (rlen 0) keeps the scan's answer and
+        # every model passing today keeps its exact request shape.
+        local _off_pair="" _off_rlen0=0
+        if [[ -n "$_off_probe_kw" ]]; then
+          _off_pair="$(_preflight_probe_thinking_pair "$url" "$model" "$_off_probe_kw")"
+          _off_rlen0="${_off_pair##*:}"
+          [[ "$_off_rlen0" =~ ^[0-9]+$ ]] || _off_rlen0=0
+        fi
+        local _off_clen0="${_off_pair%%:*}"
+        [[ "$_off_clen0" =~ ^[0-9]+$ ]] || _off_clen0=0
+        # Enter the ladder when EITHER signal says the value is not an off-switch:
+        #   rlen > 0  -> it left reasoning behind (the GLM case)
+        #   clen == 0 -> it produced no answer at all (the original "named but
+        #                ignored" case, and the only signal available on engines
+        #                that never expose reasoning_content -- vLLM inlines
+        #                thinking in content, so rlen is always 0 there and a
+        #                reasoning-only test would be blind).
+        # A genuine off-switch (rlen 0 AND clen > 0) still keeps the scan's answer.
+        if [[ -n "$_off_probe_kw" ]] && { (( _off_rlen0 > 0 )) || (( _off_clen0 == 0 )); }; then
           # ⚠️ "this VALUE did not work" is NOT "this KEY does not exist" — the
           # distinction caused a real misdiagnosis. `reasoning_effort: none` is
           # INVALID on the GLM-5.3 family (vendor lists max|high|low only) and is
@@ -1854,11 +1934,28 @@ preflight_detect_thinking_control() {
           # A model whose first candidate works is unaffected — the ladder stops there.
           if [[ "$THINK_CONTROL" == "reasoning_effort" ]]; then
             local _lvl
+            # ⚠️ PICK BY REASONING, NOT BY "IT ANSWERED". Taking the first level
+            # that returns content picks whichever is tried first, because on a
+            # trivial prompt every level answers. Probe all candidates and keep the
+            # one that reasons LEAST while still producing an answer -- that is the
+            # closest thing to "off" the model actually offers. For GLM-5.3-Flash
+            # only low|high are valid and everything else coerces to max, so
+            # `minimal` and `medium` reason heavily and `low` wins on merit rather
+            # than on loop order.
+            local _lvl _pair _clen _rlen _best_rlen=-1
             for _lvl in minimal low medium; do
-              if [[ "$(_preflight_probe_thinking_key "$url" "$model" "{\"reasoning_effort\": \"${_lvl}\"}")" != "0" ]]; then
-                THINK_EFFORT_OFF_VALUE="$_lvl"; break
+              _pair="$(_preflight_probe_thinking_pair "$url" "$model" "{\"reasoning_effort\": \"${_lvl}\"}")"
+              _clen="${_pair%%:*}"; _rlen="${_pair##*:}"
+              [[ "$_clen" =~ ^[0-9]+$ ]] || continue
+              [[ "$_rlen" =~ ^[0-9]+$ ]] || continue
+              (( _clen > 0 )) || continue          # produced no answer -- unusable
+              if (( _best_rlen < 0 || _rlen < _best_rlen )); then
+                _best_rlen="$_rlen"; THINK_EFFORT_OFF_VALUE="$_lvl"
               fi
+              (( _rlen == 0 )) && break            # a true off-switch; stop looking
             done
+            # Reuse the winning measurement rather than spending another request.
+            (( _best_rlen > 0 )) && THINK_ALWAYS_ON=1
             if [[ -z "${THINK_EFFORT_OFF_VALUE:-}" ]]; then
               THINK_CONTROL="none"
             else
@@ -1936,6 +2033,8 @@ preflight_detect_thinking_control() {
   # it directly instead of parsing the fragment above.
   THINK_OFF_STD=''
   THINK_ON_STD=''
+  # 1 = model always reasons, even at its lowest level (dial, but no OFF).
+  THINK_ALWAYS_ON="${THINK_ALWAYS_ON:-0}"
   THINK_EFFORT_OFF_VALUE="${THINK_EFFORT_OFF_VALUE:-}"
   THINK_EFFORT_ON_VALUE="${THINK_EFFORT_ON_VALUE:-}"
   THINK_OFF_EFFORT=''

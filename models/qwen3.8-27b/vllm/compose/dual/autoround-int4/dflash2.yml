@@ -12,17 +12,26 @@
 #              ONLY bf16/fp16 KV (fp8-KV-in-kernel is FA3/Hopper-only). fp8 KV would
 #              force FlashInfer and cost ~40% decode.
 #   Vision:    ✅ tower present (input-only, text out); untested on this tier.
-#   Template:  native — the repo's own chat_template.jinja.
+#   Template:  native + club-3090 alias — the model's own chat_template.jinja
+#              with `high` remapped to `xhigh` (patches/qwen38-reasoning-effort-template)
 #   Max ctx:   204800 (~200K) — MEASURED bf16/FA2 ceiling on 2×3090 @0.90 util
 #              (KV pool 212,977 tok; hard ceiling ~213K). NOT the 262K arch max:
 #              bf16 KV can't fit 262K here (needs ~10.93 GiB vs ~9.1 available).
 #   Genesis:   none
 #   Status:    🧪 Experimental
-# ⚠️ #1096 (accumulated-ctx decode cliff): in long multi-turn agentic, decode collapses to
-#    single-block emission — ~12k accumulated ctx for DFlash2 (SPEC_N depth does NOT move it,
-#    n=3≡n=7) / ~17-21k for MTP; SEVERE on Ampere (~4 tok/s), milder on Blackwell. Drafter TYPE,
-#    not depth, sets the floor. Interim: MTP tier (higher cliff) or SPEC_N=0 for sustained >~20k.
-#    Real fix pending upstream ReplaySSM (vllm#49887 GDN-spec / vllm#50172). NOT immune to this.
+# ⛔⛔ #1096 RETRACTED 2026-09-08 — THERE IS NO ACCUMULATED-CTX DECODE CLIFF. The collapse
+#    figures came from OUR harness, not the engine: bench-agentic set TTFT on the first
+#    `content` delta, so a thinking model's entire reasoning phase was charged to prefill and
+#    the decode window fell under its 5%-of-wall "degenerate" rule. Fixed in #1218. That rule
+#    flags whatever has slow prefill relative to decode, which is also why the pattern looked
+#    hardware-dependent (Blackwell prefills fast -> "clean"; Ampere -> "collapsed").
+#    Re-test, both arms, same v0.27.1 pin, cross-checked against vLLM's OWN histograms:
+#    MTP n=3 -> 110.2 tok/s @ 21,443 ctx; DFlash2 n=7 -> 159.4 @ 12,275. Decode FLAT across
+#    1.2K->35.3K, zero degenerate turns, zero preemptions. ⛔ Do NOT set SPEC_N=0 or prefer the
+#    MTP tier for long contexts on this basis — that advice was wrong and costs you the drafter.
+# ⚠️ What DOES survive: vllm#35387 — a real spec tax that scales with drafter DEPTH, not
+#    context (29K: no-spec 57.0 -> n=1 40.6 / n=2 36.0 / n=3 32.7 tok/s), profiled to the
+#    cudagraph downgrade FULL_AND_PIECEWISE -> PIECEWISE. A steady tax, not a cliff.
 #   Best for:  ⭐ ULTRAFAST decode — the throughput tier (~227 code / ~132 narr TPS).
 # ---------------------------------------------------------------------------
 # THE "ULTRAFAST" TIER — DFlash2 external drafter on the INT4 target.
@@ -100,6 +109,22 @@ services:
       # DFlash2DraftModel; refuses boot on apply failure.
       - ../../../patches/vllm-dflash2-backport:/etc/club3090/dflash2:ro
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+      # Chat template: the model's OWN, plus seven lines mapping the standard
+      # OpenAI/Anthropic rung `high` onto `xhigh`. Qwen3.8's ladder is
+      # low/medium/xhigh with NO `high`, and the stock template
+      # raise_exception()s on anything else, so a client sending the standard top
+      # rung gets HTTP 500 while /v1/models still returns 200. Observed live via
+      # /v1/messages?beta=true.
+      # ⭐ MOUNTED OVER the checkpoint's own chat_template.jinja: vLLM auto-loads
+      # the template from the model dir, so this needs NO --chat-template arg
+      # (the same wiring style as the carnice override -- see patches.yml).
+      # That is deliberate, not incidental: upstream edits the args list
+      # constantly (11 commits touched these composes in the last 7 days), and
+      # every edit there collides with an inserted flag. The volumes block is
+      # quiet by comparison, so wiring here is what keeps this patch rebasable.
+      # DATA-ONLY mount, not an engine-code overlay, so the engine's overlay-free
+      # contract is unaffected. See patches.yml qwen38-reasoning-effort-template.
+      - ../../../patches/qwen38-reasoning-effort-template/chat_template.jinja:/root/.cache/huggingface/qwen3.8-27b-autoround-int4/chat_template.jinja:ro
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
     environment:
@@ -112,12 +137,13 @@ services:
       # from the model-card row matching ENABLE_THINKING, so these must reach the
       # container. Absent -> empty -> the entrypoint's `:=` row default applies;
       # an explicit value crosses unchanged and still wins over both rows.
-      - ENABLE_THINKING=${ENABLE_THINKING:-false}
+      - ENABLE_THINKING=${ENABLE_THINKING:-true}
       - TEMP=${TEMP:-}
       - TOP_P=${TOP_P:-}
       - TOP_K=${TOP_K:-}
       - MIN_P=${MIN_P:-}
       - PRESENCE_PENALTY=${PRESENCE_PENALTY:-}
+      - REPEAT_PENALTY=${REPEAT_PENALTY:-}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - CUDA_VISIBLE_DEVICES
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -146,6 +172,17 @@ services:
       # var is exported at all, and this stays a BARE pass-through so an explicit
       # host value still wins.
       - VLLM_MARLIN_INPUT_DTYPE
+      # ⚠️⚠️ BARE pass-throughs — NEVER give these a `${VAR:-}` default. Compose would
+      # then set them to the EMPTY STRING, and vLLM crashes on both:
+      #   VLLM_LOG_STATS_INTERVAL="" -> float("") -> ValueError at startup (envs.py:836-838)
+      #   VLLM_CACHE_ROOT=""         -> compile cache resolves relative to CWD
+      # Bare form means docker forwards them ONLY when the host has them set, so
+      # these lines are inert for every normal boot.
+      # Probe use (fa2-fp8kv Session 1): VLLM_CACHE_ROOT=/tmp/vllm-cache-<arm>
+      # isolates each arm's torch.compile graph (the cache CANNOT key on W4A8);
+      # VLLM_LOG_STATS_INTERVAL=2.0 tightens the `Avg generation throughput` window.
+      - VLLM_CACHE_ROOT
+      - VLLM_LOG_STATS_INTERVAL
     entrypoint:
       - bash
       - -c
@@ -197,14 +234,28 @@ services:
         # from .env or shell STILL WINS in both branches. top_k / min_p are
         # identical across the rows and stay mode-independent.
         _temp="$${TEMP:-}"
-        if [ "$${ENABLE_THINKING:-false}" = "true" ]; then
+        # ⚠️ presence_penalty IS SILENTLY DROPPED — it is in the JSON below for
+        # intent, but vLLM never applies it. get_diff_sampling_param()
+        # (config/model.py) filters --override-generation-config through a fixed
+        # allowlist — repetition_penalty, temperature, top_k, top_p, min_p,
+        # max_new_tokens — with no penalties in it, and ChatCompletionRequest
+        # declares `presence_penalty: float | None = 0.0`, a hard default that is
+        # always present in the request and therefore always wins. So the instruct
+        # row's presence_penalty=1.5 resolves to 0.0 server-side. SGLang has the
+        # identical gap (same allowlist, same hard default): presence_penalty is a
+        # CLIENT-SIDE parameter on BOTH engines. That is what the model card's own
+        # non-thinking example does, and what its "support for sampling parameters
+        # varies according to inference frameworks" note is warning about.
+        # Everything else in the row DOES land — verified 2026-09-11 by resolving a
+        # bare request through to_sampling_params() inside the pinned image.
+        if [ "$${ENABLE_THINKING:-true}" = "true" ]; then
           : "$${_temp:=1.0}" "$${TOP_P:=0.95}" "$${PRESENCE_PENALTY:=0.0}"
           echo "[sampler] thinking row (ENABLE_THINKING=true): temp=$$_temp top_p=$${TOP_P} presence=$${PRESENCE_PENALTY}" >&2
         else
           : "$${_temp:=0.7}" "$${TOP_P:=0.80}" "$${PRESENCE_PENALTY:=1.5}"
           echo "[sampler] instruct row (default): temp=$$_temp top_p=$${TOP_P} presence=$${PRESENCE_PENALTY}" >&2
         fi
-        SAMPLER_ARGS=(--override-generation-config "{\"temperature\":$$_temp,\"top_p\":$${TOP_P},\"top_k\":$${TOP_K:-20},\"min_p\":$${MIN_P:-0.0},\"presence_penalty\":$${PRESENCE_PENALTY}}")
+        SAMPLER_ARGS=(--override-generation-config "{\"temperature\":$$_temp,\"top_p\":$${TOP_P},\"top_k\":$${TOP_K:-20},\"min_p\":$${MIN_P:-0.0},\"presence_penalty\":$${PRESENCE_PENALTY},\"repetition_penalty\":$${REPEAT_PENALTY:-1.0}}")
         exec vllm serve $$AR "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
       - --
     command:
@@ -253,9 +304,9 @@ services:
       # ⭐ reasoning_effort default = low (2026-08-16). It is a PER-REQUEST OpenAI
       # control, so this is only the fallback for callers that send nothing — any
       # agent still picks its own level per request.
-      # ⚠️ INERT while enable_thinking is false (the shipped default): the template
-      # only reads reasoning_effort inside `if enable_thinking is undefined or true`.
-      # It takes effect the moment ENABLE_THINKING=true.
+      # ⚠️ ACTIVE on every request since the 2026-09-01 thinking flip. The template
+      # only reads reasoning_effort inside `if enable_thinking is undefined or true`,
+      # so it goes INERT only under ENABLE_THINKING=false.
       # ⚠️ low is an ACTIVE instruction, not "less of medium" — it injects
       # "Keep your thinking brief and focused, moving directly to the conclusion
       # without unnecessary elaboration." The three levels are NOT a scale with a
@@ -263,12 +314,18 @@ services:
       # xhigh adds "think carefully, validate assumptions, consider alternatives"
       # which is what makes it slow and timeout-prone. REASONING_EFFORT=medium if
       # you want the model un-nudged rather than pushed toward brevity.
-      # ⚠️ Valid values are xhigh | medium | low. Anything else RAISES at template
-      # render (`high` included — it does NOT silently remap).
-      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
+      # ⚠️ Valid values are xhigh | medium | low, plus `high`, which THIS REPO
+      # maps onto XHIGH via the patched chat template mounted above. Upstream
+      # Qwen has no `high` rung and its stock template RAISES on it; the mapping
+      # is the whole point of that mount. medium is the UN-NUDGED baseline (no
+      # branch, no injected preamble), deliberately NOT xhigh — a client sending
+      # the standard top rung gets the neutral setting, not the slowest one.
+      # Anything OUTSIDE that set still RAISES at template render (HTTP 400).
+      - '{"enable_thinking": ${ENABLE_THINKING:-true}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
       # SAMPLER moved INTO the entrypoint (#984/#1014): at boot it derives
       # --override-generation-config from the model-card row matching
-      # ENABLE_THINKING (instruct by default; thinking when true); explicit
+      # ENABLE_THINKING (THINKING by default since 2026-09-01; instruct when
+      # false); explicit
       # TEMP/TOP_P/PRESENCE_PENALTY still win. Both rows: "SAMPLER" header above.
       - --host
       - 0.0.0.0

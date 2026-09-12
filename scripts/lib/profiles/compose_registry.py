@@ -55,6 +55,12 @@ COMPOSE_STATUS_EMOJI = {
 
 def _entry(
     *,
+    # Catalog provenance (#1202). FIRST-CLASS FIELD, never derived from the slug
+    # string: publishing a local recipe upstream later must flip this value and
+    # leave the slug alone. Encoding provenance in the NAME would make publish a
+    # rename, breaking every reference a user holds (their scripts, notes,
+    # compose pins). Core rows default; the local loader injects "local".
+    origin="core",
     model,
     weights_variant,
     workload,
@@ -168,12 +174,22 @@ def _entry(
     # {...}} with temperature/top_p/top_k/min_p/presence_penalty/
     # repetition_penalty. None (the default) = single-row model, the compose's
     # static sampler is the only truth. When set, the compose entrypoint derives
-    # its shipped default from the INSTRUCT row and flips to THINKING on
-    # ENABLE_THINKING=true; test-compose-sampler-profiles.sh asserts the compose
-    # can never drift from this data. Adding a key here is the allowlist gate:
+    # its shipped default from `sampler_default_mode` (below) and flips to the
+    # OTHER row on the opt-in knob; test-compose-sampler-profiles.sh asserts the
+    # compose can never drift from this data. Adding a key here is the
+    # allowlist gate:
     # local-layer rows go through _entry(**kwargs) too, so an unknown sampler
     # kwarg fails loudly (LocalRegistryError), never silently.
     sampler_profiles=None,
+    # Which sampler_profiles row the compose ships when the user sets NO env:
+    # "instruct" (the default when omitted) or "thinking". This is POLICY, not a
+    # restatement of the compose — the gate renders the compose and asserts the
+    # resolved sampler equals THIS row, so an accidental flip of a compose
+    # default fails loudly rather than passing because expectation and evidence
+    # were read from the same file. qwen3.8-27b moved to "thinking" 2026-09-01
+    # (community request + issue #1027, where instruct scored worst of the four
+    # modes measured); qwen3.8-flash-next still ships "instruct".
+    sampler_default_mode=None,
     # Speculation that needs NO drafter GGUF (the ngram-* runtime spec-types).
     # Those slugs keep `drafter=None` by design, so consumers deriving a label
     # from `drafter` alone would report 'no speculation' while it is running.
@@ -186,6 +202,7 @@ def _entry(
             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
         )
     entry = {
+        "origin": origin,
         "model": model,
         "weights_variant": weights_variant,
         "workload": workload,
@@ -255,6 +272,17 @@ def _entry(
         entry["sampler_profiles"] = {
             mode: dict(row) for mode, row in sampler_profiles.items()
         }
+        # Normalised here so every consumer sees an explicit mode and none has
+        # to re-implement the "absent means instruct" default.
+        _mode = sampler_default_mode or "instruct"
+        if _mode not in ("instruct", "thinking"):
+            raise ValueError(
+                "sampler_default_mode must be 'instruct' or 'thinking', "
+                f"got {sampler_default_mode!r}"
+            )
+        entry["sampler_default_mode"] = _mode
+    elif sampler_default_mode is not None:
+        raise ValueError("sampler_default_mode set without sampler_profiles")
     return entry
 
 
@@ -815,13 +843,30 @@ def load_local_registry(root=None):
     local: dict = {}
     local_models: set = set()
     for slug, kwargs in raw.items():
-        if not slug.startswith(LOCAL_SLUG_PREFIX):
+        # HARD-CUT (#1202 P3). Local slugs take the SAME `<engine>/<name>` shape
+        # as curated rows. `local/` used to occupy the ENGINE slot, so a local
+        # model could not say which engine it runs — and a user on their own
+        # build had nowhere to record it. Provenance is the `origin` field now.
+        if slug.startswith(LOCAL_SLUG_PREFIX):
             raise LocalRegistryError(
-                f"{path}: local slug {slug!r} must live under the "
-                f"{LOCAL_SLUG_PREFIX!r} namespace"
+                f"{path}: the {LOCAL_SLUG_PREFIX!r} namespace was removed. Local "
+                f"slugs now use the same '<engine>/<name>' shape as curated ones "
+                f"(provenance lives in the 'origin' field). Re-register {slug!r} "
+                f"as '<engine>/{slug[len(LOCAL_SLUG_PREFIX):]}'."
             )
-        if slug in core_slugs or slug in local:
-            raise LocalRegistryError(f"{path}: local slug collides: {slug!r}")
+        if slug.count("/") != 1 or slug.startswith("/") or slug.endswith("/"):
+            raise LocalRegistryError(
+                f"{path}: local slug {slug!r} must be '<engine>/<name>'"
+            )
+        if slug in local:
+            raise LocalRegistryError(f"{path}: duplicate local slug: {slug!r}")
+        # ⚠️ A collision with CORE is NOT an error (#1202). Refusing at load would
+        # let a routine stack update — us shipping a curated slug whose name a user
+        # already registered — break their working setup with no warning, and take
+        # the whole local layer down with it. Core wins the lookup; the local row
+        # stays loaded and MARKED so `--list` can show what happened and the user
+        # can rename it. Silent shadowing in either direction is the bad outcome.
+        shadowed = slug in core_slugs
         model = kwargs.get("model")
         if model in core_models:
             raise LocalRegistryError(
@@ -829,17 +874,60 @@ def load_local_registry(root=None):
             )
         if model in local_models:
             raise LocalRegistryError(f"{path}: duplicate local model id {model!r}")
+        if "origin" in kwargs:
+            raise LocalRegistryError(
+                f"{path}: local entry {slug!r} may not set 'origin' — it is "
+                f"stamped by the loader, not self-declared"
+            )
         try:
-            entry = _entry(**kwargs)
+            entry = _entry(origin="local", **kwargs)
         except TypeError as exc:
             raise LocalRegistryError(
                 f"{path}: local entry {slug!r} has bad _entry kwargs: {exc}"
             ) from exc
         except ValueError as exc:
             raise LocalRegistryError(f"{path}: local entry {slug!r}: {exc}") from exc
+        entry["shadowed_by_core"] = shadowed
         local[slug] = entry
         local_models.add(model)
     return local
+
+
+def local_entries(root=None):
+    """The LOCAL layer as a management view (#1153): what a user registered.
+
+    `get_registry()` is the LOOKUP view — core wins, so a shadowed local row is
+    absent from it by design. That makes it the wrong source for a management
+    UI: the row a user most needs to act on (rename it, it is unreachable) is
+    exactly the one the lookup view hides. This returns every local row with the
+    facts needed to manage it, `shadowed` included.
+
+    Returns a list of dicts sorted by slug; [] when there is no local layer.
+    Never raises: a broken layer yields [] rather than taking a UI down with it.
+    """
+    try:
+        local = load_local_registry(root)
+    except Exception:
+        return []
+    out = []
+    for slug, entry in sorted(local.items()):
+        out.append(
+            {
+                "slug": slug,
+                "engine": entry.get("engine"),
+                "model": entry.get("model"),
+                "port": entry.get("default_port"),
+                "workload": entry.get("workload"),
+                "max_ctx": entry.get("max_ctx"),
+                "status": entry.get("status"),
+                "compose_path": entry.get("compose_path"),
+                # core wins the lookup, so this row is registered but unreachable
+                # by slug until it is renamed.
+                "shadowed": bool(entry.get("shadowed_by_core"))
+                or slug in COMPOSE_REGISTRY,
+            }
+        )
+    return out
 
 
 def get_registry(root=None):
@@ -853,8 +941,17 @@ def get_registry(root=None):
     local = load_local_registry(root)
     if not local:
         return COMPOSE_REGISTRY
+    # CORE WINS (#1202). `merged.update(local)` would let a local row shadow a
+    # shipped slug silently. That is unreachable while local slugs live under a
+    # separate namespace, but P3 gives them the same `<engine>/<name>` shape as
+    # curated rows, at which point the collision is real. Decide it here, once:
+    # core owns the lookup, and the shadowed local row is still returned by
+    # load_local_registry (flagged `shadowed_by_core`) so listings can show it.
     merged = dict(COMPOSE_REGISTRY)
-    merged.update(local)
+    for slug, entry in local.items():
+        if slug in merged:
+            continue
+        merged[slug] = entry
     return merged
 
 

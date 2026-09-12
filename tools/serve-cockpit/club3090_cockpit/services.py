@@ -294,7 +294,12 @@ class RealRunner:
 
 
 # Detect seam: async callables matching the core signatures.
-DetectEndpointFn = Callable[[], Awaitable[ServingTarget]]
+# Takes an optional ``variants=`` registry-rows kwarg (#1219: detection is
+# registry-first), so an injected double MUST accept it — swallowing a TypeError
+# here to retry without it would mask a genuine detect failure, and this callable
+# feeds the fail-closed dual-writer gate where "I could not detect" must mean
+# UNSAFE, never "nothing running".
+DetectEndpointFn = Callable[..., Awaitable[ServingTarget]]
 GetGpuInfoFn = Callable[[], Awaitable[list[GpuInfo]]]
 # A7: probe the live engine for its ACTUAL running config (ctx + image).  Takes
 # the detected ServingTarget (for url / container) and returns a ServedProbe.
@@ -2452,6 +2457,59 @@ class CockpitData:
 
     # ── READ: container logs ──────────────────────────────────────────────────────
 
+    async def vram_breakdown(self, container: str) -> dict[str, Any]:
+        """Per-GPU VRAM component split for the serving container (#1118, READ).
+
+        Same seam as bootlog_solve: ``docker logs <container>`` through the
+        injected read runner, then ``scripts/lib/vram_breakdown.py <log>
+        --json`` (the parser bench.sh uses; the packaged TUI never imports
+        repo internals).
+
+        Reads the FULL log, both streams, and is cached by the caller (600 s
+        stride): the component lines live at the HEAD of the log (boot-time
+        load_tensors / sched_reserve), and a tail window on a long-running
+        container drops them entirely -- measured 578k lines with the boot in
+        the first ~70 on glm53-flash-dual.  Boot lines are on STDERR, and
+        ``container_logs`` only surfaces stderr when stdout is empty, so this
+        method reads the runner directly and merges both streams."""
+        if not container:
+            return {"ok": False, "container": container, "devices": [],
+                    "warnings": [], "error": "no serving container resolved"}
+        res = await self._runner.run(
+            ["docker", "logs", container],
+            cwd=str(self.repo_root), timeout=60.0,
+        )
+        if res.timed_out:
+            return {"ok": False, "container": container, "devices": [],
+                    "warnings": [],
+                    "error": f"timed out reading logs for {container}"}
+        # docker logs splits app output across stdout/stderr; llama.cpp
+        # announces the buffers on stderr while later traffic lands on
+        # stdout -- both are needed, so merge unconditionally.
+        text = f"{res.stdout or ''}\n{res.stderr or ''}"
+        lines = text.splitlines()
+        import tempfile
+
+        fd, path = tempfile.mkstemp(prefix="c3-vram-", suffix=".log")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write("\n".join(lines))
+            data, err = await self._run_json(
+                ["python3", "scripts/lib/vram_breakdown.py", path, "--json"],
+                timeout=30.0,
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:  # pragma: no cover - defensive
+                pass
+        if err:
+            return {"ok": False, "container": container, "devices": [],
+                    "warnings": [], "error": err}
+        return {"ok": True, "container": container,
+                "devices": data.get("devices", []),
+                "warnings": data.get("warnings", []), "error": None}
+
     async def container_logs(
         self, name: str, *, tail: int = 200
     ) -> dict[str, Any]:
@@ -2568,9 +2626,15 @@ class CockpitData:
         health.sh Doctor read + gpu-mode scene catalog + estate-planner report."""
         state = EstateState()
 
-        # detect: running engine + GPUs
+        # detect: running engine + GPUs.
+        # Hand the registry rows DOWN into detection (#1219) — a local slug's
+        # container matches neither the engine-name prefix nor the curated
+        # internal-port set, so without them it is never classified as an engine
+        # and the estate reports "not reachable" over a plainly loaded model.
+        # match_target_to_registry below still enriches; this makes detection
+        # itself registry-aware instead of only the labelling after it.
         try:
-            target = await self._detect_endpoint()
+            target = await self._detect_endpoint(variants=variants)
         except Exception as exc:  # pragma: no cover - defensive
             state.error = f"detect failed: {exc}"
             target = ServingTarget()
@@ -3057,8 +3121,11 @@ class CockpitData:
         result = ReconcileResult(safe=True, action=action)
 
         # Fresh detect — never trust a cached snapshot for the gate.
+        # Registry-first (#1219): this gate decides whether the cards are free, so
+        # a container detection cannot classify reads as NO container — i.e. a
+        # registered local slug serving on GPU0 would look like an empty card.
         try:
-            target = await self._detect_endpoint()
+            target = await self._detect_endpoint(variants=variants)
         except Exception as exc:  # pragma: no cover - defensive
             result.note = f"detect failed: {exc}"
             # A failed detect is NOT safe — we can't prove the cards are free.
@@ -3511,11 +3578,20 @@ class CockpitData:
         )
 
     def estate_down(self) -> ActionPlan:
+        """Stop everything.
+
+        The reconcile gate lists running instances as COLLISIONS, so on any busy
+        rig "Stop all" opened with Confirm disabled and "press f to Stop anyway"
+        — the gate treating the very thing you asked to stop as a reason not to.
+        The targeted stop (`k`) already carries force + a reason for exactly this;
+        stop-all is the same case, so it says so up front and ⏎ commits."""
         return ActionPlan(
             kind="estate_down",
             cmd=["python3", "scripts/lib/profiles/estate_cli.py", "down"],
             description="estate_cli down",
             requires_reconcile=True,
+            force=True,
+            force_reason="stopping everything is the point — running instances are the target, not a collision",
         )
 
     def container_action(self, name: str, op: str) -> ActionPlan:
@@ -4971,11 +5047,14 @@ class CockpitData:
         on_event: Optional[Callable[[Any], None]] = None,
         on_line: Optional[Callable[[str], None]] = None,
     ) -> Any:
-        """Launch c3t scoped to the SHARED ServingTarget, streamed (MOCK-ONLY).
+        """Launch c3t scoped to the SHARED ServingTarget, streamed.
 
-        ⚠️  WIRED-BUT-MOCK-ONLY.  c3t runs the post-boot evaluator against the
-        live serving model — heavy.  The write runner is NEVER executed live this
-        phase; conftest blocks the real spawn and tests inject a FakeWriteRunner.
+        ⚠️  THIS RUNS FOR REAL.  c3t is spawned through ``self._write_runner`` —
+        the production runner in a real session — and evaluates the live serving
+        model (heavy).  The previous "WIRED-BUT-MOCK-ONLY / never executed live"
+        note described only the TEST environment: conftest blocks the spawn and
+        tests inject a FakeWriteRunner, neither of which applies in production.
+        Callers must keep this behind the confirm gate.
 
         Scopes c3t to ``target`` by passing the endpoint/model/container through
         the child env (``C3T_REPO_ROOT`` + ``C3T_TARGET_*``) so the test-console
@@ -5088,6 +5167,65 @@ class CockpitData:
             ),
             requires_reconcile=False,    # no GPU contention — a repo write
             requires_confirm=True,       # repo mutation — confirm, never auto
+        )
+
+    def local_amend_plan(
+        self,
+        kind: str,
+        slug: str,
+        *,
+        to: str = "",
+        sets: Optional[list] = None,
+    ) -> ActionPlan:
+        """GATED plan for managing an entry in the LOCAL layer (#1153).
+
+        The layer was write-only from the UI: ⑤ Promote could create an entry and
+        nothing could list, edit or remove one, so changing anything meant
+        hand-editing registry.local.json — the exact friction the layer exists to
+        remove.
+
+        The executor is scripts/catalog.sh, so the UI and the CLI share one
+        implementation and one set of refusals: a CURATED slug is unreachable
+        from every one of these (resolved in registry.local.json first, refused
+        before anything is read), `origin` is not editable, and renaming onto a
+        curated slug is refused because it would be shadowed instantly.
+
+        ⚠️ REPO MUTATION — never auto-fired. requires_confirm=True routes it
+        through ConfirmActionScreen; no GPU is claimed → requires_reconcile=False.
+        """
+        import shlex
+
+        q = shlex.quote
+        if kind == "remove":
+            cmd = f"bash scripts/catalog.sh unregister --slug {q(slug)} -y"
+            desc = (
+                f"unregister {slug} from the LOCAL layer — removes its model "
+                f"profile, compose tree and registry entry (core is untouched)"
+            )
+        elif kind == "rename":
+            if not to:
+                raise ValueError("rename needs a target slug")
+            cmd = f"bash scripts/catalog.sh rename --slug {q(slug)} --to {q(to)}"
+            desc = (
+                f"rename {slug} → {to} in the LOCAL layer "
+                f"(moves the compose tree when the engine changes)"
+            )
+        elif kind == "update":
+            pairs = list(sets or [])
+            if not pairs:
+                raise ValueError("update needs at least one KEY=VALUE")
+            args = " ".join(f"--set {q(kv)}" for kv in pairs)
+            cmd = f"bash scripts/catalog.sh update --slug {q(slug)} {args}"
+            desc = f"update {slug} in the LOCAL layer: {', '.join(pairs)}"
+        else:
+            raise ValueError(f"unknown amend kind: {kind!r}")
+
+        return ActionPlan(
+            kind=f"local_{kind}",
+            cmd=["bash", "-c", cmd],
+            description=desc,
+            requires_reconcile=False,   # a repo write, not a GPU claim
+            requires_confirm=True,      # repo mutation — confirm, never auto
         )
 
     def export_pr_plan(self, spec: dict, *, out_dir: Optional[str] = None) -> ActionPlan:

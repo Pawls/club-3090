@@ -65,6 +65,7 @@ import json
 import os
 import re
 import subprocess
+import zlib
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -90,6 +91,15 @@ _LOCAL_FORCED_STATUS = "incubating"
 # Maintainer gate for the CORE write path (C4-rev): both the flag AND --layer
 # core must be present, or the core catalog is untouchable.
 _CORE_GATE_ENV = "C3_ALLOW_CORE_PROMOTE"
+
+# #1142: repo-root .env support. Kept as a dual import so this file works both as
+# a script (`python3 scripts/lib/profiles/promote.py` — own dir on sys.path) and
+# as a package module (`from scripts.lib.profiles import promote`, as the tests do).
+try:  # package context
+    from scripts.lib.profiles.repo_dotenv import apply_dotenv
+except ImportError:  # direct-script context
+    from repo_dotenv import apply_dotenv
+
 
 _MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*/[a-z0-9][a-z0-9._-]*$")
@@ -403,11 +413,15 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
 
     if layer == "local":
         # ── Namespace + containment (C4-rev): local writes NEVER leave the layer.
-        if not slug.startswith(_LOCAL_SLUG_PREFIX):
+        # HARD-CUT (#1202 P3): local slugs are '<engine>/<name>', same as core.
+        if slug.startswith(_LOCAL_SLUG_PREFIX):
             raise Refusal(
-                f"local-layer slugs must carry the {_LOCAL_SLUG_PREFIX!r} namespace "
-                f"(got {slug!r}); use --layer core for a curated engine slug"
+                f"the {_LOCAL_SLUG_PREFIX!r} namespace was removed — local slugs "
+                f"now use '<engine>/<name>' (provenance is the 'origin' field). "
+                f"Use '<engine>/{slug[len(_LOCAL_SLUG_PREFIX):]}'."
             )
+        if slug.count("/") != 1:
+            raise Refusal(f"local slug {slug!r} must be '<engine>/<name>'")
         _refuse_if_path_escapes(cpath, _LOCAL_COMPOSES_REL, "spec.compose.path")
         if kwargs.get("compose_path") != cpath:
             raise Refusal(
@@ -452,14 +466,40 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
             raise Refusal(f"registry kwargs are not valid _entry kwargs: {exc}")
         except ValueError as exc:
             raise Refusal(f"registry kwargs rejected by _entry: {exc}")
+        # ── LOCAL: keep BYOM ports out of the curated band (#1142 follow-up) ──
+        # The curated catalog occupies 8010-8199. A local slug landing on one of
+        # those ports turns the repo's OWN test-compose-port-conflicts guard red
+        # on the user's checkout, and its remediation text invites reassigning
+        # "one side" — i.e. editing a curated entry they must never touch.
+        # Refuse the collision here and hand them the deterministic 202xx
+        # LOCAL-band port the c3 Promote scaffold already assigns, so the CLI and
+        # the cockpit agree on one convention.
+        want = kwargs.get("default_port")
+        if want is not None:
+            core_ports = {
+                e.get("default_port")
+                for e in _import_compose_registry(root, merged=False).values()
+            }
+            if want in core_ports:
+                suggested = 20200 + (zlib.crc32(mid.encode("utf-8")) % 100)
+                raise Refusal(
+                    f"default_port {want} is already used by the curated catalog. "
+                    f"LOCAL models live in the 202xx band so a `git pull` of new "
+                    f"curated slugs can never collide with yours — use {suggested} "
+                    f"(deterministic for model id {mid!r}; the same value c3's "
+                    f"Promote scaffold assigns) and set the compose's "
+                    f"${{PORT:-NNNN}} to match"
+                )
+
         return spec
 
     # ── layer == "core": maintainer-gated curated-catalog write ──────────────
     if os.environ.get(_CORE_GATE_ENV) != "1":
         raise Refusal(
             f"core-catalog writes are maintainer-gated: re-run with --layer core "
-            f"AND {_CORE_GATE_ENV}=1 in the environment (community users: use the "
-            f"default --layer local)"
+            f"AND {_CORE_GATE_ENV}=1 — exported in the shell OR set in the "
+            f"repo-root .env (both are read; the environment wins). Community "
+            f"users: use the default --layer local"
         )
     if slug.startswith(_LOCAL_SLUG_PREFIX):
         raise Refusal(
@@ -611,15 +651,54 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument(
         "--layer",
         choices=("local", "core"),
-        default="local",
+        default=None,          # None => "not chosen"; resolved to local below
         help="write target: local (default — scripts/lib/profiles-local/, never "
         "touches core) or core (curated catalog; needs " + _CORE_GATE_ENV + "=1)",
+    )
+    ap.add_argument(
+        "--yes", action="store_true",
+        help="skip the interactive layer confirm (implied when --layer is given, "
+        "or when stdin is not a TTY)",
     )
     ap.add_argument("--root", default=str(_DEFAULT_ROOT), help="repo root (default: this checkout)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
     args = ap.parse_args(argv)
 
+    # #1142 item 6: `local` is the safe default, but it was taken SILENTLY — the
+    # user never learned a choice existed. Pose it when the layer was defaulted
+    # AND a human is present. c3 already does this (its Promote screen names all
+    # three destinations); this makes the CLI agree. Skipped when --layer was
+    # given (the cockpit always passes it and has its own confirm), under --yes,
+    # under --dry-run, and whenever stdin is not a TTY — so scripts and tests are
+    # untouched.
+    layer_defaulted = args.layer is None
+    args.layer = args.layer or "local"
+    if layer_defaulted and not args.yes and not args.dry_run and sys.stdin.isatty():
+        print(
+            f"[promote] no --layer given → writing the LOCAL layer "
+            f"(scripts/lib/profiles-local/, gitignored, never touches the curated "
+            f"catalog).\n[promote]   --layer core   = curated catalog "
+            f"(maintainer-only, needs {_CORE_GATE_ENV}=1)\n"
+            f"[promote]   export_pr.py = turn this local model into a PR bundle later",
+            file=sys.stderr,
+        )
+        try:
+            reply = input("[promote] write the LOCAL layer? [Y/n] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("", "y", "yes"):
+            print("[promote] aborted — nothing written", file=sys.stderr)
+            return EXIT_COLLISION
+
     root = Path(args.root).resolve()
+    # #1142: the shell launchers source <root>/.env, but these tools are invoked
+    # directly (no wrapper in scripts/ runs them), so a gate parked there used to
+    # be a SILENT no-op — no error, no effect. Fill UNSET keys from it, and say so
+    # when the maintainer gate is one of them: .env stops being silent BOTH ways.
+    _from_dotenv = apply_dotenv(root)
+    if _CORE_GATE_ENV in _from_dotenv:
+        print(f"[promote] {_CORE_GATE_ENV} read from {root}/.env "
+              f"(export it in the shell to override)", file=sys.stderr)
     try:
         if args.spec_env:
             raw_spec = os.environ.get(args.spec_env)
@@ -653,7 +732,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ── Post-write sanity ───────────────────────────────────────────────────
     _post_write_checks(root, spec, profile_path)
     _info(f"import-sanity + registry-emit re-check passed for {slug}")
-    print(f"PROMOTE_OK {slug}")
+    # #1142 item 6: state the layer on every run — "PROMOTE_OK <slug>" alone left
+    # the reader unable to tell whether their model went to their own checkout or
+    # to the curated catalog.
+    print(f"PROMOTE_OK {slug} [layer={args.layer}]")
     return 0
 
 

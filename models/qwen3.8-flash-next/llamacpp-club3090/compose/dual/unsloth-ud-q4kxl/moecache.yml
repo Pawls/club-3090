@@ -36,7 +36,7 @@
 #   Max ctx:   204800 shipped. 262144 is the model's NATIVE figure and boots,
 #              but 204800 is what was benched and what the pool was sized for.
 #   Genesis:   N/A — llama.cpp engine
-#   Status:    🐣 Incubating
+#   Status:    🧪 Experimental
 # CPU-Offload-Host-RAM-GB: 110
 #   ⤷ ALL-on-CPU worst case, from the 105 GB of weights + headroom. Registry
 #     `host_ram_gb` is the NOMINAL figure and must stay <= this.
@@ -102,8 +102,6 @@ services:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     environment:
       # Drafter toggle - docker forwards only what is declared here.
-      - SPEC_N=${SPEC_N:-}
-      - SPEC=${SPEC:-}
       # Expert-cache tuning — every value MEASURED on 2×24 GB, see Caveats.
       - GGML_CUDA_MOE_CACHE_ADMIT_AFTER=${MOE_ADMIT_AFTER:-64}
       - GGML_CUDA_MOE_CACHE_RESERVE_MB=${MOE_RESERVE_MB:-1536}
@@ -164,6 +162,14 @@ services:
       # — MLA + SWA is a plausible refusal case, so CHECK THE BOOT LOG rather
       # than assuming it engaged.
       - LLAMA_ARG_CACHE_REUSE
+      # Bare passthrough — inert unless the caller sets it (unset => the engine's
+      # getenv returns NULL => reuse stays ON; atoi("") would also be 0, so the
+      # empty form is harmless here, but bare is the house rule).
+      # Declared so the graph-reuse A/B can run through the REAL delivery path:
+      # docker forwards only what is listed here, so without this line the
+      # experiment's two arms are byte-identical and the null result is an
+      # artifact of the harness, not a measurement.
+      - LLAMA_GRAPH_REUSE_DISABLE
       # Thread count. Resolved in the entrypoint (see [threads]) because a
       # fixed compose default cannot be right on two different rigs.
       - THREADS
