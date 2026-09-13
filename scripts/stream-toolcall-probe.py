@@ -107,10 +107,14 @@ def stream_request(url, model, messages, tool_choice, thinking, temperature, max
         effort = os.environ.get("THINK_ON_EFFORT")
         if effort:
             body["reasoning_effort"] = effort
+    headers = {"Content-Type": "application/json"}
+    # Engines take no auth; the LiteLLM proxy (:4000) needs its master key.
+    if os.environ.get("OPENAI_API_KEY"):
+        headers["Authorization"] = "Bearer " + os.environ["OPENAI_API_KEY"]
     req = urllib.request.Request(
         url.rstrip("/") + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"})
+        headers=headers)
     content = ""
     tool_calls = {}   # index -> {"name": str, "arguments": str}
     finish = None
