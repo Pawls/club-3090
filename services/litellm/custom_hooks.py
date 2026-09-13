@@ -41,6 +41,13 @@ different model in the dropdown", the same trick qwen3.8-max / qwen3.8-max-nothi
 An explicit client-sent chat_template_kwargs.reasoning_strength always wins over both.
 
 Only these models are touched; the big-context text models keep their full output budget.
+
+(F) Tool-call repair DETECTION, observe-only (2026-09-12): measures how often each repair class
+in HANDOFF-toolcall-repair-2026-09-02.md §5a would fire, before any repair is built. Runs in
+async_log_success_event — AFTER the response has been delivered, on the assembled response — so
+it cannot delay, alter, or break a stream. Every model, every tool-bearing request; one JSONL
+row each to logs/toolcall-detect.jsonl (clean rows included, so rates have a denominator).
+Kill switch: CLUB3090_TOOLCALL_DETECT=0.
 """
 import json
 import os
@@ -586,7 +593,254 @@ def _apply_preserve(messages, mode, window):
         # any other content type: leave untouched (defensive)
 
 
+# --- (F) Tool-call repair detection (observe-only) -------------------------------------------
+# Classifies each tool-bearing response against the four proxy repair classes (handoff §5a):
+#   markup       #1  call leaked into content as <tool_call>/<function=…> with no tool_calls
+#   args_json    #2  structured call whose arguments fail json.loads
+#   name         #3  structured call naming an undeclared tool
+#   types        #4  argument value whose JSON type disagrees with the declared schema
+# Each finding carries a `verdict` saying whether the §5a rules would repair it
+# (would_repair) or must leave it alone (truncated / unrepairable / unknown / mismatch).
+_TC_DETECT = os.environ.get("CLUB3090_TOOLCALL_DETECT", "1").strip().lower() not in ("0", "false", "no")
+_TC_LOG = "/app/logs/toolcall-detect.jsonl"
+_TC_SNIP = 300
+_HERMES_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.S)
+_CODER_FUNC_RE = re.compile(r"<function=([^>\s]+)>(.*?)</function>", re.S)
+_CODER_PARAM_RE = re.compile(r"<parameter=([^>\s]+)>(.*?)</parameter>", re.S)
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+
+def _tc_plain(obj):
+    """ModelResponse / pydantic / dict -> plain dict (best effort)."""
+    if obj is None or isinstance(obj, dict):
+        return obj
+    for attr in ("model_dump", "dict", "json"):
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                out = fn()
+                return json.loads(out) if isinstance(out, str) else out
+            except Exception:
+                continue
+    return None
+
+
+def _tc_declared(tools):
+    """Request `tools` -> {name: parameters-schema}."""
+    out = {}
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        name = fn.get("name")
+        if name:
+            out[name] = fn.get("parameters") or fn.get("input_schema") or {}
+    return out
+
+
+def _tc_norm_name(name):
+    n = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", str(name)).lower()
+    n = re.sub(r"[-\s]+", "_", n)
+    for _ in range(2):
+        n = re.sub(r"_?tool$", "", n)
+    return n
+
+
+def _tc_name_verdict(name, declared):
+    target = _tc_norm_name(name)
+    hits = [d for d in declared if _tc_norm_name(d) == target]
+    return ("would_repair", hits[0]) if len(hits) == 1 else ("unknown", None)
+
+
+def _tc_args_verdict(raw, truncated):
+    """Return (verdict, parsed_or_None) for a raw arguments string per §5a repair #2."""
+    if isinstance(raw, dict):
+        return "ok", raw
+    raw = raw or ""
+    if not raw.strip():
+        return "ok", {}
+    try:
+        return "ok", json.loads(raw)
+    except ValueError:
+        pass
+    if truncated:
+        return "truncated", None
+    try:
+        return "would_repair:control_chars", json.loads(raw, strict=False)
+    except ValueError:
+        pass
+    try:
+        return "would_repair:trailing_comma", json.loads(_TRAILING_COMMA_RE.sub(r"\1", raw), strict=False)
+    except ValueError:
+        pass
+    if not raw.rstrip().endswith(("}", "]")):
+        return "truncated", None
+    return "unrepairable", None
+
+
+def _tc_schema_type(prop):
+    """One declared JSON type for a property, or None if it's a union / unreadable."""
+    if not isinstance(prop, dict):
+        return None
+    t = prop.get("type")
+    if isinstance(t, list):
+        t = [x for x in t if x != "null"]
+        return t[0] if len(t) == 1 else None
+    if isinstance(t, str):
+        return t
+    branches = [b for b in (prop.get("anyOf") or prop.get("oneOf") or [])
+                if isinstance(b, dict) and b.get("type") != "null"]
+    return branches[0].get("type") if len(branches) == 1 else None
+
+
+def _tc_type_findings(args, schema):
+    """Top-level property type check per §5a repair #4 (detection doesn't recurse)."""
+    props = (schema or {}).get("properties") or {}
+    found = []
+    for key, val in (args or {}).items():
+        want = _tc_schema_type(props.get(key))
+        if want is None:
+            continue
+        got = type(val).__name__
+        ok = {"string": isinstance(val, str),
+              "integer": isinstance(val, int) and not isinstance(val, bool),
+              "number": isinstance(val, (int, float)) and not isinstance(val, bool),
+              "boolean": isinstance(val, bool),
+              "array": isinstance(val, list),
+              "object": isinstance(val, dict),
+              "null": val is None}.get(want, True)
+        if ok:
+            continue
+        verdict = "mismatch"
+        if isinstance(val, str):
+            s = val.strip()
+            if want == "boolean" and s.lower() in ("true", "false"):
+                verdict = "would_repair"
+            elif want in ("integer", "number"):
+                try:
+                    num = int(s) if want == "integer" else float(s)
+                    if num == num and num not in (float("inf"), float("-inf")):
+                        verdict = "would_repair"
+                except ValueError:
+                    pass
+            elif want in ("array", "object"):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list if want == "array" else dict):
+                        verdict = "would_repair"
+                except ValueError:
+                    pass
+        found.append({"class": "types", "verdict": verdict, "key": key,
+                      "want": want, "got": got, "snip": str(val)[:_TC_SNIP]})
+    return found
+
+
+def _tc_markup_findings(content, declared, truncated):
+    """§5a repair #1: call markup leaked into content with no structured tool_calls."""
+    found = []
+    for m in _HERMES_CALL_RE.finditer(content):
+        body = m.group(1).strip()
+        if body.startswith("<function="):
+            continue   # qwen3_coder wraps its XML in <tool_call> too — classified below
+        verdict = "unrepairable"
+        try:
+            obj = json.loads(body, strict=False)
+            name = obj.get("name") if isinstance(obj, dict) else None
+            verdict = "would_repair" if name in declared else "undeclared_name"
+        except ValueError:
+            name = None
+        found.append({"class": "markup", "format": "hermes", "verdict": verdict,
+                      "name": name, "snip": m.group(0)[:_TC_SNIP]})
+    for m in _CODER_FUNC_RE.finditer(content):
+        name, body = m.group(1), m.group(2)
+        if name not in declared:
+            verdict = "undeclared_name"
+        elif _CODER_PARAM_RE.search(body) or not body.strip():
+            verdict = "would_repair"
+        else:
+            verdict = "unrepairable"
+        found.append({"class": "markup", "format": "qwen3_coder", "verdict": verdict,
+                      "name": name, "snip": m.group(0)[:_TC_SNIP]})
+    if not found and ("<tool_call" in content or "<function=" in content):
+        # An opener with no closer — cut off or malformed. Never promotable.
+        found.append({"class": "markup", "format": "unclosed",
+                      "verdict": "truncated" if truncated else "unrepairable",
+                      "snip": content[content.find("<"):][:_TC_SNIP]})
+    return found
+
+
+def _tc_detect(kwargs, response_obj):
+    """Build the JSONL row for one tool-bearing response, or None if the request had no tools."""
+    opt = kwargs.get("optional_params") or {}
+    declared = _tc_declared(opt.get("tools"))
+    if not declared:
+        return None
+    resp = _tc_plain(kwargs.get("complete_streaming_response")
+                     or kwargs.get("async_complete_streaming_response") or response_obj)
+    choices = (resp or {}).get("choices") or []
+    if not choices:
+        return None
+    choice = choices[0] or {}
+    msg = choice.get("message") or {}
+    finish = choice.get("finish_reason")
+    truncated = finish == "length"
+    calls = msg.get("tool_calls") or []
+    content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+    findings = []
+    if not calls and content:
+        findings += _tc_markup_findings(content, declared, truncated)
+    for c in calls:
+        fn = (c or {}).get("function") or {}
+        name, raw = fn.get("name"), fn.get("arguments")
+        schema_name = name
+        if name not in declared:
+            verdict, target = _tc_name_verdict(name, declared)
+            findings.append({"class": "name", "verdict": verdict, "name": name, "target": target})
+            schema_name = target
+        verdict, parsed = _tc_args_verdict(raw, truncated)
+        if verdict != "ok":
+            findings.append({"class": "args_json", "verdict": verdict, "name": name,
+                             "snip": str(raw)[:_TC_SNIP]})
+        if isinstance(parsed, dict) and schema_name in declared:
+            findings += _tc_type_findings(parsed, declared[schema_name])
+    return {
+        "model": str(kwargs.get("model", "")),
+        "stream": bool(kwargs.get("stream") or opt.get("stream")),
+        "finish": finish,
+        "tool_choice": opt.get("tool_choice"),
+        "n_tools": len(declared),
+        "n_calls": len(calls),
+        "findings": findings,
+    }
+
+
+def _tc_record(row):
+    """Append the row to the JSONL log; echo a summary line only when something was found."""
+    try:
+        from datetime import datetime, timezone
+        row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **row}
+        with open(_TC_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    if row["findings"]:
+        summary = ", ".join(f"{f['class']}:{f['verdict']}" for f in row["findings"])
+        print(f"[club3090][toolcall-detect] model={row['model']} finish={row['finish']} {summary}",
+              file=sys.stdout, flush=True)
+
+
 class MaxTokensCap(CustomLogger):
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        # (F) Observe-only — runs after delivery; must never raise into LiteLLM's logging loop.
+        if not _TC_DETECT:
+            return
+        try:
+            row = _tc_detect(kwargs, response_obj)
+            if row is not None:
+                _tc_record(row)
+        except Exception as e:
+            print(f"[club3090][toolcall-detect][ERR] {type(e).__name__}: {e}", file=sys.stdout, flush=True)
+
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         model = str(data.get("model", ""))
         if "omni" in model:
