@@ -382,8 +382,8 @@ services:
       # BOTH MTP and prefix caching, which is the pair vllm#43559 corrupts.
       # Anchor drift => the install script REFUSES the boot rather than
       # half-wiring it. See patches.yml.
-      - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
-      - ../../../../../qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
+      - ../../../../../_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
+      - ../../../../../_shared/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
       - ../../../patches/vllm-flashinfer-decode-pin:/etc/club3090/flashinfer-decode-pin:ro
     environment:
       # Drafter toggle — docker only forwards what is declared here. The DEFAULT

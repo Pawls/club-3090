@@ -35,13 +35,13 @@ p = load_profiles()
 assert len(p.hardware) == 11  # +dgx-spark (#576 follow-up), +rtx-a6000 (#948 thread)
 _p = __import__("pathlib").Path
 _nloc = lambda d: len(list(_p(d).glob("*.yml"))) if _p(d).is_dir() else 0
-assert len(p.models) - _nloc("scripts/lib/profiles-local/models.d") == 21   # +inkling-small, +qwen3.8-27b, +glm-5.3-flash, +qwen3.8-flash-next, +deepseek-v4-flash-vision-exp
+assert len(p.models) - _nloc("scripts/lib/profiles-local/models.d") == 20   # +inkling-small, +qwen3.8-27b, +glm-5.3-flash, +qwen3.8-flash-next, +deepseek-v4-flash-vision-exp, -qwen3.6-40b-deckard (qwen3.6-27b kept as a test-only fixture, no live composes)
 assert len(p.workloads) == 5
 _p = __import__("pathlib").Path
 _nloc = lambda d: len(list(_p(d).glob("*.yml"))) if _p(d).is_dir() else 0
 assert len(p.engines) - _nloc("scripts/lib/profiles-local/engines.d") == 18   # +llamacpp-club3090-v1.1, -v1.5, -v1.6, +sglang-stable
-assert len(p.drafters) == 19  # +syvai-qwen38-dflash2, +anbeeld-glm53-dflash2, +zlab-qwen38-dflash2
-assert len(p.calibration) == 6
+assert len(p.drafters) == 17  # +syvai-qwen38-dflash2, +anbeeld-glm53-dflash2, +zlab-qwen38-dflash2, -carnice-mtp-gguf, -qwopus-mtp-gguf
+assert len(p.calibration) == 5  # -qwen3.6-27b
 PY
 
 run_test "fits() happy path: Qwen dual on 2x3090" <<'PY'
@@ -321,18 +321,18 @@ run_test "to_compose_name strict match resolves dual compose" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, to_compose_name
 p = load_profiles()
 name = to_compose_name(
-    p.models["qwen3.6-27b"],
+    p.models["qwen3.6-35b-a3b"],
     p.engines["vllm-stable"],
-    p.drafters["qwen-mtp-builtin"],
+    None,
     "fp8_e4m3",
     2,
     1,
-    workload=p.workloads["long-ctx-single"],
+    workload=p.workloads["fast-chat"],
     weights_variant="autoround-int4",
     max_ctx=262144,
-    max_num_seqs=2,
+    max_num_seqs=1,
 )
-assert name == "vllm/dual", name
+assert name == "vllm/qwen-35b-a3b-dual", name
 PY
 
 run_test "FitsResult diagnostics populated on every call" <<'PY'
@@ -407,7 +407,7 @@ run_test "estate happy path: two disjoint instances on 4x3090" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
 p = load_profiles()
 instances = [
-    InstanceSpec("qwen", "vllm/dual", (0, 1), 8010),
+    InstanceSpec("qwen", "vllm/qwen-35b-a3b-dual", (0, 1), 8010),
     InstanceSpec("gemma", "vllm/gemma-bf16-mtp", (2, 3), 8030),
 ]
 r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=False)
@@ -464,8 +464,8 @@ run_test "estate self-test: two llama.cpp instances on 2x3090" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
 p = load_profiles()
 instances = [
-    InstanceSpec("llama-a", "llamacpp/default", (0,), 8020),
-    InstanceSpec("llama-b", "llamacpp/mtp", (1,), 8021),
+    InstanceSpec("llama-a", "llamacpp/gemma-12b-single-q8kxl", (0,), 8020),
+    InstanceSpec("llama-b", "llamacpp/vibethinker-3b-single", (1,), 8021),
 ]
 r = validate_estate(instances, [p.hardware["rtx-3090"], p.hardware["rtx-3090"]], p, nvlink_active=False)
 assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
@@ -475,7 +475,7 @@ run_test "estate self-test: Qwen plus Gemma on 4x3090" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
 p = load_profiles()
 instances = [
-    InstanceSpec("qwen", "vllm/dual", (0, 1), 8010),
+    InstanceSpec("qwen", "vllm/qwen-35b-a3b-dual", (0, 1), 8010),
     InstanceSpec("gemma", "vllm/gemma-int8-mtp", (2, 3), 8032),
 ]
 r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=False)
@@ -503,9 +503,9 @@ run_test "estate self-test: three-instance mix on 6x3090" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
 p = load_profiles()
 instances = [
-    InstanceSpec("qwen", "vllm/dual", (0, 1), 8010),
+    InstanceSpec("qwen", "vllm/qwen-35b-a3b-dual", (0, 1), 8010),
     InstanceSpec("gemma", "vllm/gemma-bf16-mtp", (2, 3), 8030),
-    InstanceSpec("llama", "llamacpp/default", (4,), 8020),
+    InstanceSpec("llama", "llamacpp/vibethinker-3b-single", (4,), 8020),
 ]
 r = validate_estate(instances, [p.hardware["rtx-3090"]] * 6, p, nvlink_active=False)
 assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
@@ -516,7 +516,7 @@ from scripts.lib.profiles.compat import load_profiles
 p = load_profiles()  # raises UnknownProfileKeyError on any unknown key
 _p = __import__("pathlib").Path
 _nloc = lambda d: len(list(_p(d).glob("*.yml"))) if _p(d).is_dir() else 0
-assert len(p.models) - _nloc("scripts/lib/profiles-local/models.d") == 21
+assert len(p.models) - _nloc("scripts/lib/profiles-local/models.d") == 20
 PY
 
 run_test "strict keys: typo'd top-level model key fails naming file + closest key" <<'PY'

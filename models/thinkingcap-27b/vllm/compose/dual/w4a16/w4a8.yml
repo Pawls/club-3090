@@ -103,11 +103,11 @@ services:
       # W4A8 int8-activation patches (Bug A INC input_dtype + Bug B negscale fold) —
       # SHARED from the qwen3.6-27b tree (single source of truth, like pr48375);
       # run at boot via install.sh. Registered in patches.yml (qwen-w4a8-int8-act).
-      - ../../../../../qwen3.6-27b/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
+      - ../../../../../_shared/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
       # Vendored vllm#48375 (MambaManager drop_eagle_block) — SHARED from the
       # qwen3.6-27b tree (same hybrid family). Makes MTP x prefix-caching safe;
       # inert if PREFIX_CACHE_ARG opts back out. See patches.yml + #736/#790.
-      - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
+      - ../../../../../_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache

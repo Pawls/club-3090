@@ -47,12 +47,6 @@ assert_lookup() {
   fi
 }
 
-assert_entry qwen3.6-27b:autoround-int4 Lorbus/Qwen3.6-27B-int4-AutoRound qwen3.6-27b-autoround-int4
-assert_entry qwen3.6-27b:dflash z-lab/Qwen3.6-27B-DFlash qwen3.6-27b-dflash
-assert_entry qwen3.6-27b:prism_eagle3 Ex0bit/Qwen3.6-27B-PRISM-EAGLE3 qwen3.6-27b-prism-eagle3
-assert_entry qwen3.6-27b:unsloth-q4km unsloth/Qwen3.6-27B-MTP-GGUF qwen3.6-27b-gguf/unsloth-mtp-q4km
-assert_entry qwen3.6-27b:gguf_mmproj_f16 unsloth/Qwen3.6-27B-GGUF qwen3.6-27b-gguf
-assert_entry qwen3.6-27b:ubergarm-iq4ks ubergarm/Qwen3.6-27B-GGUF qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
 assert_entry qwen3.6-35b-a3b:autoround-int4 Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound qwen3.6-35b-a3b-autoround-int4
 assert_entry gemma-4-31b:autoround-int4 Intel/gemma-4-31B-it-int4-AutoRound gemma-4-31b-autoround-int4
 assert_entry gemma-4-31b:awq cyankiwi/gemma-4-31B-it-AWQ-4bit gemma-4-31b-it-AWQ-4bit
@@ -62,24 +56,7 @@ assert_entry gemma-4-31b:dflash z-lab/gemma-4-31b-it-dflash gemma-4-31b-it-dflas
 assert_entry gemma-4-26b-a4b:autoround-int4-mixed Intel/gemma-4-26B-A4B-it-int4-mixed-AutoRound gemma-4-26b-a4b-autoround-int4-mixed
 assert_entry gemma-4-26b-a4b:awq cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit gemma-4-26b-a4b-awq-4bit
 assert_entry gemma-4-26b-a4b:assistant google/gemma-4-26B-A4B-it-assistant gemma-4-26b-a4b-it-assistant
-assert_entry qwen3.6-27b:carnice-bf16mtp wasifb/Carnice_V2_27B_INT4_BF16MTP carnice-v2-27b-int4-recipe-d-bf16mtp
 
-load_entry qwen3.6-27b:qwopus-bf16mtp
-[[ -z "$WEIGHT_REPO" ]]
-[[ "$WEIGHT_SUBDIR" == "qwopus3.6-27b-int4-recipe-d-bf16mtp" ]]
-[[ -n "$WEIGHT_MANUAL_NOTE" ]]
-
-# Legacy preflight aliases remain accepted for user-facing setup hints.
-load_entry qwen3.6-27b-gguf-iq4ks
-[[ "$WEIGHT_KEY" == "qwen3.6-27b:ubergarm-iq4ks" ]]
-
-assert_lookup qwen3.6-27b-autoround-int4/config.json qwen3.6-27b:autoround-int4
-assert_lookup qwen3.6-27b-gguf/unsloth-mtp-q4km/Qwen3.6-27B-Q4_K_M.gguf qwen3.6-27b:unsloth-q4km
-assert_lookup qwen3.6-27b-gguf/mmproj-F16.gguf qwen3.6-27b:gguf_mmproj_f16
-assert_lookup qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf qwen3.6-27b:ubergarm-iq4ks
-assert_lookup qwen3.6-27b-prism-eagle3/compressed qwen3.6-27b:prism_eagle3
-assert_lookup carnice-v2-27b-int4-recipe-d-bf16mtp/chat_template.jinja qwen3.6-27b:carnice-bf16mtp
-assert_lookup qwopus3.6-27b-int4-recipe-d-bf16mtp/config.json qwen3.6-27b:qwopus-bf16mtp
 assert_lookup gemma-4-31b-google-qat-w4a16/config.json gemma-4-31b:google-qat-w4a16
 
 # `verify_glob` must match the entry's declared `format`.
@@ -144,7 +121,7 @@ bad = []
 for f in sorted(pathlib.Path("scripts/lib/profiles/models").glob("*.yml")):
     doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
     # Only FETCHABLE entries can misfetch. An entry with no `hf_repo` is a local
-    # bucket placeholder (e.g. qwen3.6-27b::gguf) — it downloads nothing, so it
+    # bucket placeholder (e.g. a local-only GGUF entry) — it downloads nothing, so it
     # neither needs a files: filter nor makes a shared subdir dangerous.
     weights = {
         k: m for k, m in (doc.get("weights") or {}).items()

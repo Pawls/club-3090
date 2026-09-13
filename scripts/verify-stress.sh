@@ -360,7 +360,7 @@ URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
 # Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
 # literal below is only a last resort if detection no-ops (endpoint unreachable).
 declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
-MODEL="${MODEL:-qwen3.6-27b}"
+MODEL="${MODEL:-qwen3.6-35b-a3b}"
 
 # Which request field turns reasoning off is model-specific, and an unrecognised
 # one is silently ignored — a family using a different switch would reason at

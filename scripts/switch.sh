@@ -180,7 +180,7 @@ switch_gpu_profile_spec() {
 # sglang- containers and leaked their VRAM across switches (#281).
 
 
-PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-27b}"
+PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-35b-a3b}"
 
 switch_topology_from_gpus() {
   local selector="${NVIDIA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}" count=0

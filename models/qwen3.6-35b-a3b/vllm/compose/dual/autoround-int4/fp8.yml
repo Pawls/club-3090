@@ -76,7 +76,7 @@ services:
       # after the 35B template A/B (froggeric ≥ stock: toolcall 15/15 vs 14/15,
       # hermes tie, verify-full pass) + the #671 arc's lesson that the stock
       # template's client-shape breaks (VSCode ≥1.126) don't show on bench packs.
-      - ../../../../../qwen3.6-27b/vllm/patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      - ../../../../../_shared/vllm/patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
       # NVLink auto-detection — runs inside container at boot (same path as dual-max).

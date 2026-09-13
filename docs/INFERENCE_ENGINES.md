@@ -168,7 +168,7 @@ All five are actively developed. ktransformers is positioned as research but pro
 | **Video** | ⚠️ Frame-by-frame | ⚠️ | ✅ Diffusion (LTX-2, FLUX) | ❌ | ⚠️ |
 | **Image generation** | ❌ | ❌ | ✅ Diffusion (FLUX, Qwen-Image fused kernels) | ❌ | ❌ |
 
-**Practical for our stack**: Gemma 4 vision + Qwen3.6 vision both work via vLLM (see `models/gemma-4-31b/` and `models/qwen3.6-27b/long-vision.yml`); llama.cpp `--mmproj` is the single-card fallback.
+**Practical for our stack**: Gemma 4 vision + Qwen3.6 vision both work via vLLM (see `models/gemma-4-31b/` and `models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/fp8.yml`); llama.cpp `--mmproj` is the single-card fallback.
 
 ---
 
@@ -184,7 +184,7 @@ All five are actively developed. ktransformers is positioned as research but pro
 | **Reasoning-channel separation** | ✅ qwen3 reasoning parser | ⚠️ Default ON via peg-native + `<think>` parsing → routes to `reasoning_content` field. **Most clients (incl. opencode) ignore this and hang** ([issue #97](https://github.com/noonghunna/club-3090/issues/97)). Workaround: `--reasoning-format none` flag (now default in our `llamacpp/default` compose). | ✅ | ⚠️ | ⚠️ Inherits llama.cpp default |
 | **Streaming tool-call deltas** | ✅ + Anthropic API compat | ✅ | ✅ + Responses API streaming | ⚠️ | ✅ |
 
-**Notes**: SGLang's RadixAttention + native FSM makes structured output the headline strength. Our [bounded-thinking compose](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/bounded-thinking.yml) uses vLLM's xgrammar; could re-do on SGLang for a probable speedup but vLLM is the daily-driver here.
+**Notes**: SGLang's RadixAttention + native FSM makes structured output the headline strength. Our workload-tuned "bounded-thinking" composes use vLLM's xgrammar; could re-do on SGLang for a probable speedup but vLLM is the daily-driver here.
 
 ---
 
@@ -253,12 +253,10 @@ Q1: Does the model fit your VRAM at desired quant?
 
 | Model | Daily driver | Reason |
 |---|---|---|
-| **Qwen3.6-27B** (dense hybrid, fits VRAM) | **vLLM** (stock) | Multi-tenant, full feature set, Cliff 1/2 closed on TP=2 |
-| **Qwen3.6-27B** (single-card no-cliffs path) | **llama.cpp** | Different memory model; no Cliff 2b under multi-turn |
-| **Qwen3.6-27B** (single-card with MTP, no PR-branch building) | **ik_llama.cpp** | MTP merged on main — get the ~+34% TPS lift without rebuilding from PR #22673 |
+| **Qwen3.8-27B** (dense hybrid, fits VRAM) | **vLLM** (stock) | Multi-tenant, full feature set, Cliff 1/2 closed on TP=2 |
+| **Qwen3.8-27B** (single-card no-cliffs path) | **llama.cpp** | Different memory model; no Cliff 2b under multi-turn |
 | **Gemma 4 31B** (dual-card) | **vLLM** + MTP/DFlash overlays | Best spec-decode story, vision support |
 | **Gemma 4 31B** (single-card long-ctx + spec-dec) | **beellama.cpp** (experimental, unofficial sm_86 image) | Only single-card engine with Gemma-4 windowed KV *and* DFlash spec-dec in one GGUF |
-| **Carnice / Qwopus / variants** | **vLLM** | Same daily-driver path |
 | **(future) MiniMax-M2.7-REAP-172B** | **ktransformers** + SGLang | Big-MoE > VRAM, router-aware caching is the unlock |
 | **(future) GPT-OSS-120B** | **ktransformers** or **llama.cpp** `--n-cpu-moe` | Either works; ktransformers ~+20% TPS but harder to deploy |
 | **(future) DeepSeek-V4-Flash** | **ktransformers** (kt-kernel native MXFP4) | Best support for V4-Flash architecture |

@@ -62,13 +62,13 @@ services:
     volumes:
       - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
       # W4A8 int8-activation patches — NO-OP unless VLLM_MARLIN_INPUT_DTYPE=int8.
-      - ../../../../../qwen3.6-27b/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
+      - ../../../../../_shared/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
       # Lets a spec-decode drafter attach on this hybrid (mamba/eagle block drop).
-      - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
+      - ../../../../../_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
       # club-3090 GDN+MTP async spec-order fix — closes the async wild-write race
       # (our #1052 / upstream #52873 + #50021 thread). Ours, not an upstream PR;
       # validated 3/3 boots on the reference 2×3090. Anchor drift → boot refused.
-      - ../../../../../qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
+      - ../../../../../_shared/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
       - ../../../patches/vllm-flashinfer-decode-pin:/etc/club3090/flashinfer-decode-pin:ro
       # DFlash2 external-drafter support — vLLM PR#52816 backport (syv-ai). Adds
       # DFlash2DraftModel; refuses boot on apply failure.

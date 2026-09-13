@@ -15,7 +15,7 @@
 # Which model for which task → MODEL_REFERENCE.md (capability + max-ctx tables).
 #
 # Usage:
-#   ./serve.sh <name>                # e.g. ./serve.sh deckard-vision
+#   ./serve.sh <name>                # e.g. ./serve.sh apex-vision-ik
 #   ./serve.sh <name> [toggles]      # e.g. ./serve.sh 27b --no-think --no-preserve
 #   ./serve.sh <path/to/compose.yml> # any compose file, relative to repo root or absolute
 #   ./serve.sh --list                # all models w/ think/preserve state, ⬇ = weights missing
@@ -29,7 +29,7 @@
 # the request, so they're flags, not separate composes. Ideal for A/B through Hermes:
 #   --think | --no-think          reasoning on/off  (vLLM enable_thinking / llama --reasoning)
 #   --preserve | --no-preserve    keep vs strip prior-turn <think> from context
-# Not all models can toggle: agents-a1 + 27b-minimal hardcode thinking off; omni isn't a
+# Not all models can toggle: agents-a1 hardcodes thinking off; omni isn't a
 # thinking model. --list shows each model's state; a bad toggle errors instead of no-op'ing.
 #
 # Thought-loop control (two DIFFERENT layers — see MODEL_REFERENCE):
@@ -79,22 +79,15 @@ declare -A COMPOSE=(
   # -- canonical (repo compose; our .env tweaks may apply — see MODEL_REFERENCE §5)
   [apex]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/long.yml"
   [apex-fit]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/fit-mtp.yml"
-  [27b]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml"
-  [27b-minimal]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml"
   [35b-a3b]="models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/fp8.yml"
-  [carnice]="models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml"
-  [deckard]="models/qwen3.6-40b-deckard/llama-cpp/compose/dual/piehsoft-q6k/mtp.yml"
   [hauhau]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/mtp.yml"
   [omni]="models/qwen3-omni-30b-a3b/vllm-omni/compose/dual/autoround-int4/omni.yml"
   [agents-a1]="models/agents-a1/vllm/compose/dual/fp8-dynamic/fp8.yml"
   # -- ours (pawl-custom only; not on repo master)
   [apex-vision-ik]="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/vision.yml"
   [ud-vision]="models/qwen3.6-35b-a3b/ik-llama/compose/single/unsloth-ud-iq4xs/vision.yml"
-  [27b-vision]="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp-vision.yml"
   [apex-vision-mainline]="models/qwen3.6-35b-a3b/llama-cpp/compose/single/mudler-apex-compact/vision.yml"
-  [deckard-vision]="models/qwen3.6-40b-deckard/llama-cpp/compose/dual/piehsoft-q6k/vision.yml"
   [hauhau-vision]="models/qwen3.6-35b-a3b/llama-cpp/compose/dual/morikomorizz-q6kp/vision.yml"
-  [27b-single]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/fp8-mtp.yml"
   [apex-yarn-1m]="models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/yarn-1m.yml"
   [38b-dual]="models/qwen3.8-27b/llama-cpp/compose/dual/unsloth-ud-q5kxl/mtp-vision.yml"
   [muse]="models/muse-glimmer-30b/llama-cpp/compose/single/meta-kquant-17gb/dflash-vision.yml"
@@ -104,10 +97,10 @@ declare -A COMPOSE=(
 )
 
 declare -A GROUP=(
-  [apex]=repo [apex-fit]=repo [27b]=repo [27b-minimal]=repo [35b-a3b]=repo
-  [carnice]=repo [deckard]=repo [hauhau]=repo [omni]=repo [agents-a1]=repo
-  [apex-vision-ik]=ours [apex-vision-mainline]=ours [deckard-vision]=ours
-  [hauhau-vision]=ours [27b-single]=ours [apex-yarn-1m]=ours [27b-vision]=ours
+  [apex]=repo [apex-fit]=repo [35b-a3b]=repo
+  [hauhau]=repo [omni]=repo [agents-a1]=repo
+  [apex-vision-ik]=ours [apex-vision-mainline]=ours
+  [hauhau-vision]=ours [apex-yarn-1m]=ours
   [ud-vision]=ours [muse]=ours [muse-long]=ours [muse-dual]=ours [muse-max]=ours
   [38b-dual]=ours
 )
@@ -115,21 +108,14 @@ declare -A GROUP=(
 declare -A INFO=(
   [apex]=":8056  apex-35b-a3b (Q4_K_M) · single GPU1 · 262K · text · q8 KV · ~90 TPS · think ON — ⭐ daily driver"
   [apex-fit]=":8057  apex-35b-a3b (Q4_K_M) · single GPU1 · 262K · asym q8/q5 KV + no-mmap — alt apex lane"
-  [27b]=":8010  dual vLLM · 262K · vision · MTP n=3 — ⭐ big-ctx image analysis"
-  [27b-minimal]=":8020  single · 65K · text-only · no MTP · ~32 TPS — debug/fallback"
   [35b-a3b]=":8051  dual vLLM · 262K · vision · N=4 concurrency — ⭐ subagent fan-out"
-  [carnice]=":8070  dual beellama · 262K · agentic-SFT Q8 — the 'agent brain'"
-  [deckard]=":8199  dual · 131K · uncensored 40B · MTP n=2 — ⭐ hard reasoning"
   [hauhau]=":8073  dual · 262K · uncensored MoE · MTP n=3"
   [omni]=":8042  dual stage-parallel · 48K · image/audio/VIDEO in — use via :4000, not raw"
   [agents-a1]=":8072  dual vLLM · 262K · agentic (thinking ON only via LiteLLM hook)"
   [apex-vision-ik]=":8057  apex-35b-a3b (Q4_K_M) · single GPU1 · 262K · vision · asym q8/q5 KV · ~90 TPS — ⭐ screenshot driver"
   [ud-vision]=":8060  STOCK 35b-a3b (unsloth UD-IQ4_XS) · single GPU1 · 131K · vision · DYNAMIC quant — ⭐ stock single-card vision"
-  [27b-vision]=":8020  single · 160K · vision · IQ4_KS + MTP · ~51 TPS — ⭐ BoxelBuilder gen (shares :8020 lane w/ 27b-minimal, GPU-mutex)"
   [apex-vision-mainline]=":8058  apex-35b-a3b (Q4_K_M) · single GPU1 · 200K · vision · mainline build — backup"
-  [deckard-vision]=":8200  dual · 131K · uncensored · vision + MTP kept"
   [hauhau-vision]=":8073  dual · 262K · uncensored · vision + MTP kept"
-  [27b-single]=":8021  single GPU0 · 28K · vision · MTP — fast solo, tiny ctx"
   [apex-yarn-1m]=":8057  apex-35b-a3b (Quality) · dual · 1M YaRN · quality unproven >262K — eval/park"
   [muse-long]=":8211  muse-glimmer-30b (Meta kquant-17gb) · single GPU1 · 262K via --override-kv · TEXT-ONLY (no mmproj: frees 1.3G + dodges the hi-res-image VRAM spike) · DFlash · needle 3/3 at 151K/231K/255K · ⚠ TTFT ~5 min at 255K"
   [muse-dual]=":8212  muse-glimmer-30b (Meta kquant-17gb) · DUAL both GPUs · 262K via --override-kv · vision · DFlash · prefill +30-38% vs single · ⚠ uses GPU0, so NOT with ComfyUI — prefer muse-max"
@@ -141,14 +127,9 @@ declare -A INFO=(
 APEX_GGUF="qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf"
 APEX_Q_GGUF="qwen3.6-35b-a3b-gguf/mudler-apex-mtp/Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf"
 QWEN_MMPROJ="qwen3.6-35b-a3b-gguf/mmproj/mmproj-BF16.gguf"
-DECKARD_GGUF="qwen3.6-40b-deckard-gguf/piehsoft-q6k/Qwen3.6-40B-Deckard-MTP-Q6_K.gguf"
-DECKARD_MMPROJ="qwen3.6-40b-deckard-gguf/mmproj/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking.mmproj-Q8_0.gguf"
 HAUHAU_GGUF="qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP-Q6_K_P.gguf"
-CARNICE_GGUF="carnice-v2-27b-gguf/stuchapin-q8/Carnice-V2-27B-Q8_0-mtp.gguf"
-UBERGARM_27B_GGUF="qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf"
 QWEN38_GGUF="qwen3.8-27b-gguf/unsloth-ud-q5kxl/Qwen3.8-27B-UD-Q5_K_XL.gguf"
 QWEN38_MMPROJ="qwen3.8-27b-gguf/mmproj-F16.gguf"
-QWEN_27B_MMPROJ="qwen3.6-27b-gguf/mmproj-F16.gguf"
 UD_GGUF="qwen3.6-35b-a3b-gguf/unsloth-ud-iq4xs/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
 # Muse Glimmer: trunk + perception encoder + DFlash drafter, all three from Meta's
 # official GGUF repo. Unsloth mirrors the mmproj/drafter byte-for-byte, so there is
@@ -163,21 +144,14 @@ declare -A WEIGHTS=(
   [apex-vision-ik]="$APEX_GGUF $QWEN_MMPROJ"
   [apex-vision-mainline]="$APEX_GGUF $QWEN_MMPROJ"
   [apex-yarn-1m]="$APEX_Q_GGUF"
-  [deckard]="$DECKARD_GGUF"
-  [deckard-vision]="$DECKARD_GGUF $DECKARD_MMPROJ"
   [hauhau]="$HAUHAU_GGUF"
   [hauhau-vision]="$HAUHAU_GGUF $QWEN_MMPROJ"
-  [carnice]="$CARNICE_GGUF"
   [ud-vision]="$UD_GGUF $QWEN_MMPROJ"
-  [27b-vision]="$UBERGARM_27B_GGUF $QWEN_27B_MMPROJ"
   [38b-dual]="$QWEN38_GGUF $QWEN38_MMPROJ"
   [muse]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [muse-long]="$MUSE_GGUF $MUSE_DFLASH"
   [muse-dual]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
   [muse-max]="$MUSE_GGUF $MUSE_MMPROJ $MUSE_DFLASH"
-  [27b]="qwen3.6-27b-autoround-int4"
-  [27b-single]="qwen3.6-27b-autoround-int4"
-  [27b-minimal]="qwen3.6-27b-autoround-int4"
   [35b-a3b]="qwen3.6-35b-a3b-autoround-int4"
   [omni]="qwen3-omni-30b-a3b-instruct-int4-autoround"
   [agents-a1]="Agents-A1-FP8-dynamic"
@@ -189,17 +163,11 @@ declare -A HFREPO=(
   ["$QWEN_MMPROJ"]="unsloth/Qwen3.6-35B-A3B-GGUF"
   ["$QWEN38_GGUF"]="unsloth/Qwen3.8-27B-GGUF"
   ["$QWEN38_MMPROJ"]="unsloth/Qwen3.8-27B-GGUF"
-  ["$DECKARD_GGUF"]="PiehSoft/Qwen3.6-40B-Deckard-MTP-Q6_K"
-  ["$DECKARD_MMPROJ"]="mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF"
   ["$HAUHAU_GGUF"]="morikomorizz/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP"
-  ["$CARNICE_GGUF"]="stuchapin/Carnice-V2-27B-MTP-GGUF"
-  ["$UBERGARM_27B_GGUF"]="ubergarm/Qwen3.6-27B-GGUF"
-  ["$QWEN_27B_MMPROJ"]="unsloth/Qwen3.6-27B-GGUF"
   ["$UD_GGUF"]="unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
   ["$MUSE_GGUF"]="meta-models/Muse-Glimmer-30B-GGUF"
   ["$MUSE_MMPROJ"]="meta-models/Muse-Glimmer-30B-GGUF"
   ["$MUSE_DFLASH"]="meta-models/Muse-Glimmer-30B-GGUF"
-  ["qwen3.6-27b-autoround-int4"]="Lorbus/Qwen3.6-27B-int4-AutoRound"
   ["qwen3.6-35b-a3b-autoround-int4"]="Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound"
   ["qwen3-omni-30b-a3b-instruct-int4-autoround"]="Intel/Qwen3-Omni-30B-A3B-Instruct-int4-AutoRound"
   ["Agents-A1-FP8-dynamic"]="InternScience/Agents-A1-FP8-dynamic"
@@ -335,11 +303,11 @@ list_models() {
   echo "  --preserve-window <N>       BOUNDED carryover: keep <think> from only the last N query"
   echo "                              blocks (0=off/none · 1=current only · 2=last two · big=all)."
   echo "                              The anti-thought-loop middle ground. Custom-template lanes only"
-  echo "                              (apex, apex-fit, apex-vision-ik, ud-vision, 27b-vision); errors elsewhere. No VRAM cost."
+  echo "                              (apex, apex-fit, apex-vision-ik, ud-vision); errors elsewhere. No VRAM cost."
   echo "  --anti-loop / --no-anti-loop  INTRA-generation repetition guard (repeat + frequency"
   echo "                              penalty). Breaks runaway decode + repeated-preamble loops that"
   echo "                              --preserve-window CAN'T (a turn keeps its own <think>). Vision"
-  echo "                              lanes only (apex-vision-ik, ud-vision, 27b-vision). No VRAM cost."
+  echo "                              lanes only (apex-vision-ik, ud-vision). No VRAM cost."
   echo "                              Deviates from Qwen's repeat-penalty=1.0 — on to break loops, off for fidelity."
   echo "    ^ {think:X preserve:Y} above = each model's current default; neither costs VRAM."
   echo "  --ctx <N>                   context window for this boot (auto-targets the compose's"
@@ -348,7 +316,7 @@ list_models() {
   echo "  --gpu <N>                   pin the model to a card (--gpu 1 = GPU1 only, freeing GPU0 for"
   echo "                              the desktop/ComfyUI; --gpu 0,1 for dual-card composes)."
   echo "  A/B through Hermes:  ./serve.sh 27b --think   then   ./serve.sh 27b --no-think"
-  echo "  ·fixed = hardcoded in the compose (agents-a1, 27b-minimal)   n/a = not a thinking model."
+  echo "  ·fixed = hardcoded in the compose (agents-a1)   n/a = not a thinking model."
 }
 
 # --- GPU mutex ----------------------------------------------------------------
@@ -507,7 +475,7 @@ if [[ -n "$THINK_FLAG" ]]; then
     ENABLE_THINKING) export ENABLE_THINKING=$([[ "$THINK_FLAG" == on ]] && echo true || echo false)
                      echo "Override: ENABLE_THINKING=$ENABLE_THINKING (thinking $THINK_FLAG)" ;;
     FIXED) echo "ERROR: '$target' hardcodes thinking in its compose — not env-togglable." >&2
-           echo "       (agents-a1: thinking-ON is via the LiteLLM hook / per-request kwargs — MODEL_REFERENCE §1 n.8.)" >&2
+           echo "       (agents-a1: thinking-ON is via the LiteLLM hook / per-request kwargs — MODEL_REFERENCE §1 n.7.)" >&2
            exit 1 ;;
     NONE)  echo "ERROR: '$target' is not a thinking model — --think/--no-think don't apply." >&2; exit 1 ;;
   esac
@@ -529,7 +497,7 @@ if [[ -n "$WINDOW_FLAG" ]]; then
     echo "Override: PRESERVE_THINKING_WINDOW=$WINDOW_FLAG (keep prior <think> from the last $WINDOW_FLAG query block(s); 0=off, ≥total=all)"
   else
     echo "ERROR: '$target' doesn't thread preserve_window — only the custom apex/UD custom template supports it." >&2
-    echo "       Windowing lanes today: apex, apex-fit, apex-vision-ik, ud-vision, 27b-vision (+ apex mtp/long composes)." >&2
+    echo "       Windowing lanes today: apex, apex-fit, apex-vision-ik, ud-vision (+ apex mtp/long composes)." >&2
     exit 1
   fi
 fi
@@ -553,7 +521,7 @@ if [[ -n "$ANTILOOP_FLAG" ]]; then
     fi
   else
     echo "ERROR: '$target' doesn't thread the penalty sampler vars — --anti-loop applies to the vision lanes only." >&2
-    echo "       Anti-loop lanes today: apex-vision-ik, ud-vision, 27b-vision." >&2
+    echo "       Anti-loop lanes today: apex-vision-ik, ud-vision." >&2
     exit 1
   fi
 fi

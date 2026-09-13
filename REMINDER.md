@@ -2,6 +2,13 @@
 
 Personal cheat-sheet for running the stack **without the cockpit**. Untracked by intent.
 
+> **2026-09 retirement note:** `qwen3.6-27b` ("27b"/"27b-single"), `qwen3.6-40b-deckard`
+> ("deckard"/"deckard-vision"), and the beellama "Carnice" fine-tune ("carnice"/"carnice-v2") were
+> removed from the catalog — their `serve.sh` entries, composes, and registry rows are gone.
+> References to them below are stale run-notes, kept as-is per this file's scratch-notes
+> convention; don't expect `./serve.sh 27b` / `deckard` / `carnice` to work anymore.
+> `qwen3.6-35b-a3b` ("35b-a3b") is unaffected and still current.
+
 ---
 
 ## 0. The one rule that bites: recreate, don't restart

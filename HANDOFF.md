@@ -1,6 +1,10 @@
 # Session Handoff — Dual RTX 3090 / WSL2 / Qwen3.6-27B
 
 > **Scope note:** this is a snapshot of one user's rig setup and troubleshooting session (2026-07-03), not evergreen project documentation. It's rig-specific (exact wattages, WSL2 config, personal client setup) — safe to delete once superseded by the next session, or once its durable findings graduate into the real docs. The one repo-level bug found here is also tracked in `AGENTS.md` (→ `CLAUDE.md`) under "Compose layout."
+>
+> **2026-09 retirement note:** `qwen3.6-27b`, the model this whole handoff is about, was removed
+> from the catalog (superseded by `qwen3.8-27b`). Everything below is stale — kept only per this
+> file's own "safe to delete" scope note above.
 
 ## Update — 2026-07-04 (firmware/ReBAR update + new bench baseline)
 

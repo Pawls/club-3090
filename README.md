@@ -28,36 +28,35 @@ cd club-3090
 #     `export MODEL_DIR=/path/to/models` and pass the model name. See FAQ.)
 bash scripts/setup.sh
 #    Or scripted:
-#      bash scripts/setup.sh qwen3.6-27b
+#      bash scripts/setup.sh qwen3.6-35b-a3b
 
 # 3. Pick a config + boot it (interactive wizard: asks model → GPUs → projects VRAM budget)
 bash scripts/launch.sh
 #    Or let the resolver pick for your model + hardware (.env pin ‖ curated default):
-#      bash scripts/launch.sh --variant qwen3.6-27b/default # YOUR default for this model
-#    Or skip the wizard with an explicit config:
-#      bash scripts/launch.sh --variant vllm/minimal        # single-card qwen (32K ctx, no vision, ~32/33 TPS)
-#      bash scripts/launch.sh --variant vllm/dual           # dual-card 262K + vision
+#      bash scripts/launch.sh --variant qwen3.6-35b-a3b/default # YOUR default for this model
+#    Or skip the wizard with an explicit config — see `switch.sh --list` for real slugs on your model:
+#      bash scripts/launch.sh --variant vllm/qwen-35b-a3b-dual   # dual-card 262K + vision
 #    Retired single-card slugs still launch with --force; see docs/SINGLE_CARD.md "Escape hatches".
 #    Or partial flags (wizard fills the rest):
-#      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
+#      bash scripts/launch.sh --model qwen3.6-35b-a3b --gpus 0,1
 #      bash scripts/launch.sh --tp 2 --pp 1               # override vLLM parallelism
 #    See the variants this machine can run + the per-model defaults view
 #    (hardware-filtered by GPU count; add --all to see every variant):
 #      bash scripts/switch.sh --list          # runnable here
 #      bash scripts/switch.sh --list --all    # everything
 #    Pin your own default so bare `launch.sh` goes straight there:
-#      bash scripts/switch.sh --set-default vllm/dual            # e.g. pin a dual-card default; clear: --clear-default qwen3.6-27b
+#      bash scripts/switch.sh --set-default vllm/qwen-35b-a3b-dual   # e.g. pin a dual-card default; clear: --clear-default qwen3.6-35b-a3b
 
 # 4. Sanity test (launcher already printed this curl)
 curl -sf http://localhost:8020/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
+  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
 
 # 5. Run the canonical benchmark
 bash scripts/bench.sh
 
 # 6. Switch later without re-clicking through the wizard:
-bash scripts/switch.sh vllm/dual          # for example
+bash scripts/switch.sh vllm/qwen-35b-a3b-dual   # for example
 bash scripts/switch.sh --list             # every launchable variant (--all to include retired)
 
 # 7. Keep your install up-to-date as the stack moves (engine pin bumps,
@@ -81,7 +80,7 @@ c3                                              # launch  (also: python -m club3
 
 **First run:** press **`S`** → set your **Model Dir** (where weights download) + **HuggingFace token** → **`Ctrl+S`** to save; then **`r`** to browse the catalog and serve one. **`c3 --lean`** (or **`[C]`** in-app) hides the producer lane for a consumer-only view. After a `git pull`, re-run the install to pick up new deps + UI changes. Full keybindings + details → [`tools/serve-cockpit/`](tools/serve-cockpit/).
 
-> ⚠️ **Single-card long-context note:** Cliff 2 (GDN prefill OOM at >~50K single-prompt) is **open** on 24 GB single-card vLLM. **Workarounds:** [`vllm/dual`](docs/DUAL_CARD.md) (TP=2 escapes it). ⚠️ The former single-card escape `llamacpp/default` was **retired 2026-08-12** (`--force` only) — on one card there is no longer a cliff-immune qwen path. Full diagnosis at [`docs/CLIFFS.md`](docs/CLIFFS.md).
+> ⚠️ **Single-card long-context note:** Cliff 2 (GDN prefill OOM at >~50K single-prompt) is **open** on 24 GB single-card vLLM. **Workarounds:** a dual-card (TP=2) compose escapes it — see [`docs/DUAL_CARD.md`](docs/DUAL_CARD.md) for a current slug (`vllm/dual`, the old example here, was the now-retired `qwen3.6-27b` default). ⚠️ The former single-card escape `llamacpp/default` was **retired 2026-08-12** (`--force` only) — on one card there is no longer a cliff-immune qwen path. Full diagnosis at [`docs/CLIFFS.md`](docs/CLIFFS.md).
 
 ---
 
@@ -124,7 +123,6 @@ Each hardware page lists every supported model with the working composes for tha
 
 | Model | Status | Card counts | Engines | Highlights |
 |---|---|---|---|---|
-| **[Qwen3.6-27B](models/qwen3.6-27b/)** | Production-ready ⭐ | 1× / 2× 3090 | vLLM ✅ · llama.cpp ✅ · ik_llama ✅ | Vision · tools · MTP n=3 · up to 262K ctx · vLLM dual = 89/127 TPS · llama.cpp single = 200K max-safe, no prefill cliffs · ik_llama IQ4_KS = ~60/69 TPS (fastest single-card) |
 | **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready | 1× ¹ / 2× 3090 | vLLM ✅ (dual) · llama.cpp ⚠️ (community fork; mainline blocked on FA hdim=512) | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) · single-card: no functional config since the beellama retirement (2026-07-27 — engine deprecated; historical: 47/88 TPS via beellama DFlash, [discussion #239](https://github.com/noonghunna/club-3090/discussions/239)) |
 | **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** | Production-ready (ik-llama single-card · vLLM dual) | 1× / 2× 3090 | vLLM ✅ · ik_llama ✅ · llama.cpp ✅ (mainline runs it — see `docs/HARDWARE.md`; ik_llama is the shipped single-card path) | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · **ik_llama `fit-mtp.yml` single-card (Mudler APEX I-Compact)** = 103/149 TPS at 196K, hermes 11/20 + aider 12/30 + cli 12/40 ([PR #243](https://github.com/noonghunna/club-3090/pull/243)) · ik_llama `byteshape-iq4xs` single-card = 113/129 TPS at full 262K, 110/150 8-pack ([PR #293](https://github.com/noonghunna/club-3090/pull/293)) · vLLM dual = 178/174 TPS at 262K + vision (v0.22.0 stable; MTP net-negative on this MoE at TP=2) |
 | **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 ² | vLLM ✅ (AWQ overlay) · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% |
@@ -132,6 +130,12 @@ Each hardware page lists every supported model with the working composes for tha
 ¹ Single-card Gemma 4 on Ampere 24 GB: vLLM + mainline llama.cpp are blocked (head_dim=512 FA wall, no Ampere FA kernel yet). The community **beellama.cpp** fork builds with `FA_ALL_QUANTS=ON` and runs cleanly on a single 3090 — 47/88 TPS, 100–150K ctx, 109/114 8-pack (validated 2026-05-27). 32 GB+ GPUs run the standard vLLM path (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
 
 ² Gemma 4 26B-A4B single-card not yet tested on Ampere; should fit on a 24 GB 3090 at modest context but the configs are dual-card-only today.
+
+`qwen3.6-27b` (formerly listed here as the flagship 27B pick) was retired from the catalog 2026-09;
+its successor **[Qwen3.8-27B](models/qwen3.8-27b/)** is in the catalog but still 🧪 experimental
+across every engine (every slug currently launches with `--force`) — see
+`scripts/switch.sh --list --all` for its current status rather than treating it as a drop-in
+production replacement yet.
 
 More models coming — they go under `models/<name>/` with the same internal pattern.
 
@@ -141,7 +145,9 @@ More models coming — they go under `models/<name>/` with the same internal pat
 
 ![Qwen3.6-27B TPS by config](docs/img/performance.png)
 
-Bench protocol: 3 warm + 5 measured runs. See [`scripts/bench.sh`](scripts/bench.sh) for methodology. Per-config details + run-by-run numbers + VRAM + AL/accept rates: [models/qwen3.6-27b/CHANGELOG.md](models/qwen3.6-27b/CHANGELOG.md).
+Bench protocol: 3 warm + 5 measured runs. See [`scripts/bench.sh`](scripts/bench.sh) for methodology.
+(Chart is historical — measured on `qwen3.6-27b`, retired from the catalog 2026-09 along with its
+per-config `CHANGELOG.md`; the root [`CHANGELOG.md`](CHANGELOG.md) has the retirement entry.)
 
 ---
 
@@ -221,15 +227,15 @@ bash scripts/switch.sh --force llamacpp/default
 
 # single-card llama.cpp (cliff-immune fallback, --force only) — serves on :8020
 MODEL_DIR=/path/to/models docker compose \
-  -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml up -d
+  -f models/qwen3.6-35b-a3b/llama-cpp/compose/single/mudler-apex-compact/vision.yml up -d
 
 # single-card ik_llama (fastest single-card path) — :8020
 MODEL_DIR=/path/to/models docker compose \
-  -f models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml up -d
+  -f models/qwen3.6-35b-a3b/ik-llama/compose/single/byteshape-iq4xs/mtp.yml up -d
 
 # dual-card vLLM — :8010
 MODEL_DIR=/path/to/models docker compose \
-  -f models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml up -d
+  -f models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/fp8.yml up -d
 
 # verify it's serving (use the port from the comment above), then stop it the same way:
 curl -s http://localhost:8020/v1/models | jq .
@@ -265,21 +271,20 @@ club-3090/
 │       ├── IK_LLAMA.md                    advanced-quant engine (IQK quants, two-stage spec-dec)
 │       └── SGLANG.md                      blocked status + watch list
 ├── models/
-│   └── qwen3.6-27b/                       all Qwen3.6-27B-specific stuff
-│       ├── README.md                      model overview + variants + recommendations
-│       ├── INTERNALS.md                   engineering rationale (Marlin pad, DFlash, upstream tracker)
+│   └── <model>/                           all of one model's engine-specific stuff (e.g. qwen3.6-35b-a3b/)
+│       ├── README.md                      model overview + variants + recommendations (where present)
+│       ├── INTERNALS.md                   engineering rationale, when the model has one worth writing
 │       ├── CHANGELOG.md                   model-specific dated history
 │       ├── vllm/
-│       │   ├── README.md                  "vLLM recipes for Qwen3.6-27B"
-│       │   ├── compose/<topology>/<quant>/  compose files (e.g. dual/autoround-int4/fp8-mtp.yml)
-│       │   └── patches/                   tolist_cudagraph + Marlin pad README
+│       │   ├── README.md                  "vLLM recipes for <model>"
+│       │   ├── compose/<topology>/<quant>/  compose files (e.g. dual/autoround-int4/fp8.yml)
+│       │   └── patches/                   any model-specific vLLM patches (shared ones live under models/_shared/)
 │       ├── llama-cpp/
-│       │   ├── README.md                  "llama.cpp composes for Qwen3.6-27B"
-│       │   └── compose/single/unsloth-q4km/ mtp.yml + mtp-vision.yml + bounded-thinking.yml
+│       │   └── compose/<topology>/<quant>/  mtp.yml / vision.yml / etc. per the naming convention (see AGENTS.md)
 │       ├── ik-llama/
-│       │   └── compose/single/ubergarm-iq4ks/ mtp.yml + mtp-vision.yml + two-stage.yml (IQK quant)
+│       │   └── compose/<topology>/<quant>/  mtp.yml + vision.yml + advanced-quant variants
 │       └── sglang/
-│           └── README.md                  blocked status — what would unblock it on this model
+│           └── README.md                  blocked status — what would unblock it on this model, where applicable
 ├── scripts/                               shared, model-aware
 │   ├── setup.sh                           bash setup.sh <model> → preflight + downloads + verifies
 │   ├── launch.sh                          interactive wizard: model → GPUs → KV projection → boots compose + verifies
@@ -318,7 +323,7 @@ by `scripts/launch.sh` / `scripts/switch.sh` as `VLLM_NIGHTLY_SHA`. Set
 nightly, or to run a current image when a pinned nightly has been purged:
 
 ```bash
-VLLM_IMAGE=vllm/vllm-openai:latest bash scripts/launch.sh --variant vllm/dual
+VLLM_IMAGE=vllm/vllm-openai:latest bash scripts/launch.sh --variant vllm/qwen-35b-a3b-dual
 ```
 
 See [docs/HARDWARE.md](docs/HARDWARE.md) for hardware-specific notes (PCIe vs NVLink, power draw, etc.).
@@ -331,7 +336,7 @@ See [docs/HARDWARE.md](docs/HARDWARE.md) for hardware-specific notes (PCIe vs NV
 
 **Models are specific** — under `models/<name>/`, you find that model's quants, quirks, recommended configs, and engine-specific recipes. Adding a new model means adding a new subdir with the same internal pattern.
 
-**Scripts are shared but model-aware** — `bash scripts/setup.sh qwen3.6-27b` downloads the right model + clones the right patches. When we add another model, you'd run `bash scripts/setup.sh glm-4.6` and the same script handles it.
+**Scripts are shared but model-aware** — `bash scripts/setup.sh qwen3.6-35b-a3b` downloads the right model + clones the right patches. When we add another model, you'd run `bash scripts/setup.sh glm-4.6` and the same script handles it.
 
 This separation keeps the stack maintainable as it grows. We don't want a model-specific README at the top; we want the top to be "stack docs" and the model details under their dedicated subdirs.
 
@@ -370,7 +375,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the merged dated history.
 The stack stands on a lot of shoulders:
 
 - **Qwen team** ([@Alibaba_Qwen](https://huggingface.co/Qwen)) — for the base models and the MTP head architecture
-- **[Lorbus](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound)** — for the AutoRound INT4 quant with preserved BF16 `mtp.fc` (the model this whole stack runs on)
+- **[Lorbus](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound)** — for the AutoRound INT4 quant with preserved BF16 `mtp.fc`, used by `qwen3.6-27b` (retired from the catalog 2026-09)
 - **[Sandermage](https://github.com/Sandermage)** — root-caused vllm#40880 (MTP × TurboQuant cudagraph capture) and shipped the fix that made spec-decode work on consumer Ampere. The patch tree it shipped in is no longer used here, but the diagnosis stands and is upstream at [vllm#40914](https://github.com/vllm-project/vllm/pull/40914).
 - **[vibhavagarwal5](https://github.com/vllm-project/vllm/pull/38479)** — TurboQuant landing PR + tracking issue #40069
 - **[vLLM project](https://github.com/vllm-project/vllm)** — the engine + active maintenance

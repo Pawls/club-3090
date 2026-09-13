@@ -546,7 +546,6 @@ GENERIC_DENSE_ACTIVATION_FLOOR_GB = 1.5         # ≥ Gemma dense constant activ
 # Compose presets (per-model)
 # =============================================================================
 COMPOSE_ALIAS_TEXT = {
-    "qwen3.6-27b": "minimal=vllm/minimal dual=vllm/dual nvfp4-single=vllm/qwen-27b-single-nvfp4 nvfp4-dual=vllm/qwen-27b-dual-nvfp4",
     "qwen3.6-35b-a3b": "qwen-a3b-preview-single=vllm/qwen-a3b-preview-single qwen-35b-a3b-dual=vllm/qwen-35b-a3b-dual nvfp4-single=vllm/qwen-35b-a3b-single-nvfp4 nvfp4-dual=vllm/qwen-35b-a3b-dual-nvfp4",
     "agents-a1": "agents-a1-dual=vllm/agents-a1-dual",
     "qwen-agentworld-35b-a3b": "dual=vllm/qwen-agentworld-35b-a3b-dual-awq-int4",
@@ -567,8 +566,6 @@ REGISTRY_TO_LEGACY_COMPOSE = {
 }
 
 COMPOSE_COMPAT_OVERRIDES = {
-    ("qwen3.6-27b", "minimal"): {"max_num_seqs": 4, "mem_util": 0.90},
-    ("qwen3.6-27b", "dual"): {"mem_util": 0.95},
     ("gemma-4-31b", "gemma-single"): {"kv_format": "fp8_e5m2"},
 }
 
@@ -594,8 +591,6 @@ def _compose_cfg_from_registry(profiles, model_id, legacy_name, registry_name):
             cfg["drafter_gb"] = float(drafter.vram_footprint_gb)
     if model_id == "qwen3.6-35b-a3b":
         cfg["weights_variant"] = {"gptq_int4": "gptq", "nvfp4": "nvfp4"}.get(entry["weights_variant"], "default")
-    if model_id == "qwen3.6-27b":
-        cfg["weights_variant"] = "nvfp4" if entry["weights_variant"] == "nvfp4" else "default"
     cfg.update(COMPOSE_COMPAT_OVERRIDES.get((model_id, legacy_name), {}))
     return cfg
 
@@ -1946,13 +1941,13 @@ def _resolve_compose_model(compose_name: str, explicit_model: Optional[str]) -> 
     for model_key, composes in COMPOSES.items():
         if compose_name in composes:
             return model_key
-    return "qwen3.6-27b"  # back-compat default
+    return "qwen3.6-35b-a3b"  # back-compat default
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--model", choices=sorted(MODEL_SPECS.keys()),
-                   help="Which model to predict for. Default: qwen3.6-27b (back-compat) or inferred from --compose.")
+                   help="Which model to predict for. Default: qwen3.6-35b-a3b (back-compat) or inferred from --compose.")
     p.add_argument("--compose", choices=_all_compose_choices(),
                    help="Use a shipped compose's defaults. Override individual flags below.")
     p.add_argument("--kv-format", choices=sorted(KV_FORMAT_BYTES.keys()),
@@ -2044,8 +2039,8 @@ def main():
         print(json.dumps(result, indent=2))
         return 0 if "error" not in result else 2
 
-    # Resolve model: explicit --model > inferred from --compose > qwen3.6-27b
-    model_key = _resolve_compose_model(args.compose, args.model) if args.compose else (args.model or "qwen3.6-27b")
+    # Resolve model: explicit --model > inferred from --compose > qwen3.6-35b-a3b
+    model_key = _resolve_compose_model(args.compose, args.model) if args.compose else (args.model or "qwen3.6-35b-a3b")
     spec = MODEL_SPECS[model_key]
 
     # Resolve compose-derived defaults

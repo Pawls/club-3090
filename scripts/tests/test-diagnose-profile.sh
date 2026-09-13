@@ -23,14 +23,14 @@ assert_contains() {
   fi
 }
 
-out="$(bash "${ROOT_DIR}/scripts/diagnose-profile.sh" vllm/dual 2>&1)"
-assert_contains "$out" "Profile triage: vllm/dual"
+out="$(bash "${ROOT_DIR}/scripts/diagnose-profile.sh" vllm/qwen-35b-a3b-dual 2>&1)"
+assert_contains "$out" "Profile triage: vllm/qwen-35b-a3b-dual"
 assert_contains "$out" "[1/6] Compose registry entry exists"
 assert_contains "$out" "[6/6] Vendored overlays applied"
 assert_contains "$out" "Triage summary: GREEN"
 
-out="$(bash "${ROOT_DIR}/scripts/diagnose-profile.sh" llamacpp/default 2>&1)"
-assert_contains "$out" "Profile triage: llamacpp/default"
+out="$(bash "${ROOT_DIR}/scripts/diagnose-profile.sh" llamacpp/vibethinker-3b-single 2>&1)"
+assert_contains "$out" "Profile triage: llamacpp/vibethinker-3b-single"
 assert_contains "$out" "KV projection not available for non-vLLM engines"
 assert_contains "$out" "Triage summary: GREEN"
 

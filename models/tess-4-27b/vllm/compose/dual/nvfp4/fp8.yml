@@ -84,7 +84,7 @@ services:
       # composes (same qwen3_5/qwen3.6 template family; single vendored copy,
       # see patches.yml qwen-froggeric-chat-template). Required: the model
       # repo's own template is stock-broken (developer-role crash).
-      - ../../../../../qwen3.6-27b/vllm/patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      - ../../../../../_shared/vllm/patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
       # NVLink auto-detection — runs inside container at boot.
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:

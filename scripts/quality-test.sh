@@ -252,7 +252,7 @@ URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
 # only kicks in when the user left MODEL unset.
 MODEL_EXPLICIT=0
 [[ -n "${MODEL:-}" ]] && MODEL_EXPLICIT=1
-MODEL="${MODEL:-qwen3.6-27b}"
+MODEL="${MODEL:-qwen3.6-35b-a3b}"
 
 # Track whether the user explicitly set TIMEOUT_PER_CASE (via env or
 # --timeout-per-case flag). When unset, we DON'T pass --timeout-per-case to

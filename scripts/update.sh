@@ -29,7 +29,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL="${MODEL:-qwen3.6-27b}"
+MODEL="${MODEL:-qwen3.6-35b-a3b}"
 DRY_RUN=0
 FORCE=0
 

@@ -1,45 +1,5 @@
 schema_version: 1
 arches:
-  - arch: Qwen3NextForCausalLM
-    family: qwen3-next-hybrid
-    engine_pin:
-      - pin: vllm-stable@v0.22.0
-        loads: true
-      - pin: vllm-stable@v0.24.0
-        loads: true
-      - pin: vllm-stable@v0.27.1
-        loads: true
-      - pin: vllm-stable@v0.25.1
-        loads: true
-      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: false
-      - pin: vllm-nightly-mtp@01d4d1ad375dc5854779c593eee093bcebb0cada
-        loads: false
-        reason: "Engine DEPRECATED 2026-06-05 (#254): purged nightly + Genesis path on hold; zero registry users, not offered for derive."
-      - pin: vllm-nightly-dflash@e47c98ef7a38792996e452ef53914e21e41928e9
-        loads: false
-        reason: "Engine DEPRECATED 2026-06-05 (#327): purged nightly + DFlash blocked on Qwen3-Next (DeltaNet rollback); zero registry users, not offered for derive."
-      - pin: genesis@v7.72.2
-        loads: true
-        enables: [tq3-kv, mtp, cliff2-mitigations]
-    required_patches:
-      - qwen-vllm-marlin-pad
-      - qwen-qwen3coder-tool-parser-deferred-commit
-      - qwen-vllm-pr41800-truncate-prompt-tokens
-    valid_tp:
-      tp_divisors: [1, 2, 4]
-      marlin_alignment_required: true
-      moe_layout: dense
-      evidence: "scripts/lib/profiles/models/qwen3.6-27b.yml valid_tp; models/qwen3.6-27b/vllm/patches/vllm-marlin-pad/README.md"
-    requires_trust_remote_code: "false"
-    requires_trust_remote_code_evidence: "qwen3.6-27b weights config.json (qwen3.6-27b-autoround-int4) architectures=[Qwen3_5ForConditionalGeneration], auto_map absent, no *modeling*.py modeling file shipped with the weights -> built-in vLLM/transformers class, no remote code executed; see scripts/lib/profiles/profile_runtime.yml arch_model_xref.Qwen3NextForCausalLM"
-    kernel_constraints:
-      - "AutoRound INT4 TP paths need Marlin tile-N alignment — native in vLLM v0.24.0 via vllm#45295 (our vllm#40361 closed-superseded); the vendored vllm-marlin-pad overlay is de-registered (patches.yml: merged/deprecated 2026-07-02)."
-      - "TurboQuant KV is Genesis-gated on shipped production composes."
-      - "Boot-fit does not imply accumulated-context stability; single-card vLLM remains Cliff-2-prone."
-    confidence: exact
-    status: verified
-
   - arch: Qwen3_5MoeForConditionalGeneration
     family: qwen3-next-moe
     engine_pin:

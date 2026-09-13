@@ -67,19 +67,22 @@ What matters:
 
 Maintainer call 2026-08-01: rather than un-ship the composes, six exposed slugs (7 registry entries,
 incl. the `vllm/dual` default and its alias) flipped to ⚠️ with a formal `Caveats:` line.
-**Nine composes carry it:** `vllm/dual` (= `vllm/qwen-27b-dual-fast`), `vllm/qwen-27b-dual-max`,
-`vllm/qwen-27b-dual-nvfp4`, `vllm/qwen-27b-single-nvfp4`, `vllm/qwen-27b-multi-fast`,
-`vllm/qwen-27b-multi-max`, `vllm/qwen-27b-dual-lmcache`, `vllm/tess-dual-w4a16`,
+**Nine composes carried it**, seven of them on `qwen3.6-27b` (`vllm/dual` = `vllm/qwen-27b-dual-fast`,
+`vllm/qwen-27b-dual-max`, `vllm/qwen-27b-dual-nvfp4`, `vllm/qwen-27b-single-nvfp4`,
+`vllm/qwen-27b-multi-fast`, `vllm/qwen-27b-multi-max`, `vllm/qwen-27b-dual-lmcache`) — all retired
+2026-09 along with the model. The two that remain live: `vllm/tess-dual-w4a16`,
 `vllm/thinkingcap-dual-w4a8`.
 
 **The common factor is `vLLM + built-in MTP drafter on a Qwen3.5/3.6 hybrid-GDN trunk`** — not the
 weights, not the KV format, not TP. Hence the escape hatches:
 
 - **Drafter-less vLLM slugs are unaffected** — `vllm/qwen-35b-a3b-dual` (no drafter by design),
-  `vllm/minimal`, the a3b NVFP4 family. The a3b-nvfp4 BENCHMARKS row states it outright:
+  the a3b NVFP4 family. The a3b-nvfp4 BENCHMARKS row states it outright:
   *"MTP confirmed off in the boot log — vllm#50021 does not apply to this slug."*
-- **llama.cpp / ik-llama MTP is unaffected.** Different engine, different kernel. `ik-llama/iq4ks-mtp`
-  runs MTP n=2 and is still ✅ Production; `deckard` and `hauhau` run `--spec-type draft-mtp` safely.
+  (`vllm/minimal`, the other example here, was the `qwen3.6-27b` fallback slug — retired 2026-09.)
+- **llama.cpp / ik-llama MTP is unaffected.** Different engine, different kernel; `hauhau` runs
+  `--spec-type draft-mtp` safely. (`ik-llama/iq4ks-mtp`, the other example here, was a
+  `qwen3.6-27b` slug — retired from the catalog 2026-09.)
 
 ### "Is the only caveat that it has no structured benchmarks?"
 
@@ -115,6 +118,10 @@ Three same-harness, same-day A/Bs in this repo:
 The `fp8-mtp.yml` header states the conclusion in its own words: *"fast 109 · balanced 105 · max 110
 — a TIE (the 8-pack doesn't separate the quants)."* All of those deltas sit inside the repo's own
 ±5–7 noise band.
+
+*(These A/Bs were run on `qwen3.6-27b`, retired from the catalog 2026-09 — the finding itself
+("weight precision above INT4 buys ≈ nothing measurable here") is kept as historical record; none
+of the specific slugs below are launchable anymore.)*
 
 **What it costs to buy that +1.** Going INT4 → official FP8 on the 27B means a **29 GB** download and
 a KV pool that shrinks from **622K tokens / 2.37× concurrency to 295K / 1.13×** — the smallest pool of
@@ -159,15 +166,19 @@ exists. They're drop-in swaps that bind the same port as their text sibling (mut
 | Lane | Compose | Registry? | Ctx | KV | mmproj | On disk |
 |---|---|---|---|---|---|---|
 | `hauhau-vision` | `qwen3.6-35b-a3b/llama-cpp/dual/morikomorizz-q6kp/**vision.yml**` | ❌ serve.sh only | **262K** | **q8_0/q8_0** | `mmproj-BF16.gguf` (861 MiB) | ✅ verified present, path matches |
-| `deckard-vision` | `qwen3.6-40b-deckard/llama-cpp/dual/piehsoft-q6k/**vision.yml**` | ❌ serve.sh only | 131K | **q8_0/q8_0** | `…Deckard….mmproj-Q8_0.gguf` (600 MiB) | ✅ verified present, path matches |
 | `vllm/qwen-35b-a3b-dual` | `…/vllm/dual/autoround-int4/fp8.yml` | ✅ | **262K** | fp8_e4m3 | in-checkpoint tower, `image=2` | ✅ |
-| `vllm/dual` (27B) | `…/vllm/dual/autoround-int4/fp8-mtp.yml` | ✅ ⚠️ #50021 | 262K | fp8_e4m3 | in-checkpoint tower | ✅ |
-| `ik-llama/iq4ks-mtp-vision` | `…/ik-llama/single/ubergarm-iq4ks/mtp-vision.yml` | ✅ | 163K | q4_0 + Hadamard | `mmproj-F16.gguf` | ✅ |
-| `ik-llama/prism-pro-dq-dual-vision` | `…/ik-llama/dual/ex0bit-prism-pro-dq/mtp-vision.yml` | ✅ 🧪 | 262K | **q8_0** | needs `gguf_mmproj_f16` | ❌ weights not on disk |
+
+*(Two rows used to sit here: `ik-llama/iq4ks-mtp-vision` and `ik-llama/prism-pro-dq-dual-vision` —
+both `qwen3.6-27b`-family slugs, retired from the catalog 2026-09 along with the rest of that
+model. See §3b below for why `prism-pro-dq` wasn't worth pulling anyway.)*
 
 ---
 
 ## 3b. `prism-pro-dq` — checked, and it's a no (don't spend the download)
+
+*(`prism-pro-dq` was a `qwen3.6-27b` fine-tune slug — `Ex0bit/Qwen3.6-27B-PRISM-PRO-DQ` — retired
+from the catalog along with the base model 2026-09. Moot as a "should I pull this" question now,
+kept below as a worked example of registry-vs-compose verification.)*
 
 I flagged this last round as "262K + q8_0 KV + vision, in the registry, unknown-not-bad." **I was
 reading registry metadata that the compose contradicts.** Checked against the actual files:
@@ -196,7 +207,8 @@ Ranked for *this* rig. "Precision" = weight bpw **and** KV bits, with the §2 ca
 INT4 / 8-bit-KV the measured quality return is flat.
 
 **Constraint added 2026-08-09: uncensored / low-refusal models are a specialty lane, not daily
-drivers.** That removes `hauhau`, `deckard`, and `carnice` from the S tier below and puts them in §3c.
+drivers.** That removes `hauhau` from the S tier below and puts it in §3c. (`deckard` and `carnice`
+were also in that specialty lane; both were retired from the catalog 2026-09.)
 It leaves the stock field thin — deliberately so.
 
 ### S — the stock daily driver
@@ -220,8 +232,11 @@ about.
 | Pick | Status | Weights | KV | Ctx | Vision | Why |
 |---|---|---|---|---|---|---|
 | **`apex-vision-ik`** (`mudler-apex-compact/vision.yml`) | 🧪 | APEX Q4_K_M | **q8_0 K / q5_0 V** | **262K** ✔ | ✅ | **Verified on this rig 2026-07-18** at full 262K: 20.8 GB used / ~3.7 GB free, image described correctly. Best KV precision of any vision lane you can boot. A mudler *fine-tune* — but a capability fine-tune, **not** abliterated, so it's inside your constraint. Compose default is `VISION_CTX_SIZE=131072`; your co-located `.env` raises it to 262144. |
-| `ik-llama/iq4ks-mtp-vision` | ✅ **Production** | ubergarm IQ4_KS (imatrix, **stock** 27B) | q4_0 + `-khad/-vhad` | 163840 | ✅ | The purest stock+production vision lane you own. Dense 27B, MTP n=2, advanced-quant track. Above your 131K target, below 262K. KV is the weak axis — raise it with `KV_TYPE`. |
 | `unsloth-ud-iq4xs/vision.yml` (35B-A3B single) | 🧪 | unsloth UD IQ4_XS (**stock** base) | q4_0 (K/V overridable) | 131072 | ✅ | On disk, stock, not in the registry. Sits exactly at your floor. Untested here. |
+
+*(`ik-llama/iq4ks-mtp-vision` — the purest stock+production dense-27B vision lane — used to be the
+other row here. It was a `qwen3.6-27b` slug, retired from the catalog 2026-09; no replacement
+dense-model vision lane exists today.)*
 
 > **Call it:** `vllm/qwen-35b-a3b-dual` is the stock daily driver — it's the only one that clears every
 > constraint at once. `apex-vision-ik` is the one to reach for when you want the KV precision and
@@ -232,46 +247,46 @@ about.
 Your reasoning is **directionally right but wrong on the specific mechanism**, and the distinction
 matters for how you use them:
 
-- **Overall quality: yes, mid-band.** hauhau 103 off / 105 on, deckard 105 — against stock byteshape's
+- **Overall quality: yes, mid-band.** hauhau 103 off / 105 on — against stock byteshape's
   110 and ThinkingCap's 113. The repo's own framing: *"uncensoring buys compliance, not capability."*
-- **Tool calling: not degraded.** This is the part to drop. hauhau scores **toolcall 14/15**, deckard
-  **15/15** — at or near the top of the whole catalog. There is no measured tool-call penalty in either.
+- **Tool calling: not degraded.** This is the part to drop. hauhau scores **toolcall 14/15** — at or
+  near the top of the whole catalog. There is no measured tool-call penalty.
 - **Where the low-refusal cost is actually measurable: `cli-40` safety scenarios.** The one external
   attended judge run in the repo (@kevinb361 on Tess) returned a general-corpus win (13W/13T/4L) but a
   **safety-corpus loss (5W/2T/8L)**, attributed to "Hermes-lineage low-refusal; chronic cli-40
   safety-scenario failures across every quant/engine" — explicitly **model-level, not recipe-fixable**.
-- **Neither is technically "abliterated."** Deckard is a *merge* (DavidAU Opus-Deckard); hauhau is an
-  uncensored *fine-tune*. Abliteration (weight orthogonalization) is a specific technique, and the repo
-  doesn't attribute either model to it. Also worth knowing: **no refusal-rate benchmark has ever been
-  run in this repo** — there is no measured refusal number for anything, in either direction.
+- **Not technically "abliterated."** hauhau is an uncensored *fine-tune*. Abliteration (weight
+  orthogonalization) is a specific technique, and the repo doesn't attribute it to this model. Also
+  worth knowing: **no refusal-rate benchmark has ever been run in this repo** — there is no measured
+  refusal number for anything, in either direction.
 
-So: keeping them as a specialty lane is a sound call, but make it on the **overall 8-pack and the
+So: keeping it as a specialty lane is a sound call, but make it on the **overall 8-pack and the
 safety-scenario data**, not on a tool-calling fear that the numbers don't support.
 
 | Specialty pick | Weights | KV | Ctx | Vision | Note |
 |---|---|---|---|---|---|
-| `hauhau-vision` | **Q6_K_P** | **q8_0/q8_0** | **262K** | ✅ (unverified boot) | Still the highest precision × context × vision config you own. 262K + MTP + 861 MiB mmproj is tighter than Deckard's — first boot must be checked: mmproj loads, `speculative decoding context initialized`, per-card free VRAM. If tight: `CTX_SIZE=229376` or rebalance `VISION_TENSOR_SPLIT`. Unpinned community digest. MTP n=3 is code-max, **−4% prose** (`MTP_DRAFT_N_MAX=1` prose-safe). `REASONING=on`. |
-| `deckard-vision` | **Q6_K, 40B dense** | **q8_0/q8_0** | 131K | ✅ **confirmed** | Max weights+KV fidelity that fits 2×24 GB, and the only vision lane whose image round-trip is verified. Text sibling ✅ Production, 8-pack 105, ToolCall 15/15, bugfind 13/15. 131K hard (192K OOMs). 36/46 TPS. `-ts 1,1` even; vision+MTP add ~2.1 GB. |
+| `hauhau-vision` | **Q6_K_P** | **q8_0/q8_0** | **262K** | ✅ (unverified boot) | Still the highest precision × context × vision config you own. 262K + MTP + 861 MiB mmproj — first boot must be checked: mmproj loads, `speculative decoding context initialized`, per-card free VRAM. If tight: `CTX_SIZE=229376` or rebalance `VISION_TENSOR_SPLIT`. Unpinned community digest. MTP n=3 is code-max, **−4% prose** (`MTP_DRAFT_N_MAX=1` prose-safe). `REASONING=on`. |
+
+*(`deckard-vision` used to be the other specialty pick here — Q6_K 40B dense, q8_0/q8_0 KV, 131K,
+confirmed vision round-trip. `deckard` was retired from the catalog 2026-09; no replacement dense
+uncensored vision lane exists today.)*
 
 ### B — high precision, but the trade doesn't clear
 
 | Pick | Status | Vision | Why it's not S |
 |---|---|---|---|
-| `vllm/qwen-27b-dual-max` (official FP8) | ⚠️ | ✅ | The nominal precision king for the 27B: FP8 weights + fp8/e4m3 KV → FlashInfer → **flat decode at depth** (115.0 @35K vs int8-PTH's 50.7). But: 29 GB pull, smallest KV pool in the catalog (295K/1.13×), quality ties INT4 (110 vs 109), it's in the #50021 set, and TP=2 halves 83/108 (R) to roughly 42/54 here. §2 is this slug's obituary. |
 | `ik-llama/prism-pro-dq-dual-vision` | 🧪 | ✅ | **RULED OUT — do not pull.** See §3b: it's a **Q3_K_M**, and its registry metadata misdescribes it. |
 | `ik-llama/ornith35b-dual` | 🧪 | ❌ | **Q8_0 weights** (~35 GB) + q8_0 KV at 262K — the highest weight precision at full context. Coding-leaning (aider 15/30 vs the base's 12–13, bugfind 15/15), 8-pack 105 off==on, 106.5/103.6 (R). No vision, 35 GB pull. Out on the vision requirement alone. |
 | `ik-llama/apex-mtp-quality-dual` | ❌ | ❌ | q8_0 KV, 196K, dual. Not on disk, no vision variant. |
 
 ### C — skip on this rig
-- `vllm/qwen-27b-multi-*` — TP=4, you have 2 cards.
 - **NVFP4 family** — needs sm_90+ to execute natively; on Ampere it dequants through Marlin W4A16 and
   AutoRound is faster. Every headline number is a 5090 run.
 - `vllm/agents-a1-dual` — best cli-40 in the vLLM set (23/40) but **crash-loops on this box** in the
   FP8-MoE→Marlin repack (`CUDA driver error: device not ready`); prime suspect driver 610.62.
-- `vllm/qwen-27b-dual-balanced` — 🗑️ deprecated 2026-07-16, dominated on every measured axis.
-- **`beellama/*`** — engine retired 2026-07-27 (Anbeeld #98 won't-fix); all 10 slugs deprecated,
-  launch needs `--force`. That strands `carnice` — **and note you have 28 GB of `carnice-v2-27b-gguf`
-  Q8 weights on disk whose only slug is on the retired engine.** Reclaim the space or re-home them.
+- **`beellama/*`** — engine retired 2026-07-27 (Anbeeld #98 won't-fix); all remaining slugs deprecated,
+  launch needs `--force`. (`carnice`, the beellama-hosted `qwen3.6-27b` fine-tune, was removed from
+  the catalog entirely 2026-09 along with its weights.)
 
 ---
 
@@ -285,8 +300,10 @@ Stock lanes only (the uncensored §3c picks would sit at ranks 1 and 5).
 |---|---|---|---|---|---|---|
 | 1 | `apex-vision-ik` (single card) | **262K** | **q8_0 K / q5_0 V** | ✅ | ~84–90 (L) | **Verified on this rig 2026-07-18** at full 262K: 20.8 GB used / ~3.7 GB free, image correct. Single-card ⇒ transfers cleanly. Dropping `--spec-type` reclaimed 2.3 GB. Fine-tune, not abliterated. |
 | 2 | `vllm/qwen-35b-a3b-dual` | 262K | fp8_e4m3 | ✅ | ~85 (L) single · **~265 agg @ N=4 (L)** | The validated stock answer, and the only concurrency answer. |
-| 3 | `ik-llama/iq4ks-mtp-vision` (single card) | 163840 | q4_0 **+ `-khad/-vhad`** | ✅ | ~51 (est.) | Stock 27B, ✅ Production. Raise `KV_TYPE` for JSON-heavy traffic. |
 | — | ~~`ik-llama/byteshape-iq4xs-mtp`~~ | 262K | q4_0 + Hadamard | ❌ **text-only** | 115.6 / 137.1 (R) | **Correction:** I listed this as a vision lane last round — wrong. Its header reads *"Vision: NO (mmproj-bf16.gguf exists upstream — vision not wired here yet)."* I'd matched a grep on the header prose, not on an actual `--mmproj` mount. Still the best-measured single-card 35B-A3B (8-pack **110/150**, ToolCall 15/15) — just not with images. Your local `byteshape-vision` lane at 131K is your own compose, not a repo one. |
+
+*(Rank 3 used to be `ik-llama/iq4ks-mtp-vision`, a stock dense-27B vision lane at 163840 ctx — it
+was a `qwen3.6-27b` slug, retired from the catalog 2026-09.)*
 
 **The uncomfortable comparison:** #1 on **one card** matches #2 on **two** for single-stream decode at
 *higher* KV precision, same 262K, same vision. That's the x4 tax in one line — "use both cards" is not
@@ -401,11 +418,15 @@ needle retrieval is blind to this drift. "It passed stress" is not evidence your
 JSON-heavy traffic.
 
 **Rule for your objective:** run **K at q8_0** wherever the context budget allows. `hauhau` (q8_0/q8_0
-@262K), `deckard` (q8_0/q8_0 @131K), and `apex-fit-q8q5` (q8_0/q5_0 @196K) all already satisfy it.
+@262K) and `apex-fit-q8q5` (q8_0/q5_0 @196K) already satisfy it. (`deckard`, q8_0/q8_0 @131K, used to
+be a third example here — retired from the catalog 2026-09.)
 
 ---
 
 ## 8. `vllm/minimal` and `vllm/dual` — are those user-defined slugs?
+
+*(Both were `qwen3.6-27b` compose slugs; the model — and these two registry entries — were retired
+from the catalog 2026-09. Kept below as historical context for the naming convention it explains.)*
 
 **No — maintainer-owned registry tags**, literal keys in
 `scripts/lib/profiles/compose_registry.py::COMPOSE_REGISTRY`, shipped with the repo. The naming is
@@ -433,7 +454,9 @@ slugs immune to #50021 for the same reason.
 
 Two footnotes: the ctx number disagrees across sources — the compose *header* claims 65K, the flag is
 `MAX_MODEL_LEN:-32768`, and the registry says 32768, which is what the cockpit renders. **The header is
-stale.** Your `serve.sh 27b-minimal` runs it at 65K via a local override.
+stale.** (This applied to the retired `serve.sh 27b-minimal` local override — moot now that the
+compose is gone, but the header-vs-flag discrepancy is a good example of the class of bug to watch
+for elsewhere.)
 
 ---
 
@@ -450,14 +473,16 @@ stale.** Your `serve.sh 27b-minimal` runs it at 65K via a local override.
 1. **Run `vllm/qwen-35b-a3b-dual` as the stock daily driver**, and `apex-vision-ik` when you want the
    q8_0/q5_0 KV and single-card speed at the same 262K. Those are the two that clear every constraint
    (stock-or-non-abliterated, vision, ≥131K, validated).
-2. **Keep `hauhau-vision` and `deckard-vision` as the specialty lane** (§3c) — booted deliberately, not
-   as defaults. If you do boot hauhau-vision, its 262K + MTP + 861 MiB mmproj combination has **never
+2. **Keep `hauhau-vision` as the specialty lane** (§3c) — booted deliberately, not
+   as a default. If you do boot it, its 262K + MTP + 861 MiB mmproj combination has **never
    been verified**: confirm mmproj loads, `speculative decoding context initialized` appears, and
    per-card free VRAM is healthy; if tight, `CTX_SIZE=229376` or rebalance `VISION_TENSOR_SPLIT`.
+   (`deckard-vision` used to be the other specialty pick here; retired from the catalog 2026-09.)
 3. **Don't pull `prism-pro-dq`** — §3b. Q3_K_M weights + q4_0 KV @196K is the wrong direction on every
    axis you care about, and its registry row misdescribes all three.
-4. **Demote `vllm/dual` out of daily use**, or delete its `--speculative-config` line. The crash needs
-   sustained tool traffic, and MTP's speedup was being eaten by the x4 link anyway. Watch the
+4. ~~Demote `vllm/dual` out of daily use~~ — moot: `vllm/dual` was the `qwen3.6-27b` default slug,
+   retired from the catalog 2026-09 along with the rest of that model's composes. The underlying
+   #50021 bug still matters for `vllm/tess-dual-w4a16` / `vllm/thinkingcap-dual-w4a8` — watch
    `docs/UPSTREAM.md` #50021 row for the merge.
 5. **Run `bash scripts/rebench-full.sh` once per slug you actually use.** You have zero local
    measurement records, which is why the explain modal is empty and why every number you're reading is
@@ -468,17 +493,18 @@ stale.** Your `serve.sh 27b-minimal` runs it at 65K via a local override.
    the gap is worth filling: wiring vision onto `byteshape-iq4xs` (mmproj exists upstream, header says
    "not wired here yet") would give you a **stock** 262K vision lane with the best-measured
    single-card 8-pack in the catalog (110/150, ToolCall 15/15). That's a small, upstreamable PR.
-7. **Don't buy precision you can't measure.** Per §2, the 29 GB FP8 pull for `dual-max` returns +1
-   point and halves your KV pool. If you want a *real* quality jump, the lever is the model:
+7. **Don't buy precision you can't measure.** Per §2, spending on the top weight-precision tier
+   historically returned only ~+1 point on the 8-pack (the `qwen3.6-27b` FP8 vs INT4 A/B) while
+   halving the KV pool. If you want a *real* quality jump, the lever is the model:
    `vllm/thinkingcap-dual-w4a8` is top-of-catalog (113/120 like-for-like; cli-40 28–29/40) at 4-bit
    weights — but note for your requirement that its **vision tower is resident but untested**
    (text-only validated), and single-card W4A8 tops ~76K *because* of the vision tower. Plus MTP n≥4
    crashes (#758), a thin 69 MB margin at the 262K ceiling, and #50021. Not a fit while vision is
    non-negotiable.
-8. **Housekeeping:** `carnice-v2-27b-gguf` (28 GB Q8) is stranded on the retired beellama engine —
-   reclaim or re-home. And your live `HF_TOKEN` sits in `.env`; it's `.gitignore`d (`/.env`, line 53)
-   so it won't be committed, but it surfaces in any full-file paste or log capture — worth rotating if
-   one ever left the box.
+8. **Housekeeping:** `carnice`, `deckard`, and the `qwen3.6-27b` catalog entry were retired 2026-09
+   and their local weights removed. Your live `HF_TOKEN` still sits in `.env`; it's `.gitignore`d
+   (`/.env`, line 53) so it won't be committed, but it surfaces in any full-file paste or log
+   capture — worth rotating if one ever left the box.
 
 ---
 

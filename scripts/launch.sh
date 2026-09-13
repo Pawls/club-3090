@@ -279,7 +279,7 @@ declare -A LAUNCH_DEFAULT_CONTAINER=()
 declare -A LAUNCH_VARIANT_STATUS=()
 declare -A LAUNCH_VARIANT_STATUS_NOTE=()
 LAUNCH_VARIANT_ORDER=()
-PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-27b}"
+PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-35b-a3b}"
 # shellcheck source=lib/registry-emit.sh
 source "${ROOT_DIR}/scripts/lib/registry-emit.sh"
 derive_launch_variant_tables "${ROOT_DIR}"

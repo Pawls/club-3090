@@ -11,207 +11,6 @@ schema_version: 1
 # all new tooling MUST read `delivery_mechanism`/`delivery_spec` instead. Do
 # not add new compose wiring decisions to the boolean block.
 patches:
-  - id: qwen-sglang-autoround-fused-bf16
-    deprecated_on: "2026-06-05"
-    deprecation_reason: "SGLang path parked; no functional compose uses it (#254)."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/sglang/patches/patch_sglang_autoround_fused_bf16.py
-    load_bearing_when: []
-    delivery:
-      dockerfile_bake: false
-      entrypoint_invoke: false
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: none
-    delivery_spec: null
-    drift_guard: null
-    capability: null
-    foundational: false
-    upstream:
-      ref: local-sglang-diagnostic
-      status: diagnostic-sidecar
-      drop_when: "delete when the archived SGLang experiment is retired"
-    status: suspect
-
-  - id: qwen-sglang-eagle3
-    deprecated_on: "2026-06-05"
-    deprecation_reason: "SGLang path parked; no functional compose uses it (#254)."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/sglang/patches/patch_sglang_eagle3.py
-    load_bearing_when: []
-    delivery:
-      dockerfile_bake: false
-      entrypoint_invoke: false
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: none
-    delivery_spec: null
-    drift_guard: null
-    capability: null
-    foundational: false
-    upstream:
-      ref: local-sglang-diagnostic
-      status: diagnostic-sidecar
-      drop_when: "delete when the archived SGLang experiment is retired"
-    status: suspect
-
-  - id: qwen-vllm-marlin-pad
-    deprecated_on: "2026-07-02"
-    deprecation_reason: "merged upstream (native in vLLM v0.24.0) — our #40361 sub-tile-n pad was closed-superseded by mgoin's #45295 (consolidated `marlin_padded_nk` across all dense Marlin paths). `vllm-stable` pins v0.24.0, so it's native there."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/vllm-marlin-pad
-    # NOT load-bearing anymore: #40361 (our per-case W4A16 sub-tile-n pad) was
-    # closed-superseded by #45295 (general marlin_padded_nk), which is native in
-    # vLLM v0.24.0. `vllm-stable` is pinned v0.24.0, and the AutoRound INT4 TP=2
-    # path (vllm/dual) boots clean WITHOUT the overlay — validated 2026-06-30
-    # (PR #533 Phase 0b: "marlin-pad confirmed unnecessary"). No live compose
-    # mounts it (archive-only). Kept as historical reference (delivery: none).
-    load_bearing_when: []
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: false
-      entrypoint_invoke: false
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: none   # merged into stock v0.24.0 (#45295); dropped from all live composes
-    delivery_spec: null
-    drift_guard: null
-    capability: tp-weight-load
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#40361
-      status: merged
-      drop_when: "DONE — #40361 closed-superseded by #45295 (native in v0.24.0); vllm-stable pinned v0.24.0; no live compose mounts it. Entry retained as history."
-    status: verified
-
-  - id: qwen-vllm-pr40798-rebased
-    deprecated_on: "2026-06-05"
-    deprecation_reason: "negative-local-result; abandoned, no functional compose uses it (#254)."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/vllm-pr40798-rebased
-    load_bearing_when: []
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: false
-      entrypoint_invoke: false
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: none   # negative-local-result diagnostic; not load-bearing in any compose
-    delivery_spec: null
-    drift_guard: null
-    capability: null
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#40798
-      status: negative-local-result
-      drop_when: "delete after upstream workspace-manager path supersedes the diagnostic overlay"
-    status: suspect
-
-  - id: qwen-vllm-pr40914-k1-only
-    deprecated_on: "2026-06-05"
-    deprecation_reason: "negative-local-result; superseded, no functional compose uses it (#254)."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/vllm-pr40914-k1-only
-    load_bearing_when: []
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: false
-      entrypoint_invoke: false
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: none   # negative-local-result diagnostic; not load-bearing in any compose
-    delivery_spec: null
-    drift_guard: null
-    capability: null
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#40914
-      status: negative-local-result
-      drop_when: "delete after TQ+MTP K+1 routing is resolved upstream or by Genesis"
-    status: suspect
-
-  - id: qwen-qwen3coder-tool-parser-deferred-commit
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/local/qwen3coder_tool_parser_deferred_commit.py
-    # ⛔ NOT LOAD-BEARING -- was claimed for [vllm/minimal, vllm/dual] until
-    # 2026-09-06 (club-3090#1012). Verified:
-    #   1. THE TARGET FILE DOES NOT EXIST. The sidecar patches
-    #      vllm/tool_parsers/qwen3coder_tool_parser.py, GONE on BOTH v0.25.1 and
-    #      v0.27.1 -- and the parser was REPLACED, not moved: `qwen3_coder` now
-    #      resolves through the lazy registry to
-    #      vllm.tool_parsers.qwen3_engine_tool_parser:Qwen3EngineToolParser.
-    #      The sidecar's ORIG anchor cannot match on either pin.
-    #   2. NEITHER NAMED COMPOSE MOUNTS IT (0 references).
-    # ⚠️ Whether the SSE-silencing behaviour recurs on the replacement parser is
-    # untested; tracked separately rather than implied by a dead sidecar.
-    load_bearing_when: []
-    delivery:
-      dockerfile_bake: false
-      entrypoint_invoke: true
-      genesis: false
-    delivery_gaps:
-      - composes:
-          - vllm/minimal
-          - vllm/dual
-        issue: "Known current coverage boundary from club-3090#72/#145 class: these composes do not invoke the local sidecar today."
-    delivery_mechanism: python_sidecar
-    delivery_spec:
-      sidecar: models/qwen3.6-27b/vllm/patches/local/qwen3coder_tool_parser_deferred_commit.py
-      invoke: "entrypoint applies the deferred-commit tool parser sidecar before serving"
-      wired_at: entrypoint
-      note: "guarded python_sidecar is the locked default delivery mechanism; coverage gap recorded in delivery_gaps above (#72/#145 class)"
-    drift_guard:
-      kind: behavioral
-      check: "Qwen3-Coder streaming SSE not silenced when prose contains a literal <tool_call> token (deferred-commit state machine present)"
-      on_fail: capability-degraded
-    capability: tool-call-stream
-    foundational: false
-    upstream:
-      ref: club-3090#72
-      status: dead-target
-      drop_when: "upstream vLLM parser fixes the deferred-start state machine and pinned engines include it"
-    status: verified
-
-  - id: qwen-vllm-pr41800-truncate-prompt-tokens
-    deprecated_on: "2026-08-16"
-    deprecation_reason: "vllm#41800 MERGED upstream and verified present in the
-      vllm-stable v0.27.1 pin (compare v0.27.1...<merge_sha> = behind). The engine
-      now handles truncate_prompt_tokens natively, so the vendored delta is dead
-      weight. Was already wired to no compose (load_bearing_when.composes: null)."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/vllm-pr41800-truncate-prompt-tokens
-    load_bearing_when:
-      - composes:
-        reason: "Pre-d5b31c95 engine pins reject agent clients that send truncate_prompt_tokens."
-        evidence: "docs/UPSTREAM.md#41800 row; models/qwen3.6-27b/vllm/patches/vllm-pr41800-truncate-prompt-tokens/README.md"
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: false
-      entrypoint_invoke: true
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: install_script
-    delivery_spec:
-      script: models/qwen3.6-27b/vllm/patches/vllm-pr41800-truncate-prompt-tokens/install.sh
-      mounted_at: /etc/club3090/install-pr41800.sh
-      invoke: "bash /etc/club3090/install-pr41800.sh"
-      invoked_before: vllm-serve
-      wired_at: [volumes, entrypoint]
-    drift_guard:
-      kind: behavioral
-      check: "agent client sending truncate_prompt_tokens does not get HTTP 400 on the selected nightly (no-op if nightly post-d5b31c95)"
-      on_fail: capability-degraded
-    capability: truncate-prompt-tokens-kwarg
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#41800
-      status: merged
-      drop_when: "each affected engine profile pins a vLLM nightly after d5b31c95"
-    status: verified
-
   - id: gemma-google-canonical-chat-template
     model: [gemma-4-31b, gemma-4-12b, gemma-4-26b-a4b, diffusiongemma-26b-a4b]
     files:
@@ -250,17 +49,15 @@ patches:
     status: verified
 
   - id: qwen-froggeric-chat-template
-    model: [qwen3.6-27b, tess-4-27b, qwen3.6-35b-a3b]
+    model: [tess-4-27b, qwen3.6-35b-a3b]
     files:
-      - models/qwen3.6-27b/vllm/patches/froggeric-chat-template/chat_template.jinja
+      - models/_shared/vllm/patches/froggeric-chat-template/chat_template.jinja
     load_bearing_when:
       - composes:
-          - vllm/minimal
-          - vllm/dual
           - vllm/tess-dual-nvfp4
           - vllm/qwen-35b-a3b-dual
-        reason: "Default Qwen3.6 chat template mis-handles tool-call XML / reasoning delimiters / streaming (the #145 silent-break class); the froggeric override fixes 7 default-template defects and is behavior-critical for every tool/agent compose. Tess-4-27B (same qwen3_5 template family) additionally NEEDS it because its repo template is stock-broken (developer-role crash). Carnice/Qwopus are intentional excludes (they ship their own carnice template)."
-        evidence: "models/qwen3.6-27b/vllm/patches/froggeric-chat-template/PROVENANCE.md; docs/UPSTREAM.md (froggeric template re-eval #150 / v19 adopted PR #157)"
+        reason: "Default Qwen3.6 chat template mis-handles tool-call XML / reasoning delimiters / streaming (the #145 silent-break class); the froggeric override fixes 7 default-template defects and is behavior-critical for every tool/agent compose. Tess-4-27B (same qwen3_5 template family) additionally NEEDS it because its repo template is stock-broken (developer-role crash)."
+        evidence: "models/_shared/vllm/patches/froggeric-chat-template/PROVENANCE.md; docs/UPSTREAM.md (froggeric template re-eval #150 / v19 adopted PR #157)"
     delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -268,7 +65,7 @@ patches:
     delivery_gaps: []
     delivery_mechanism: chat_template
     delivery_spec:
-      jinja: models/qwen3.6-27b/vllm/patches/froggeric-chat-template/chat_template.jinja
+      jinja: models/_shared/vllm/patches/froggeric-chat-template/chat_template.jinja
       mounted_at: /etc/qwen-froggeric-chat-template.jinja
       mount_mode: ro
       invoke: "--chat-template /etc/qwen-froggeric-chat-template.jinja"
@@ -341,24 +138,18 @@ patches:
   - id: vllm-pr48375-mamba-drop-eagle-block
     # qwen3.8-27b added 2026-08-14: its two vLLM "max" composes ship the SAME
     # MTP + prefix-caching pair on the same Qwen3-Next hybrid family, and mount
-    # this patch dir from the qwen3.6-27b tree exactly as tess-4-27b does.
-    model: [qwen3.6-27b, qwen3.6-35b-a3b, tess-4-27b, qwen3.8-27b]
+    # this shared patch dir exactly as tess-4-27b does.
+    model: [qwen3.6-35b-a3b, tess-4-27b, qwen3.8-27b]
     files:
-      - models/qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/install.sh
-      - models/qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/patch_mamba_drop_eagle_block.py
+      - models/_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/install.sh
+      - models/_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/patch_mamba_drop_eagle_block.py
     load_bearing_when:
       - composes:
-          - vllm/dual
-          - vllm/qwen-27b-dual-fast
-          - vllm/qwen-27b-dual-max
-          - vllm/qwen-27b-dual-balanced
-          - vllm/qwen-27b-multi-fast
-          - vllm/qwen-27b-multi-max
           - vllm/tess-dual-w4a16
           - vllm/qwen38-27b-dual-max
           - vllm/qwen38-27b-multi4-max
         reason: "Vendored upstream fix vllm#48375 for vllm#43559 (MTP x prefix-caching corrupts recurrent-state KV on Qwen3-Next hybrids; ~20% acc drop reproduced upstream on 35B-A3B): MambaManager.find_longest_cache_hit receives drop_eagle_block but silently ignores it, so the final matched page's Mamba/GDN state snapshot may reflect draft tokens verification later rejected. The 9-line fix lowers the hit-search ceiling by one page. ACTIVE by default since 2026-07-17: the same PR flipped the pair-capable composes back to --enable-prefix-caching (the #720 off-default cost 7.4x TTFT on long prefixes per kevinb361's production data, and the pair-clean evidence stack is now: upstream repro+fix+tests, kevin's 7-day production at 89.5% hit rate on v0.25.x, our 6-arm probe matrix). Opt-out: PREFIX_CACHE_ARG=--no-enable-prefix-caching makes the patched path dormant again. On-rig validation 2026-07-17: no-harm on both hybrid families (27B + 35B-A3B, MTP n=3 + prefix-ON: 12/12 post-agent tool-call probes clean per arm with prefix_cache_hits_total asserted; accept-len 3.2-3.9 intact; ~5% fewer hit tokens = the by-design one-block reduction). Full 6-arm matrix: club-3090#710."
-        evidence: "models/qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/README.md; club-3090#710; docs/UPSTREAM.md #43559/#48375 row"
+        evidence: "models/_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/README.md; club-3090#710; docs/UPSTREAM.md #43559/#48375 row"
     delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -366,7 +157,7 @@ patches:
     delivery_gaps: []
     delivery_mechanism: install_script
     delivery_spec:
-      script: models/qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/install.sh
+      script: models/_shared/vllm/patches/vllm-pr48375-mamba-drop-eagle-block/install.sh
       mounted_at: /etc/club3090/pr48375
       invoke: "bash /etc/club3090/pr48375/install.sh"
       invoked_before: vllm-serve
@@ -474,15 +265,15 @@ patches:
     # maintainer decision (the fix is engine-wide in gpu_model_runner.py).
     model: [qwen3.8-27b]
     files:
-      - models/qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order/install.sh
-      - models/qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order/patch_gdn_mtp_async_spec_order.py
+      - models/_shared/vllm/patches/vllm-gdn-mtp-async-spec-order/install.sh
+      - models/_shared/vllm/patches/vllm-gdn-mtp-async-spec-order/patch_gdn_mtp_async_spec_order.py
     load_bearing_when:
       - composes:
           - vllm/qwen38-27b-dual-fast
           - vllm/qwen38-27b-multi4-fast
           - vllm/qwen38-27b-multi8-fast
         reason: "Our own 2-line fix for the async wild-write crash (club-3090#1052 / vllm#52873 + the vllm#50021 thread): on a Qwen3-Next hybrid with MTP + prefix caching + async scheduling (vLLM v0.27.1 default), gpu_model_runner.py::synchronize_input_prep waits prepare_inputs_event (recorded BEFORE the forward + spec-decode fused-align postprocess) but not num_accepted_tokens_event (recorded AFTER it), so the next step's _update_states block-table mutation raced the still-in-flight postprocess -> stale state-block index -> wild GPU write (CUDA illegal access / Xid 31 VIRT_WRITE) within 6-13k generated tokens of agent traffic. The fix also waits the postprocess event, closing the write-after-read window; it relocates a wait align-mode already did later, so TPS is neutral. Distinct from vllm#50021 (its in-kernel bounds do NOT fix this - built its head, crashed 2/2) and from vllm#43559/#48375. On-rig validation 2026-08-19 (reference 2x3090, v0.27.1): async-ON survived 3/3 boots to 33-36k generated tokens each (crossing ctx 32k + a compaction) where 5/5 unpatched arms died 6-13k; real delivery path confirmed (switch.sh -> compose mount -> entrypoint install.sh logs '[gdn-async-order] applied'); bench 79.1 narr / 108.5 code / 1756 prefill >= baseline. Does NOT address the separate acceptance-collapse bug (vllm#52873 / Bug A)."
-        evidence: "models/qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order/README.md; club-3090#1052; vllm#52873; docs/UPSTREAM.md"
+        evidence: "models/_shared/vllm/patches/vllm-gdn-mtp-async-spec-order/README.md; club-3090#1052; vllm#52873; docs/UPSTREAM.md"
     delivery:
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -490,7 +281,7 @@ patches:
     delivery_gaps: []
     delivery_mechanism: install_script
     delivery_spec:
-      script: models/qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order/install.sh
+      script: models/_shared/vllm/patches/vllm-gdn-mtp-async-spec-order/install.sh
       mounted_at: /etc/club3090/gdn-async-order
       invoke: "bash /etc/club3090/gdn-async-order/install.sh"
       invoked_before: vllm-serve
@@ -509,19 +300,16 @@ patches:
       drop_when: "an upstream fix for this async race lands AND the vllm-stable pin moves past it (re-run the drift_guard on the new pin, then delete the mount + entrypoint call + this entry). If we file it upstream, change upstream.status to open-rebased-local with the PR link."
 
   - id: qwen-w4a8-int8-act
-    model: [qwen3.6-27b, thinkingcap-27b]
+    model: [thinkingcap-27b]
     files:
-      - models/qwen3.6-27b/vllm/patches/w4a8-int8-act/install.sh
-      - models/qwen3.6-27b/vllm/patches/w4a8-int8-act/patch-inc-w4a8.py
-      - models/qwen3.6-27b/vllm/patches/w4a8-int8-act/patch-negscale-fold.py
+      - models/_shared/vllm/patches/w4a8-int8-act/install.sh
+      - models/_shared/vllm/patches/w4a8-int8-act/patch-inc-w4a8.py
+      - models/_shared/vllm/patches/w4a8-int8-act/patch-negscale-fold.py
     load_bearing_when:
       - composes:
-          - vllm/dual
-          - vllm/minimal
-          - vllm/qwen-27b-multi-fast
           - vllm/thinkingcap-dual-w4a8
         reason: "Enables the STOCK serve-time W4A8 toggle (VLLM_MARLIN_INPUT_DTYPE=int8 — int8 activations on the int4 weights, +50% prefill / decode ~neutral dual (env-only A/B), 8-pack-tied 110/111 vs 109) on auto-round checkpoints: vLLM's inc route silently drops the toggle (bug A), and the int8 kernel reads group scales UNSIGNED while AutoRound emits ~50% negative scales → garbage (bug B; load-time sign-fold, exact except 0.61% of weights). BOTH patches are NO-OPS while the env is unset, so they ship applied-always with zero default-path behavior change. Forensics + measurements: club-3090#609."
-        evidence: "models/qwen3.6-27b/vllm/patches/w4a8-int8-act/README.md; club-3090#609 (c-17664346 + c-17666873); docs/UPSTREAM.md W4A8 rows"
+        evidence: "models/_shared/vllm/patches/w4a8-int8-act/README.md; club-3090#609 (c-17664346 + c-17666873); docs/UPSTREAM.md W4A8 rows"
     delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -529,7 +317,7 @@ patches:
     delivery_gaps: []
     delivery_mechanism: install_script
     delivery_spec:
-      script: models/qwen3.6-27b/vllm/patches/w4a8-int8-act/install.sh
+      script: models/_shared/vllm/patches/w4a8-int8-act/install.sh
       mounted_at: /etc/club3090/w4a8
       invoke: "bash /etc/club3090/w4a8/install.sh"
       invoked_before: vllm-serve
@@ -545,41 +333,6 @@ patches:
       ref: "two vLLM bugs FILED 2026-07-17: inc drops input_dtype = vllm#48904; Marlin unsigned int16 group-scale read = vllm#48905. Forensics club-3090#609."
       status: local-vendored
       drop_when: "both fixes merge upstream and land in the pinned release (re-run the drift_guard on the new pin, then delete the mount + this entry)"
-    status: verified
-
-  - id: qwen-carnice-chat-template
-    deprecated_on: "2026-06-05"
-    deprecation_reason: "carnice fine-tune compose archived to _archive/; orphaned (#254)."
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/carnice-chat-template.jinja
-    load_bearing_when:
-      - composes:
-        reason: "The Carnice v2 INT4 Recipe-D BF16-MTP weights ship a default chat template that mis-emits tool calls; the vendored carnice .jinja makes Carnice output JSON tool calls matched to `--tool-call-parser hermes`. It is behavior-critical (the #145 silent-break class) and was previously invisible to patch-attribution (no patches.yml id / delivery_mechanism / drift_guard). Unlike froggeric it is NOT wired via `--chat-template`: it is bind-mounted OVER the model dir's chat_template.jinja and vLLM auto-loads it (wired_at: volumes only). Qwopus is NOT covered here — it ships its chat_template embedded in tokenizer_config.json, not a separate .jinja."
-        evidence: "models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp/bf16-mtp.yml volumes block + header; docs/UPSTREAM.md (carnice recipe-D)"
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: false
-      entrypoint_invoke: false
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: chat_template
-    delivery_spec:
-      jinja: models/qwen3.6-27b/vllm/patches/carnice-chat-template.jinja
-      mounted_at: /root/.cache/huggingface/carnice-v2-27b-int4-recipe-d-bf16mtp/chat_template.jinja
-      mount_mode: ro
-      invoke: "mount-only: bind-mounted over the model dir's chat_template.jinja; vLLM auto-loads it (no --chat-template arg)"
-      wired_at: [volumes]
-      note: "mount-only chat-template override (vs froggeric's explicit --chat-template wiring); effective coverage is computed from the REAL merged compose graph so a child that !reset/removes the model-dir mount is caught as a coverage loss."
-    drift_guard:
-      kind: behavioral
-      check: "Carnice JSON tool-call smoke (matched to --tool-call-parser hermes) + reasoning-delimiter behavior stays green on the selected nightly with the carnice template mounted over the model dir. Any behavioral/TPS comparison the guard performs MUST use the SELF-CONTAINED symmetric restart+settle protocol: identical `docker restart <container>` on BOTH arms -> wait for /v1/models healthy -> fixed 60s settle -> >=3 bench.sh runs/arm -> compare the GRAND MEAN of the SAME canonical bench segment (NARRATIVE 800-word essay + CODE; never mix segments, never a single run); flag ONLY a deterministic regression reproduced across ALL 3 runs."
-      on_fail: capability-degraded   # serves with the model's default template, minus the hermes-matched tool-call fix
-    capability: chat-template-override
-    foundational: false
-    upstream:
-      ref: club-3090 carnice-v2 recipe-D vendored chat template
-      status: local-vendored
-      drop_when: "the Carnice weights ship a corrected default chat template, OR the override is re-vendored (the same drift_guard must clear the next re-vendor)"
     status: verified
 
   - id: apex-qwen-chat-template

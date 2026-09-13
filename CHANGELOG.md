@@ -16,6 +16,14 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## Unreleased
+
+### 🧹 Maintenance
+
+- retire(catalog): remove qwen3.6-27b, qwen3.6-40b-deckard, and the Carnice fine-tune from the catalog — superseded by qwen3.8-27b for the 27b-class slot (qwen3.6-35b-a3b remains the kept 35B-A3B daily driver); local weights deleted and the 4 shared vLLM patches still needed by qwen3.6-35b-a3b / qwen3.8-27b / tess-4-27b / thinkingcap-27b (froggeric-chat-template, vllm-gdn-mtp-async-spec-order, vllm-pr48375-mamba-drop-eagle-block, w4a8-int8-act) relocated to `models/_shared/vllm/patches/`
+
+---
+
 ## v0.11.0 — 2026-09-10
 
 
